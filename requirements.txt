@@ -1,0 +1,15 @@
+streamlit
+pandas
+numpy
+pykrx
+joblib
+scikit-learn
+transformers
+sentencepiece
+torch
+matplotlib
+
+# 선택 사항: 특정 모델 구동 시 필요
+# xgboost
+# tensorflow
+# pytorch-forecasting
