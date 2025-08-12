@@ -1,3 +1,9 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:9cbdfbb05f94ddaf19edea0b0a580f37c269ea564808fe7f6083daa6e05cf715
-size 14
+# Virtual Environment
+venv/
+
+# Model files
+*.joblib
+
+# Python cache
+__pycache__/
+*.pyc
