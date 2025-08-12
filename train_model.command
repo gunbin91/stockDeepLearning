@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-version https://git-lfs.github.com/spec/v1
-oid sha256:b54727daad5473b0bac5feae44d216af23500c6e0ab19d462bb0ae38a0682a73
-size 960
-=======
 #!/bin/zsh
 
 # 스크립트가 위치한 디렉토리로 이동
@@ -25,4 +20,3 @@ fi
 echo "----------------------------------------------------------------"
 echo "모델 학습이 완료되었습니다."
 read -p "아무 키나 눌러 창을 닫아주세요..."
->>>>>>> origin/window

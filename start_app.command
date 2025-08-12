@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-version https://git-lfs.github.com/spec/v1
-oid sha256:e7b6b3cafd80d042e2a77facc28cf1360c27fbfc508fec4c9664da93f4ecaea2
-size 1037
-=======
 #!/bin/zsh
 
 # 스크립트가 위치한 디렉토리로 이동
@@ -38,4 +33,3 @@ source "$VENV_DIR/bin/activate"
 echo "AI 주식 추천 플랫폼을 시작합니다..."
 echo "웹 브라우저에서 앱이 열릴 때까지 잠시 기다려주세요."
 ./venv/bin/streamlit run app.py
->>>>>>> origin/window

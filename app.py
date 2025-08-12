@@ -54,9 +54,7 @@ def main():
             # --- 최종 결과 표시용 데이터 가공 ---
             display_df = final_ranked_df.copy()
 
-            # ML 예측 확률을 퍼센트(%)로 변환
-            if 'ml_pred_proba' in display_df.columns:
-                display_df['ml_pred_proba'] = (display_df['ml_pred_proba'] * 100).round(2)
+            # ML 예측 확률은 이미 0~100 사이의 값이므로 추가 변환이 필요 없습니다.
 
             # 컬럼 이름에 단위 추가
             rename_map = {

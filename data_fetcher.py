@@ -4,24 +4,39 @@ from pykrx import stock
 from datetime import datetime, timedelta
 import time
 
-def fetch_stock_list():
+def fetch_stock_list(retries=3, delay=2):
     """
     KRX에서 KOSPI와 KOSDAQ의 모든 종목 티커와 이름을 가져옵니다.
+    재시도 로직을 포함하여 일시적인 네트워크 오류에 대응합니다.
     """
     print("KOSPI 및 KOSDAQ 전 종목 리스트를 수집합니다...")
     try:
-        # KOSPI와 KOSDAQ의 모든 티커를 가져옵니다.
-        try:
-            tickers_kospi = stock.get_market_ticker_list(market='KOSPI')
-        except Exception as e:
-            print(f"경고: KOSPI 티커 리스트 조회 실패: {e}")
-            tickers_kospi = []
+        latest_business_day = stock.get_nearest_business_day_in_a_week()
+        
+        tickers_kospi = []
+        tickers_kosdaq = []
 
-        try:
-            tickers_kosdaq = stock.get_market_ticker_list(market='KOSDAQ')
-        except Exception as e:
-            print(f"경고: KOSDAQ 티커 리스트 조회 실패: {e}")
-            tickers_kosdaq = []
+        # KOSPI 티커 조회 (재시도 포함)
+        for i in range(retries):
+            try:
+                tickers_kospi = stock.get_market_ticker_list(latest_business_day, market='KOSPI')
+                print(f"KOSPI 티커 {len(tickers_kospi)}개 수집 성공.")
+                break
+            except Exception as e:
+                print(f"경고: KOSPI 티커 리스트 조회 실패 (시도 {i+1}/{retries}): {e}")
+                if i < retries - 1:
+                    time.sleep(delay)
+        
+        # KOSDAQ 티커 조회 (재시도 포함)
+        for i in range(retries):
+            try:
+                tickers_kosdaq = stock.get_market_ticker_list(latest_business_day, market='KOSDAQ')
+                print(f"KOSDAQ 티커 {len(tickers_kosdaq)}개 수집 성공.")
+                break
+            except Exception as e:
+                print(f"경고: KOSDAQ 티커 리스트 조회 실패 (시도 {i+1}/{retries}): {e}")
+                if i < retries - 1:
+                    time.sleep(delay)
 
         if not tickers_kospi and not tickers_kosdaq:
             print("경고: KOSPI 및 KOSDAQ에서 가져온 티커가 없습니다.")
