@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-version https://git-lfs.github.com/spec/v1
-oid sha256:57dcd888f24974f58c800c4404aa893a1097927be9d9703468d9b438906dabf3
-size 2060
-=======
 import pandas as pd
 import numpy as np
 import joblib
@@ -56,4 +51,3 @@ def predict_with_ml_model(df):
     predicted_df['ml_pred_proba'] = (y_pred_proba * 100).round(2)
     
     return predicted_df
->>>>>>> origin/window

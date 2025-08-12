@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-version https://git-lfs.github.com/spec/v1
-oid sha256:77cd164b2974899741a2b3c93526d10b549c734c6e055abfbf53dffb92154a06
-size 2800
-=======
 import pandas as pd
 
 def calculate_final_score(df):
@@ -33,7 +28,7 @@ def calculate_final_score(df):
         'dl_trend_score(더미)': 0.00, # 딥러닝 (더미 데이터, 영향력 제거)
     }
 
-    # 가중치 합이 1이 되도록 정규화 (영향력 0인 모델 제외)
+    # 가중�� 합이 1이 되도록 정규화 (영향력 0인 모델 제외)
     active_factors = {k: v for k, v in factor_weights.items() if v > 0}
     total_weight = sum(active_factors.values())
     for k in active_factors:
@@ -65,4 +60,3 @@ def calculate_final_score(df):
     final_df['final_score'] = final_df['final_score'].round(2)
 
     return final_df.sort_values(by='최종순위')
->>>>>>> origin/window

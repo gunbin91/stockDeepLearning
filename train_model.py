@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-version https://git-lfs.github.com/spec/v1
-oid sha256:2e93c896e9a17d1d48d68789a045d910751c2fe5d37d737467dc918b8c93c899
-size 5446
-=======
 import pandas as pd
 import numpy as np
 from pykrx import stock
@@ -144,7 +139,7 @@ def train_evaluate_and_save_model(X, y, features, model_path='stock_prediction_m
     }
     
     rf = RandomForestClassifier(random_state=42, n_jobs=-1)
-    # n_iter: 몇 개의 조합을 테스트할지 결정 (예: 20개)
+    # n_iter: 몇 개의 ��합을 테스트할지 결정 (예: 20개)
     # random_state: 재현 가능성을 위해 추가
     random_search = RandomizedSearchCV(
         estimator=rf, 
@@ -224,4 +219,3 @@ if __name__ == '__main__':
             print(predictions)
     else:
         print("학습 데이터 생성에 실패하여 모델링을 진행하지 않습니다.")
->>>>>>> origin/window

@@ -1,9 +1,3 @@
-<<<<<<< HEAD
-version https://git-lfs.github.com/spec/v1
-oid sha256:227850326cbdbf01f80c2d02287afdfb9b707386a872e50f24c4ada837dd5b33
-size 1801
-=======
-
 import pandas as pd
 import numpy as np
 
@@ -34,7 +28,7 @@ def predict_with_deep_learning(df):
     predicted_df['dl_trend_score(더미)'] = np.random.uniform(30, 95, num_stocks).round(2)
     
     # --- 실제 모델 예측 코드 (예시) ---
-    # for stock_code in df['종목코드']:
+    # for stock_code in df['종��코드']:
     #     # 해당 종목의 과거 시계열 데이터 로드
     #     historical_data = load_historical_data(stock_code)
     #     # 모델 입력 형태로 가공
@@ -46,4 +40,3 @@ def predict_with_deep_learning(df):
     #     predicted_df.loc[predicted_df['종목코드'] == stock_code, 'dl_trend_score'] = trend_score
         
     return predicted_df
->>>>>>> origin/window
