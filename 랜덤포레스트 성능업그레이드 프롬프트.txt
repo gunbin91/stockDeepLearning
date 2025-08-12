@@ -1,3 +1,18 @@
+<<<<<<< HEAD
 version https://git-lfs.github.com/spec/v1
 oid sha256:9b0b6d3c2949f4534fe6d8234b5e5c21ee3b292c52707066212ce841b6559e9b
 size 1083
+=======
+1. 데이터셋은 학습/검증/테스트 세트로 나누어 사용.
+2. 피처 엔지니어링:
+   - 수익률(1M), 수익률(3M), 변동성(1M) 외에 PER, PBR, ROE, 거래량 변화율, 거래량 이동평균(5일, 20일), RSI, MACD, 이동평균선(5, 20, 60일), KOSPI/KOSDAQ 지수 변화율을 추가 피처로 사용.
+3. 클래스 불균형 처리:
+   - SMOTE를 사용해 소수 클래스(5% 이상 상승) 오버샘플링 처리.
+4. 하이퍼파라미터 튜닝:
+   - GridSearchCV를 사용해 n_estimators, max_depth, min_samples_split, min_samples_leaf, max_features, class_weight를 최적화.
+   - 평가 지표는 ROC-AUC로 설정.
+5. 최종 모델은 학습 후 테스트 데이터에 대해 정확도, 정밀도, 재현율, F1 점수, ROC-AUC를 모두 출력.
+6. 최적 모델을 joblib으로 저장하고, 저장된 모델을 불러와서 새로운 입력 데이터에 대해 예측 확률을 반환하는 함수도 포함.
+
+코드에는 필요한 모든 import문과 데이터 전처리 과정을 포함하고, 실행 가능한 완전한 형태로 작성해줘.
+>>>>>>> origin/window

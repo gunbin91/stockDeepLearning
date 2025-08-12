@@ -1,3 +1,43 @@
+<<<<<<< HEAD
 version https://git-lfs.github.com/spec/v1
 oid sha256:0fa133ffbff3c71911be0d64ce975a009ffe8568ed3d0259671a4304a0111b29
 size 1781
+=======
+
+# AI 주식 추천 플랫폼 실행 방법 (macOS Zsh 환경 기준)
+
+이 프로젝트를 실행하기 위해 Python 가상 환경을 설정하고 필요한 패키지를 설치해야 합니다.
+
+## 1. 터미널 열기
+macOS에서 터미널(Terminal) 앱을 실행합니다.
+
+## 2. 프로젝트 폴더로 이동
+터미널에서 아래 명령어를 입력하여 이 파일이 있는 폴더로 이동합니다.
+cd /Users/gunbin/Desktop/STOCKTEST
+
+## 3. Python 가상 환경 생성
+아래 명령어를 실행하여 'venv'라는 이름의 가상 환경을 만듭니다.
+python3 -m venv venv
+
+## 4. 가상 환경 활성화
+아래 명령어를 실행하여 가상 환경을 활성화합니다. 활성화되면 프롬프트 앞에 (venv)가 표시됩니다.
+source venv/bin/activate
+
+## 5. 필요 패키지 설치
+아래 명령어를 실행하여 `requirements.txt` 파일에 명시된 모든 라이브러리를 설치합니다.
+pip install -r requirements.txt
+
+## 6. Streamlit 앱 실행
+모든 준비가 완료되었습니다. 아래 명령어를 실행하여 웹 애플리케이션을 시작하세요.
+streamlit run app.py
+
+실행 후 터미널에 나타나는 URL( 보통 http://localhost:8501 )을 웹 브라우저에서 열면 플랫폼을 사용할 수 있습니다.
+
+## 7. 종료 방법
+- 터미널에서 `Ctrl + C`를 눌러 서버를 중지할 수 있습니다.
+- 가상 환경을 비활성화하려면 터미널에 `deactivate`를 입력하세요.
+
+---
+**참고: `start_app.command` 파일을 이용한 원클릭 실행**
+- 터미널에서 `chmod +x start_app.command` 명령어를 한 번만 실행하여 파일에 실행 권한을 부여하면, 그 이후부터는 Finder에서 `start_app.command` 파일을 더블클릭하는 것만으로 앱을 실행할 수 있습니다.
+>>>>>>> origin/window
