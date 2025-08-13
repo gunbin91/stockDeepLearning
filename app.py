@@ -19,17 +19,31 @@ def main():
 
     if st.button("실제 데이터 수집 및 분석 시작"):
         with st.spinner("데이터 수집 및 분석 중... (최대 5분 소요)"):
-            # 1. 모든 데이터 수집 (재무, 수급, 모멘텀)
-            all_data_df = data_fetcher.fetch_all_data(stock_list_df)
+            # <<< 개선점: 데이터 처리 로직 수정 >>>
+            # 1. 모든 데이터 수집
+            # fetch_all_data는 이제 두 개의 데이터프레임을 반환한다고 가정합니다.
+            # 1) ml_feature_df: ML 모델 예측에 필요한 원본 피처들이 있는 데이터프레임
+            # 2) factor_base_df: 팩터 점수 계산에 필요한 재무, 수급, 가격 데이터가 있는 데이터프레임
+            ml_feature_df, factor_base_df, all_price_data = data_fetcher.fetch_all_data(stock_list_df)
+            
+            # 2. 팩터 점수 계산
             st.write("### 2. 팩터 점수 계산")
-            scored_df = scoring.calculate_factor_scores(all_data_df)
+            # 팩터 점수는 factor_base_df를 기반으로 계산
+            scored_df = scoring.calculate_factor_scores(factor_base_df, all_price_data)
             st.dataframe(scored_df.head())
 
             # 3. 머신러닝 예측
             st.write("### 3. 머신러닝 예측")
-            # 함수 이름 변경: predict_with_xgboost -> predict_with_ml_model
-            ml_predicted_df = ml_model.predict_with_ml_model(scored_df)
-            st.dataframe(ml_predicted_df.head())
+            # ML 모델 예측은 ml_feature_df를 사용
+            # predict_with_ml_model 함수는 내부적으로 모델을 로드하고, ml_feature_df에서 필요한 피처만 선택하여 예측
+            ml_predicted_df = ml_model.predict_with_ml_model(ml_feature_df)
+            st.dataframe(ml_predicted_df.head()) # '종목코드', 'ml_pred_proba' 컬럼 등이 있을 것으로 예상
+
+            # --- 예측 결과와 팩터 점수 데이터 병합 ---
+            # ml_predicted_df와 scored_df를 '종목코드' 기준으로 병합
+            # 이 작업을 통해 각 종목의 팩터 점수와 ML 예측 확률을 하나의 DataFrame으로 합침
+            # (두 DataFrame에 공통된 '종목코드' 또는 '종목명' 컬럼이 있어야 함)
+            merged_df = pd.merge(scored_df, ml_predicted_df, on='종목코드', how='left')
 
             # 4. 딥러닝 시계열 예측 (더미 데이터 사용)
             st.write("### 4. 딥러닝 시계열 예측 (더미)")
@@ -54,7 +68,9 @@ def main():
             # --- 최종 결과 표시용 데이터 가공 ---
             display_df = final_ranked_df.copy()
 
-            # ML 예측 확률은 이미 0~100 사이의 값이므로 추가 변환이 필요 없습니다.
+            # scikit-learn의 predict_proba는 0~1 사이의 확률을 반환하므로 100을 곱해 %로 변환
+            if 'ml_pred_proba' in display_df.columns:
+                 display_df['ml_pred_proba'] = display_df['ml_pred_proba'] * 100
 
             # 컬럼 이름에 단위 추가
             rename_map = {
