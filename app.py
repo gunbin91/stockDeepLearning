@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import time
 
 # 사용자 정의 모듈 임포트
 import data_fetcher
@@ -14,7 +15,26 @@ def main():
     st.title("주식 추천 시스템")
 
     st.write("### 1. 종목 데이터 수집")
-    stock_list_df = data_fetcher.fetch_stock_list() # 전 종목
+    
+    MAX_RETRIES = 5
+    RETRY_DELAY_SECONDS = 5 # 재시도 간격 (초)
+
+    stock_list_df = pd.DataFrame() # 빈 데이터프레임으로 초기화
+
+    with st.spinner("전체 종목 목록을 API로부터 수신하는 중..."):
+        for attempt in range(MAX_RETRIES):
+            stock_list_df = data_fetcher.fetch_stock_list()
+            if not stock_list_df.empty:
+                st.success("종목 목록 수신 완료!")
+                break
+            
+            st.warning(f"API 통신에 실패했습니다 ({attempt + 1}/{MAX_RETRIES}). {RETRY_DELAY_SECONDS}초 후 재시도합니다...")
+            time.sleep(RETRY_DELAY_SECONDS)
+        
+    if stock_list_df.empty:
+        st.error("API 통신 오류: 최대 재시도 횟수를 초과했습니다. 서버 상태를 확인하거나 잠시 후 페이지를 새로고침해주세요.")
+        st.stop()
+
     st.dataframe(stock_list_df.head())
 
     if st.button("실제 데이터 수집 및 분석 시작"):
@@ -24,12 +44,17 @@ def main():
             # fetch_all_data는 이제 두 개의 데이터프레임을 반환한다고 가정합니다.
             # 1) ml_feature_df: ML 모델 예측에 필요한 원본 피처들이 있는 데이터프레임
             # 2) factor_base_df: 팩터 점수 계산에 필요한 재무, 수급, 가격 데이터가 있는 데이터프레임
-            ml_feature_df, factor_base_df, all_price_data = data_fetcher.fetch_all_data(stock_list_df)
+            ml_feature_df, factor_base_df = data_fetcher.fetch_all_data(stock_list_df)
+            
+            # 데이터 수집 실패 시 처리
+            if factor_base_df.empty:
+                st.error("데이터를 수집하는 데 실패했거나 분석할 종목이 없습니다. 잠시 후 다시 시도해주세요.")
+                st.stop()
             
             # 2. 팩터 점수 계산
             st.write("### 2. 팩터 점수 계산")
             # 팩터 점수는 factor_base_df를 기반으로 계산
-            scored_df = scoring.calculate_factor_scores(factor_base_df, all_price_data)
+            scored_df = scoring.calculate_factor_scores(factor_base_df)
             st.dataframe(scored_df.head())
 
             # 3. 머신러닝 예측
@@ -37,6 +62,12 @@ def main():
             # ML 모델 예측은 ml_feature_df를 사용
             # predict_with_ml_model 함수는 내부적으로 모델을 로드하고, ml_feature_df에서 필요한 피처만 선택하여 예측
             ml_predicted_df = ml_model.predict_with_ml_model(ml_feature_df)
+            
+            # 모델 로드 실패 시 분석 중단
+            if ml_predicted_df is None:
+                st.error("머신러닝 모델 예측에 실패했습니다. 콘솔 로그를 확인해주세요.")
+                st.stop()
+
             st.dataframe(ml_predicted_df.head()) # '종목코드', 'ml_pred_proba' 컬럼 등이 있을 것으로 예상
 
             # --- 예측 결과와 팩터 점수 데이터 병합 ---
@@ -48,7 +79,7 @@ def main():
             # 4. 딥러닝 시계열 예측 (더미 데이터 사용)
             st.write("### 4. 딥러닝 시계열 예측 (더미)")
             # dl_model은 현재 더미 데이터를 반환하도록 유지
-            dl_predicted_df = dl_model.predict_with_deep_learning(ml_predicted_df)
+            dl_predicted_df = dl_model.predict_with_deep_learning(merged_df)
             st.dataframe(dl_predicted_df.head())
 
             # 5. 뉴스 감성 분석 (임시 비활성화)

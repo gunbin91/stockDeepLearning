@@ -110,7 +110,7 @@ def create_training_data(today_str, period_days=365*3):
     return X, y, features
 
 # --- 2. 모델 학습, 튜닝 및 평가 (이하 부분은 기존과 동일) ---
-def train_evaluate_and_save_model(X, y, features, n_jobs=2, model_path='stock_prediction_model_rf_upgraded.joblib'):
+def train_evaluate_and_save_model(X, y, features, n_jobs=2, n_iter=10, model_path='stock_prediction_model_rf_upgraded.joblib'):
     if X is None or y is None or X.empty or y.empty:
         print("학습 데이터가 없어 모델링을 건너뜁니다.")
         return
@@ -126,9 +126,10 @@ def train_evaluate_and_save_model(X, y, features, n_jobs=2, model_path='stock_pr
     print(f"SMOTE 적용 후 학습 데이터 타겟 분포:\n{y_train_res.value_counts(normalize=True)}")
 
     print("\nRandomizedSearchCV를 사용하여 최적의 하이퍼파라미터를 탐색합니다...")
+    # 메모리 오류 방지를 위해 하이퍼파라미터 범위 조정
     param_dist = {
-        'n_estimators': randint(100, 300),
-        'max_depth': [10, 20, 30, 40, None],
+        'n_estimators': randint(100, 200),
+        'max_depth': [10, 20, 30], # None 제거
         'min_samples_split': randint(2, 11),
         'min_samples_leaf': randint(1, 5),
         'max_features': ['sqrt', 'log2']
@@ -138,7 +139,7 @@ def train_evaluate_and_save_model(X, y, features, n_jobs=2, model_path='stock_pr
     random_search = RandomizedSearchCV(
         estimator=rf, 
         param_distributions=param_dist, 
-        n_iter=20, 
+        n_iter=n_iter, # 사용자 입력값으로 변경
         cv=3, 
         scoring='roc_auc', 
         verbose=2, 
@@ -201,6 +202,22 @@ if __name__ == '__main__':
         except ValueError:
             print("에러: 숫자를 입력해야 합니다.")
 
+    # n_iter 값 입력 받기
+    default_n_iter = 10
+    while True:
+        try:
+            user_input = input(f"RandomizedSearchCV의 n_iter 값을 입력하세요 (추천/기본값: {default_n_iter}): ")
+            if user_input == "":
+                num_iter = default_n_iter
+                break
+            num_iter = int(user_input)
+            if num_iter > 0:
+                break
+            else:
+                print("에러: 1 이상의 값을 입력해야 합니다.")
+        except ValueError:
+            print("에러: 숫자를 입력해야 합니다.")
+
     # <<< 1차 수정사항: 안정적으로 최신 영업일 찾는 로직 >>>
     print("\n가장 최근의 영업일을 탐색합니다...")
     try:
@@ -213,7 +230,7 @@ if __name__ == '__main__':
     X, y, features = create_training_data(today_str)
 
     if X is not None and y is not None:
-        train_evaluate_and_save_model(X, y, features, n_jobs=num_jobs)
+        train_evaluate_and_save_model(X, y, features, n_jobs=num_jobs, n_iter=num_iter)
         print("\n--- 저장된 모델 로드 및 예측 테스트 ---")
         sample_data = X.head()
         predictions = load_and_predict(sample_data)
