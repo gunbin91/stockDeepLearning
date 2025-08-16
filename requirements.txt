@@ -11,8 +11,5 @@ torch
 matplotlib
 imbalanced-learn
 pandas-ta
-
-# 선택 사항: 특정 모델 구동 시 필요
-# xgboost
-# tensorflow
-# pytorch-forecasting
+finance-datareader
+dart-fss

@@ -17,7 +17,8 @@ if [ ! -d "$VENV_DIR" ]; then
   
   # 기본 요구사항 설치
   pip install -r requirements.txt
-  
+  pip install pandas-ta
+
   # NLP 관련 패키지 추가 설치 (requirements.txt에 주석 처리되어 있으므로 별도 명시)
   pip install 'transformers[torch]' sentencepiece
   
@@ -28,6 +29,12 @@ fi
 
 # 가상 환경 활성화
 source "$VENV_DIR/bin/activate"
+
+# 최신 패키지 설치
+echo "최신 패키지를 설치합니다..."
+pip install -r requirements.txt
+pip install pandas-ta
+pip install 'transformers[torch]' sentencepiece
 
 # Streamlit 앱 실행
 echo "AI 주식 추천 플랫폼을 시작합니다..."

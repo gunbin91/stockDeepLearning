@@ -14,6 +14,13 @@ if [ ! -d "venv" ]; then
   echo "[오류] venv 가상환경을 찾을 수 없습니다."
   echo "먼저 ./start_app.command 를 실행하여 가상환경을 생성해주세요."
 else
+  # 최신 패키지 설치
+  echo "최신 패키지를 설치합니다..."
+  ./venv/bin/pip install -r requirements.txt
+  ./venv/bin/pip install pandas-ta
+  ./venv/bin/pip install 'transformers[torch]' sentencepiece
+
+  echo "패키지 설치 완료. 모델 학습을 시작합니다."
   ./venv/bin/python train_model.py
 fi
 
