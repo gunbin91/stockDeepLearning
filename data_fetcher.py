@@ -1,14 +1,13 @@
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
-import dart_fss as dart
+import requests
+import time
 from datetime import datetime, timedelta
 import pandas_ta as ta
 import concurrent.futures
 from tqdm import tqdm
+import os
 
 # -----------------------------------------------------------------------------
 # ⚠️ [필수] 여기에 발급받은 DART API 인증키를 입력하세요!
@@ -16,110 +15,98 @@ from tqdm import tqdm
 DART_API_KEY = "03ac38be54eb9bb095c2304b254c756ebe73c522"
 # -----------------------------------------------------------------------------
 
-# DART API 키 설정
-if DART_API_KEY != "여기에_발급받은_DART_인증키를_붙여넣으세요":
-    dart.set_api_key(api_key=DART_API_KEY)
-else:
-    print("="*80); print(" [경고] data_fetcher.py 파일에 DART API 키를 입력해야 합니다. "); print("="*80)
-
-def get_all_financial_data(stock_list, year):
-    """지정한 연도의 모든 상장기업 재무제표를 DART에서 일괄 수집합니다."""
+def get_latest_annual_fs_http(stock_list):
+    """'다중회사 주요계정' API를 직접 HTTP 통신으로 호출하여 재무 데이터를 가져옵니다."""
     if DART_API_KEY == "여기에_발급받은_DART_인증키를_붙여넣으세요":
+        print("DART API 키가 설정되지 않아 재무 데이터를 수집할 수 없습니다.")
         return pd.DataFrame()
+        
+    try:
+        df_corp_map = pd.read_csv('corp_code_map.csv', dtype={'corp_code': str, '종목코드': str})
+    except FileNotFoundError:
+        print("[오류] 'corp_code_map.csv' 파일을 찾을 수 없습니다.")
+        print("사전 준비 단계의 'make_corp_map.py' 스크립트를 먼저 실행하여 파일을 생성해주세요.")
+        return pd.DataFrame()
+        
+    # stock_list와 corp_code_map을 병합하여 DART 고유번호를 가져옴
+    target_stocks = pd.merge(stock_list, df_corp_map, on='종목코드')
+    corp_codes = target_stocks['corp_code'].unique().tolist()
     
-    try:
+    year = str(datetime.now().year - 1)
+    print(f"HTTP 통신을 통해 {year}년 재무 데이터 수집을 시작합니다.")
+    
+    all_fs_data = []
+    
+    # API가 한 번에 100개까지만 corp_code를 받으므로, 100개씩 나누어 요청
+    for i in tqdm(range(0, len(corp_codes), 100), desc=f"{year}년 재무 데이터 수집"):
+        corp_code_chunk = corp_codes[i:i+100]
+        corp_code_str = ','.join(corp_code_chunk)
         
-        corp_list = dart.get_corp_list()
+        url = "https://opendart.fss.or.kr/api/fnlttMultiAcnt.json"
+        params = {
+            'crtfc_key': DART_API_KEY,
+            'corp_code': corp_code_str,
+            'bsns_year': year,
+            'reprt_code': '11011', # 사업보고서
+        }
         
-        all_fs_data = []
-        
-        MAX_WORKERS_FS = 4 # DART API 호출 제한을 고려하여 워커 수 설정
-        
-        def _fetch_single_fs_data(corp_obj, stock_code_fdr, year, required_accounts):
-            try:
-                corp_code = corp_obj.corp_code
-                fs = dart.fs.extract(corp_code=corp_code, bgn_de=f'{year}0101', fs_tp=('bs', 'is'))
-                
-                if fs is not None:
-                    bs_df = fs['bs']
-                    is_df = fs['is']
-                    
-                    combined_fs = pd.concat([bs_df, is_df], ignore_index=True)
-                    
-                    filtered_fs = combined_fs[combined_fs['account_nm'].isin(required_accounts)]
-                    
-                    if not filtered_fs.empty:
-                        filtered_fs['stock_code'] = stock_code_fdr
-                        filtered_fs['corp_name'] = corp_obj.corp_name
-                        return filtered_fs
-                return None
-            except Exception as e:
-                print(f"Error fetching data for {stock_code_fdr} ({corp_code}): {e}")
-                return None
-
-        all_fs_data = []
-        futures = []
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS_FS) as executor:
-            required_accounts = ['자산총계', '부채총계', '자본총계', '당기순이익']
-            for index, row in stock_list.iterrows():
-                stock_code_fdr = row['종목코드']
-                corp_obj = corp_list.find_by_stock_code(stock_code_fdr)
-                
-                if corp_obj is None:
-                    continue
-                
-                futures.append(executor.submit(_fetch_single_fs_data, corp_obj, stock_code_fdr, year, required_accounts))
+        try:
+            res = requests.get(url, params=params)
+            res.raise_for_status() # HTTP 오류가 발생하면 예외 발생
+            data = res.json()
             
-            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"{year}년 재무 데이터 수집"):
-                result = future.result()
-                if result is not None:
-                    all_fs_data.append(result)
+            if data.get('status') == '000':
+                all_fs_data.extend(data['list'])
+        except requests.exceptions.RequestException as e:
+            print(f"API 요청 중 오류 발생 (건너뜀): {e}")
+            continue
+        except ValueError: # JSON 디코딩 오류
+            print(f"API 응답 JSON 파싱 오류 (건너뜀)")
+            continue
+            
+        time.sleep(0.2) # API 서버 부하 감소를 위한 지연
 
-        if not all_fs_data:
-            print(f"{year}년 재무 데이터 수집에 실패했습니다.")
-            return pd.DataFrame()
-
-        combined_df = pd.concat(all_fs_data, ignore_index=True)
-        
-        fs_pivot = combined_df.pivot_table(index=['stock_code', 'corp_name'], 
-                                         columns='account_nm', 
-                                         values='thstrm_amount').reset_index()
-
-        required_accounts_final = ['자산총계', '부채총계', '자본총계', '당기순이익']
-        for col in required_accounts_final:
-            if col in fs_pivot.columns:
-                fs_pivot[col] = pd.to_numeric(fs_pivot[col].str.replace(',', ''), errors='coerce')
-        
-        fs_pivot.rename(columns={'stock_code':'종목코드'}, inplace=True)
-        print(f"✅ {year}년 재무 데이터 수집 및 처리 완료: {len(fs_pivot)}개 기업")
-        return fs_pivot[['종목코드'] + required_accounts_final]
-        
-    except Exception as e:
-        print(f"DART 데이터 전체 수집 중 오류 발생: {e}")
+    if not all_fs_data:
         return pd.DataFrame()
+        
+    fs_df = pd.DataFrame(all_fs_data)
+    
+    required_accounts = ['당기순이익', '자본총계']
+    fs_df = fs_df[fs_df['account_nm'].isin(required_accounts)]
+    
+    # 금액 콤마 제거 및 숫자로 변환
+    fs_df['thstrm_amount'] = pd.to_numeric(fs_df['thstrm_amount'].str.replace(',', ''), errors='coerce')
+
+    fs_pivot = fs_df.pivot_table(index='stock_code', columns='account_nm', values='thstrm_amount').reset_index()
+    fs_pivot.rename(columns={'stock_code':'종목코드'}, inplace=True)
+    
+    print(f"✅ {year}년 재무 데이터 수집 및 처리 완료: {len(fs_pivot)}개 기업")
+    return fs_pivot
 
 
+# 나머지 함수들은 이전과 동일 (fetch_stock_list, fetch_and_process_ticker_data, fetch_all_data)
 def fetch_stock_list():
-    """FinanceDataReader를 사용하여 KOSPI와 KOSDAQ의 전 종목 리스트를 수집합니다."""
-    print("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 리스트를 수집합니다...")
+    """FinanceDataReader를 사용하여 KOSPI와 KOSDAQ의 전 종목 리스트와 시가총액 정보를 수집합니다."""
+    print("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보를 수집합니다 (KRX-MARCAP)...")
     try:
-        df_krx = fdr.StockListing('KRX')
-        df_krx = df_krx[df_krx['Market'].isin(['KOSPI', 'KOSDAQ']) & 
-                        df_krx['Code'].str.match(r'^\d{6}$') & 
-                        ~df_krx['Name'].str.contains('스팩|리츠')].copy()
-        if 'Shares' in df_krx.columns:
-            stock_list = df_krx[['Code', 'Name', 'Shares']].copy()
-            stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명', 'Shares': '상장주식수'}, inplace=True)
-        else:
-            stock_list = df_krx[['Code', 'Name']].copy()
-            stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명'}, inplace=True)
-            stock_list['상장주식수'] = np.nan
-            print("경고: 'Shares' 컬럼을 찾을 수 없어 '상장주식수'를 NaN으로 설정합니다.")
+        # KRX-MARCAP을 사용하여 시가총액, 상장주식수 정보를 가져옴
+        df_marcap = fdr.StockListing('KRX-MARCAP') # Defaults to latest date
+        
+        # 스팩, 리츠 등 제외
+        df_marcap = df_marcap[~df_marcap['Name'].str.contains('스팩|리츠')].copy()
+        
+        # 필요한 컬럼 선택 및 이름 변경
+        # 'Stocks' 컬럼이 상장주식수를 의미함
+        stock_list = df_marcap[['Code', 'Name', 'Stocks']].copy()
+        stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명', 'Stocks': '상장주식수'}, inplace=True)
+        
+        # 상장주식수가 0인 경우 제외 (관리종목 등)
+        stock_list = stock_list[stock_list['상장주식수'] > 0]
+
         print(f"총 {len(stock_list)}개 종목을 찾았습니다.")
         return stock_list
     except Exception as e:
-        print(f"FinanceDataReader API 통신 실패: {e}")
+        print(f"FinanceDataReader API 통신 실패 (KRX-MARCAP): {e}")
         return pd.DataFrame(columns=['종목코드', '종목명', '상장주식수'])
 
 
@@ -159,8 +146,6 @@ def fetch_and_process_ticker_data(stock_info, start_date, end_date, latest_fs_df
         latest_data['PBR'] = market_cap / total_equity if total_equity and total_equity > 0 else np.nan
         latest_data['ROE'] = net_income / total_equity if total_equity and total_equity > 0 else np.nan
         
-        latest_data['기관순매수(억)'] = 0
-        latest_data['외국인순매수(억)'] = 0
         return latest_data
     except Exception:
         return None
@@ -171,15 +156,13 @@ def fetch_all_data(stock_list):
     end_date = today.strftime('%Y-%m-%d')
     start_date = (today - timedelta(days=400)).strftime('%Y-%m-%d')
     
-    latest_fs_year = today.year - 1
-    latest_fs_df = get_all_financial_data(stock_list, latest_fs_year)
+    latest_fs_df = get_latest_annual_fs_http(stock_list)
 
     if latest_fs_df.empty:
         print("재무 데이터 수집에 실패하여 분석을 중단합니다.")
         return pd.DataFrame(), pd.DataFrame()
 
     all_feature_data = []
-    failed_tickers = []
     MAX_WORKERS = 8
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -188,16 +171,12 @@ def fetch_all_data(stock_list):
             for row in stock_list.to_dict('records')
         }
         for future in tqdm(concurrent.futures.as_completed(future_to_stock), total=len(stock_list), desc="전 종목 피처 생성"):
-            stock_info = future_to_stock[future]
             try:
                 result = future.result()
                 if result: all_feature_data.append(result)
-                else: failed_tickers.append(stock_info['종목명'])
-            except Exception: failed_tickers.append(stock_info['종목명'])
+            except Exception:
+                continue
 
-    print(f"\n✅ 최종 분석 대상: {len(all_feature_data)} 종목")
-    if failed_tickers: print(f"❌ 데이터 부족/실패로 제외: {len(failed_tickers)} 종목")
-    
     if not all_feature_data: return pd.DataFrame(), pd.DataFrame()
 
     final_df = pd.DataFrame(all_feature_data)
