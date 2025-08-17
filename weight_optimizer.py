@@ -62,6 +62,17 @@ def prepare_full_data(start_date, end_date):
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(target_stocks), desc="피처 데이터 생성"):
             result_df = future.result()
             if result_df is not None:
+                # 인덱스가 DatetimeIndex인지 확인하고 'date'라는 컬럼으로 리셋
+                if isinstance(result_df.index, pd.DatetimeIndex):
+                    # 인덱스에 이름이 있다면 임시로 저장한 다음 리셋
+                    original_index_name = result_df.index.name
+                    result_df.reset_index(inplace=True)
+                    # 새 컬럼의 이름이 'date'가 아니라면 'date'로 변경
+                    if original_index_name is not None and original_index_name != 'date':
+                        result_df.rename(columns={original_index_name: 'date'}, inplace=True)
+                    elif original_index_name is None: # 이름이 없었다면 기본적으로 'index'가 됨
+                        result_df.rename(columns={'index': 'date'}, inplace=True)
+                
                 all_data.append(result_df)
 
     if not all_data:
@@ -69,11 +80,20 @@ def prepare_full_data(start_date, end_date):
 
     final_df = pd.concat(all_data)
     final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    final_df.dropna(inplace=True) # 계산 과정에서 생긴 결측치 제거
     
-    # 날짜를 인덱스로 설정
-    final_df.index = pd.to_datetime(final_df.index)
-    final_df.sort_index(inplace=True)
+    # 'date'가 인덱스이고 컬럼으로 필요하다면 리셋
+    if 'date' not in final_df.columns and final_df.index.name == 'date':
+        final_df.reset_index(inplace=True)
+    
+    # '종목코드'가 MultiIndex의 일부라면 리셋하여 컬럼으로 만듦
+    if isinstance(final_df.index, pd.MultiIndex) and '종목코드' in final_df.index.names:
+        final_df.reset_index(level='종목코드', inplace=True)
+    
+    # 'date'와 '종목코드' 컬럼에 NaN이 있는 행은 제거 (병합의 핵심 키이므로)
+    final_df.dropna(subset=['date', '종목코드'], inplace=True)
+    
+    final_df['date'] = pd.to_datetime(final_df['date'])
+    final_df.sort_values(by=['date', '종목코드'], inplace=True)
     
     print("데이터 준비 완료.")
     return final_df
@@ -86,8 +106,13 @@ def get_model_and_data():
     full_data_df = prepare_full_data(TRAIN_START_DATE, VALIDATION_END_DATE)
 
     # --- 2. 훈련/검증 데이터 분리 ---
-    train_df = full_data_df[full_data_df.index <= TRAIN_END_DATE]
-    validation_df = full_data_df[full_data_df.index >= VALIDATION_START_DATE]
+    # 날짜 문자열을 datetime 객체로 변환하여 비교
+    train_end_date_dt = pd.to_datetime(TRAIN_END_DATE)
+    validation_start_date_dt = pd.to_datetime(VALIDATION_START_DATE)
+
+    # 'date' 컬럼을 사용하여 필터링
+    train_df = full_data_df[full_data_df['date'] <= train_end_date_dt]
+    validation_df = full_data_df[full_data_df['date'] >= validation_start_date_dt]
     print(f"  - 훈련 데이터({TRAIN_START_DATE}~{TRAIN_END_DATE}) {len(train_df)} 행 준비 완료.")
     print(f"  - 검증 데이터({VALIDATION_START_DATE}~{VALIDATION_END_DATE}) {len(validation_df)} 행 준비 완료.")
 
