@@ -122,9 +122,25 @@ def fetch_and_process_ticker_data(stock_info, start_date, end_date, latest_fs_df
         df_price.rename(columns={'Close':'종가', 'Volume':'거래량'}, inplace=True)
         
         df = df_price.copy()
+        df['수익률(1W)'] = df['종가'].pct_change(periods=5)
+        df['수익률(2W)'] = df['종가'].pct_change(periods=10)
         df['수익률(1M)'] = df['종가'].pct_change(periods=20)
         df['수익률(3M)'] = df['종가'].pct_change(periods=60)
         df['변동성(1M)'] = df['종가'].rolling(window=20).std() / df['종가'].rolling(window=20).mean()
+        
+        # 거래대금
+        df['거래대금'] = df['종가'] * df['거래량']
+        df['거래대금_MA20'] = df['거래대금'].rolling(window=20).mean()
+
+        # 단기 추세 강도 (단기 정배열)
+        df['MA5'] = df['종가'].rolling(window=5).mean()
+        df['MA20'] = df['종가'].rolling(window=20).mean()
+        df['단기 정배열'] = (df['MA5'] > df['MA20']).astype(int)
+
+        # 신고가 근접도 (52주_신고가_비율)
+        df['52주_최고가'] = df['종가'].rolling(window=250).max() # 약 1년 거래일
+        df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
+        
         df.ta.rsi(close='종가', length=14, append=True)
         df.ta.macd(close='종가', fast=12, slow=26, signal=9, append=True)
 
@@ -135,6 +151,13 @@ def fetch_and_process_ticker_data(stock_info, start_date, end_date, latest_fs_df
         latest_data['종목코드'] = stock_info['종목코드']
         latest_data['종목명'] = stock_info['종목명']
         latest_data['현재가'] = df.iloc[-1]['종가']
+
+        # 추가된 피처들
+        latest_data['수익률(1W)'] = df['수익률(1W)'].iloc[-1]
+        latest_data['수익률(2W)'] = df['수익률(2W)'].iloc[-1]
+        latest_data['거래대금_MA20'] = df['거래대금_MA20'].iloc[-1]
+        latest_data['단기 정배열'] = df['단기 정배열'].iloc[-1]
+        latest_data['52주_신고가_비율'] = df['52주_신고가_비율'].iloc[-1]
 
         market_cap = latest_data['현재가'] * shares
         latest_data['시가총액'] = market_cap / 1_0000_0000

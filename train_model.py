@@ -108,13 +108,29 @@ def fetch_and_process_ticker_data(stock_info, start_date, end_date, all_fs_data)
         df['PBR'] = df['시가총액'] / df['자본총계']
         df['ROE'] = df['당기순이익'] / df['자본총계']
         
+        df['수익률(1W)'] = df['종가'].pct_change(periods=5)
+        df['수익률(2W)'] = df['종가'].pct_change(periods=10)
         df['수익률(1M)'] = df['종가'].pct_change(periods=20)
         df['수익률(3M)'] = df['종가'].pct_change(periods=60)
         df['변동성(1M)'] = df['종가'].rolling(window=20).std() / df['종가'].rolling(window=20).mean()
+        
+        # 거래대금
+        df['거래대금'] = df['종가'] * df['거래량']
+        df['거래대금_MA20'] = df['거래대금'].rolling(window=20).mean()
+
+        # 단기 추세 강도 (단기 정배열)
+        df['MA5'] = df['종가'].rolling(window=5).mean()
+        df['MA20'] = df['종가'].rolling(window=20).mean()
+        df['단기 정배열'] = (df['MA5'] > df['MA20']).astype(int)
+
+        # 신고가 근접도 (52주_신고가_비율)
+        df['52주_최고가'] = df['종가'].rolling(window=250).max() # 약 1년 거래일
+        df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
+        
         df.ta.rsi(close='종가', length=14, append=True)
         df.ta.macd(close='종가', fast=12, slow=26, signal=9, append=True)
         
-        df['target'] = (df['종가'].shift(-20) / df['종가'] > 1.05).astype(int)
+        df['target'] = (df['종가'].shift(-15) / df['종가'] > 1.08).astype(int)
         df['종목코드'] = ticker
         return df
     except Exception:
@@ -153,8 +169,8 @@ def create_training_data(stock_list, period_days=365*3):
     final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     
     features = [
-        '수익률(1M)', '수익률(3M)', '변동성(1M)', 'PER', 'PBR', 'ROE', 'RSI_14',
-        'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9',
+        '수익률(1W)', '수익률(2W)', '수익률(1M)', '수익률(3M)', '변동성(1M)', 'PER', 'PBR', 'ROE', 'RSI_14',
+        'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9', '거래대금_MA20', '단기 정배열', '52주_신고가_비율'
     ]
     target = 'target'
     
