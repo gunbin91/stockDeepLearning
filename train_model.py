@@ -10,7 +10,6 @@ from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, roc_auc_score
 from scipy.stats import randint
-from imblearn.over_sampling import SMOTE
 import concurrent.futures
 from tqdm import tqdm
 import warnings
@@ -130,7 +129,7 @@ def fetch_and_process_ticker_data(stock_info, start_date, end_date, all_fs_data)
         df.ta.rsi(close='종가', length=14, append=True)
         df.ta.macd(close='종가', fast=12, slow=26, signal=9, append=True)
         
-        df['target'] = (df['종가'].shift(-15) / df['종가'] > 1.08).astype(int)
+        df['target'] = (df['종가'].shift(-15) / df['종가'] > 1.05).astype(int)
         df['종목코드'] = ticker
         return df
     except Exception:
@@ -191,17 +190,16 @@ def train_evaluate_and_save_model(X, y, features, n_jobs, n_iter, max_depth_list
     print("모델 학습 및 평가를 시작합니다...")
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
 
-    print("\nSMOTE 적용 전 학습 데이터 타겟 분포:\n", y_train.value_counts(normalize=True))
-    smote = SMOTE(random_state=42)
-    X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
-    print("\nSMOTE 적용 후 학습 데이터 타겟 분포:\n", y_train_res.value_counts(normalize=True))
+    print("\n학습 데이터 타겟 분포:\n", y_train.value_counts(normalize=True))
 
     # RandomizedSearchCV를 위한 파라미터 분포 설정
     param_dist = {
         'n_estimators': randint(100, 500),
         'max_depth': max_depth_list,
         'min_samples_split': randint(2, 20),
-        'min_samples_leaf': randint(1, 20)
+        'min_samples_leaf': randint(1, 20),
+        'max_samples': [0.7, 0.8, 0.9, None],
+        'min_impurity_decrease': [0.0, 1e-7, 1e-6]
     }
 
     print("\nRandomizedSearchCV를 사용하여 최적 파라미터 탐색...")
@@ -210,21 +208,28 @@ def train_evaluate_and_save_model(X, y, features, n_jobs, n_iter, max_depth_list
     print(f"- max_depth: {max_depth_list} 중에서 선택")
     print(f"- min_samples_split: 2 ~ 20 사이의 임의의 값")
     print(f"- min_samples_leaf: 1 ~ 20 사이의 임의의 값")
+    print(f"- max_samples: [0.7, 0.8, 0.9, None] 중에서 선택")
+    print(f"- min_impurity_decrease: [0.0, 1e-7, 1e-6] 중에서 선택")
 
-    model = RandomForestClassifier(random_state=42)
+    model = RandomForestClassifier(random_state=42, class_weight='balanced', oob_score=True)
 
     # RandomizedSearchCV 설정
     random_search = RandomizedSearchCV(estimator=model, param_distributions=param_dist,
                                        n_iter=n_iter, cv=3, n_jobs=n_jobs, 
                                        verbose=2, random_state=42, scoring='roc_auc')
 
-    random_search.fit(X_train_res, y_train_res)
+    random_search.fit(X_train, y_train)
 
     print("\n--- 최적 파라미터 탐색 결과 ---")
     print(f"최고 점수 (ROC-AUC): {random_search.best_score_:.4f}")
     print("최적 파라미터:", random_search.best_params_)
 
     best_model = random_search.best_estimator_
+    
+    # OOB Score 출력
+    if best_model.oob_score:
+        print(f"OOB Score (자체 검증 점수): {best_model.oob_score_:.4f}")
+
 
     print("\n최적 모델로 테스트 데이터 평가...")
     y_pred = best_model.predict(X_test)
