@@ -1,0 +1,7 @@
+{
+    "value_score": 0.2,
+    "quality_score": 0.2,
+    "momentum_score": 0.3,
+    "volatility_score": 0.1,
+    "ml_pred_proba": 0.2
+}

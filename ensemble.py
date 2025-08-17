@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import json
+import os
 
 def calculate_final_score(df):
     if df.empty:
@@ -7,16 +9,24 @@ def calculate_final_score(df):
 
     final_df = df.copy()
 
+    # 기본 가중치 설정
     factor_weights = {
-        'value_score': 0.20,      # 가치 (0.15 -> 0.20)
-        'quality_score': 0.20,    # 퀄리티 (0.15 -> 0.20)
-        'momentum_score': 0.30,   # 모멘텀 (0.25 -> 0.30)
-        'supply_score': 0.00,     # 수급 (0.15 -> 0.00)
+        'value_score': 0.20,
+        'quality_score': 0.20,
+        'momentum_score': 0.30,
+        'supply_score': 0.00,
         'volatility_score': 0.10,
         'ml_pred_proba': 0.20,
         'sentiment_score': 0.00,
         'dl_trend_score(더미)': 0.00,
     }
+
+    # 최적화된 가중치 파일이 있으면 불러오기
+    if os.path.exists('optimal_weights.json'):
+        print("INFO: `optimal_weights.json` 파일을 발견하여 가중치를 적용합니다.")
+        with open('optimal_weights.json', 'r') as f:
+            factor_weights = json.load(f)
+
 
     active_factors = {k: v for k, v in factor_weights.items() if v > 0 and k in final_df.columns}
     total_weight = sum(active_factors.values())
