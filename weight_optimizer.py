@@ -21,13 +21,16 @@ VALIDATION_END_DATE = '2023-12-31'
 TRAIN_END_DATE = '2022-12-31'
 TRAIN_START_DATE = '2021-01-01'
 
+
+
 # 가중치 탐색 후보군 정의
 WEIGHT_GRID = {
-    'value_score': [0.1, 0.2, 0.3],
-    'quality_score': [0.1, 0.2, 0.3],
-    'momentum_score': [0.1, 0.2, 0.3],
-    'volatility_score': [0.1, 0.2],
-    'ml_pred_proba': [0.2, 0.3, 0.4, 0.5]
+    'value_score': np.arange(0.0, 0.31, 0.05),
+    'quality_score': np.arange(0.0, 0.31, 0.05),
+    'momentum_score': np.arange(0.0, 0.31, 0.05),
+    'supply_score': np.arange(0.0, 0.31, 0.05), # 수급 점수 추가
+    'volatility_score': np.arange(0.0, 0.31, 0.05),
+    'ml_score': np.arange(0.1, 0.91, 0.05),
 }
 
 # --- 함수 정의 ---
@@ -240,7 +243,7 @@ def run_backtest_for_weights(weights, data, initial_capital=1_000_000_000, top_n
     sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
     return sharpe_ratio
 
-def find_optimal_weights():
+def find_optimal_weights(top_n_stocks):
     """그리드 서치를 통해 최적의 가중치를 찾습니다."""
     
     model, data = get_model_and_data()
@@ -262,7 +265,7 @@ def find_optimal_weights():
     
     # 각 조합을 테스트하는 루프
     for weights in tqdm(valid_combinations, desc="가중치 최적화 중"):
-        sharpe = run_backtest_for_weights(weights, data)
+        sharpe = run_backtest_for_weights(weights, data, top_n=top_n_stocks)
         if sharpe > best_sharpe:
             best_sharpe = sharpe
             best_weights = weights
@@ -282,4 +285,14 @@ def find_optimal_weights():
 
 # --- 메인 실행부 ---
 if __name__ == '__main__':
-    find_optimal_weights()
+    while True:
+        try:
+            user_input = input("시뮬레이션 시 매수할 상위 종목 수를 입력하세요 (예: 5): ")
+            top_n_stocks_input = int(user_input)
+            if top_n_stocks_input > 0:
+                break
+            else:
+                print("0보다 큰 정수를 입력해주세요.")
+        except ValueError:
+            print("유효한 정수를 입력해주세요.")
+    find_optimal_weights(top_n_stocks=top_n_stocks_input)

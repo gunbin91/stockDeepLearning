@@ -22,7 +22,8 @@ def calculate_factor_scores(df):
                      df['수익률(3M)'].rank(method='min', pct=True, na_option='bottom'))
     scored_df['momentum_score'] = momentum_rank.rank(method='min', pct=True) * 100
 
-    scored_df['supply_score'] = 0
+    # 거래대금 20일 평균을 기준으로 수급 점수 계산
+    scored_df['supply_score'] = df['거래대금_MA20'].rank(method='min', pct=True, na_option='bottom') * 100
     scored_df['volatility_score'] = df['변동성(1M)'].rank(method='min', ascending=True, pct=True, na_option='bottom') * 100
 
     score_cols = ['value_score', 'quality_score', 'momentum_score', 'supply_score', 'volatility_score']

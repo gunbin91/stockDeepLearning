@@ -1,7 +1,8 @@
 {
-    "value_score": 0.1,
-    "quality_score": 0.1,
-    "momentum_score": 0.1,
+    "value_score": 0.0,
+    "quality_score": 0.0,
+    "momentum_score": 0.0,
+    "supply_score": 0.30000000000000004,
     "volatility_score": 0.2,
-    "ml_pred_proba": 0.5
+    "ml_score": 0.5000000000000001
 }
