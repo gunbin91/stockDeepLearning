@@ -131,12 +131,17 @@ def get_model_and_data():
 
     # --- 4. 검증 데이터에 예측 및 점수 추가 ---
     print("  - 검증 데이터에 ML 예측 및 팩터 점수 추가 중...")
-    validation_df['ml_pred_proba'] = model.predict_proba(validation_df[features])[:, 1]
+    validation_df.loc[:, 'ml_pred_proba'] = model.predict_proba(validation_df[features])[:, 1]
 
     scored_data_list = []
-    for date in tqdm(validation_df.index.unique(), desc="팩터 점수 계산"):
-        daily_data = validation_df.loc[date].copy()
-        daily_scored_data = calculate_factor_scores(daily_data.reset_index())
+    for date in tqdm(validation_df['date'].unique(), desc="팩터 점수 계산"):
+        daily_data = validation_df[validation_df['date'] == date].copy()
+        processed_daily_data = daily_data.reset_index() # Ensure '종목코드' is a column
+        daily_scored_data = calculate_factor_scores(processed_daily_data)
+        
+        if '종목코드' not in daily_scored_data.columns:
+            daily_scored_data['종목코드'] = processed_daily_data['종목코드']
+        
         daily_scored_data['date'] = date
         scored_data_list.append(daily_scored_data)
 
@@ -156,7 +161,7 @@ def get_model_and_data():
     validation_df.sort_index(inplace=True)
 
     print("  - 모든 데이터 준비 완료.")
-    return validation_df
+    return model, validation_df
 
 def run_backtest_for_weights(weights, data, initial_capital=1_000_000_000, top_n=5):
     """주어진 가중치로 상세한 일별 백테스트를 실행하고 샤프 지수를 반환합니다."""
@@ -184,7 +189,7 @@ def run_backtest_for_weights(weights, data, initial_capital=1_000_000_000, top_n
         for ticker in list(portfolio.keys()):
             stock_info = portfolio[ticker]
             days_held = (date - stock_info['buy_date']).days
-            current_price = data.loc[date, data['종목코드'] == ticker]['종가'].iloc[0]
+            current_price = data.loc[(date, ticker), '종가']
             
             # 매도 조건 확인 (수익률은 종가 기준)
             sell_condition = (
@@ -199,7 +204,7 @@ def run_backtest_for_weights(weights, data, initial_capital=1_000_000_000, top_n
 
         # --- 3.2. 매수 로직 ---
         investment_per_stock = cash / top_n # 가용 현금을 N등분하여 투자
-        daily_data = data.loc[date]
+        daily_data = data.loc[date].reset_index()
         buy_candidates = daily_data[~daily_data['종목코드'].isin(portfolio.keys())].nlargest(top_n, 'final_score')
 
         for i, row in buy_candidates.iterrows():
@@ -219,7 +224,7 @@ def run_backtest_for_weights(weights, data, initial_capital=1_000_000_000, top_n
         # --- 3.3. 일일 포트폴리오 가치 기록 ---
         current_portfolio_value = 0
         for ticker, stock_info in portfolio.items():
-            current_price = data.loc[date, data['종목코드'] == ticker]['종가'].iloc[0]
+            current_price = data.loc[(date, ticker), '종가']
             current_portfolio_value += current_price * stock_info['shares']
         
         total_asset = cash + current_portfolio_value
