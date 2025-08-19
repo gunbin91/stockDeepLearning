@@ -119,11 +119,14 @@ def run_final_backtest():
         model_data = joblib.load('stock_prediction_model_rf_upgraded.joblib')
         model = model_data['model']
         features = model_data['features']
+        scaler = model_data['scaler'] # 스케일러 로드
     except FileNotFoundError:
         raise FileNotFoundError("stock_prediction_model_rf_upgraded.joblib 모델 파일을 찾을 수 없습니다. train_model.py를 먼저 실행해주세요.")
 
     print("  - 테스트 데이터에 ML 예측 및 팩터 점수 추가 중...")
-    test_data['ml_pred_proba'] = model.predict_proba(test_data[features])[:, 1]
+    # 예측 전에 스케일러 적용
+    X_test_scaled = scaler.transform(test_data[features])
+    test_data['ml_pred_proba'] = model.predict_proba(X_test_scaled)[:, 1]
 
     scored_data_list = []
     for date in tqdm(test_data.index.unique(), desc="팩터 점수 계산"):

@@ -9,6 +9,7 @@ import pandas_ta as ta
 from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, roc_auc_score
+from sklearn.preprocessing import StandardScaler
 from scipy.stats import randint
 import concurrent.futures
 from tqdm import tqdm
@@ -263,6 +264,12 @@ def train_evaluate_and_save_model(X, y, features, n_jobs, n_iter, max_depth_list
     print("모델 학습 및 평가를 시작합니다...")
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
 
+    # 피처 스케일링 (StandardScaler)
+    print("\n피처 스케일링 (StandardScaler) 적용...")
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
     print("\n학습 데이터 타겟 분포:\n", y_train.value_counts(normalize=True))
 
     # RandomizedSearchCV를 위한 파라미터 분포 설정
@@ -275,7 +282,7 @@ def train_evaluate_and_save_model(X, y, features, n_jobs, n_iter, max_depth_list
         'min_impurity_decrease': [0.0, 1e-7, 1e-6]
     }
 
-    print("\nRandomizedSearchCV를 사용하여 최적 파라미터 탐색...")
+    print("RandomizedSearchCV를 사용하여 최적 파라미터 탐색...")
     print("탐색 대상 파라미터 분포:")
     print(f"- n_estimators: 100 ~ 500 사이의 임의의 값")
     print(f"- max_depth: {max_depth_list} 중에서 선택")
@@ -291,7 +298,7 @@ def train_evaluate_and_save_model(X, y, features, n_jobs, n_iter, max_depth_list
                                        n_iter=n_iter, cv=3, n_jobs=n_jobs, 
                                        verbose=2, random_state=42, scoring='roc_auc')
 
-    random_search.fit(X_train, y_train)
+    random_search.fit(X_train_scaled, y_train) # Use scaled data for fitting
 
     print("\n--- 최적 파라미터 탐색 결과 ---")
     print(f"최고 점수 (ROC-AUC): {random_search.best_score_:.4f}")
@@ -304,17 +311,18 @@ def train_evaluate_and_save_model(X, y, features, n_jobs, n_iter, max_depth_list
         print(f"OOB Score (자체 검증 점수): {best_model.oob_score_:.4f}")
 
 
-    print("\n최적 모델로 테스트 데이터 평가...")
-    y_pred = best_model.predict(X_test)
-    y_pred_proba = best_model.predict_proba(X_test)[:, 1]
+    print("최적 모델로 테스트 데이터 평가...")
+    y_pred = best_model.predict(X_test_scaled) # Use scaled data for prediction
+    y_pred_proba = best_model.predict_proba(X_test_scaled)[:, 1] # Use scaled data for prediction
 
     print("\n--- 최종 모델 평가 결과 ---")
     print(f"ROC-AUC: {roc_auc_score(y_test, y_pred_proba):.4f}")
     print("\n분류 보고서 (Classification Report):")
     print(classification_report(y_test, y_pred, target_names=['하락(0)', '상승(1)']))
 
-    joblib.dump({'model': best_model, 'features': features}, model_path)
-    print(f"\n✅ 새로운 데이터로 학습된 최적 모델을 '{model_path}' 경로에 저장했습니다.")
+    # 모델, 피처 목록, 스케일러를 함께 저장
+    joblib.dump({'model': best_model, 'features': features, 'scaler': scaler}, model_path)
+    print(f"\n✅ 새로운 데이터로 학습된 최적 모델과 스케일러를 '{model_path}' 경로에 저장했습니다.")
 
 def main():
     """스크립트 실행을 위한 메인 함수"""

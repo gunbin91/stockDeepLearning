@@ -29,15 +29,26 @@ def calculate_final_score(df):
 
 
     active_factors = {k: v for k, v in factor_weights.items() if v > 0 and k in final_df.columns}
+
+    # 각 팩터 점수를 0-100점으로 정규화
+    for factor in active_factors.keys():
+        min_val = final_df[factor].min()
+        max_val = final_df[factor].max()
+        if max_val > min_val:
+            final_df[factor] = 100 * (final_df[factor] - min_val) / (max_val - min_val)
+        else:
+            final_df[factor] = 50  # 모든 값이 동일하면 50점 부여
+
     total_weight = sum(active_factors.values())
     if total_weight > 0:
-        for k in active_factors:
-            factor_weights[k] /= total_weight
+        normalized_weights = {k: v / total_weight for k, v in active_factors.items()}
+    else:
+        normalized_weights = active_factors
 
     final_df['final_score'] = 0
-    for factor, weight in active_factors.items():
+    for factor, weight in normalized_weights.items():
         if factor in final_df.columns:
-             final_df['final_score'] += final_df[factor].fillna(0) * weight
+             final_df['final_score'] += final_df[factor].fillna(50) * weight
 
     min_score = final_df['final_score'].min()
     max_score = final_df['final_score'].max()
