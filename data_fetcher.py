@@ -168,6 +168,7 @@ def fetch_and_process_ticker_data(stock_info, start_date, end_date, latest_fs_df
         latest_data['PER'] = market_cap / net_income if net_income and net_income > 0 else np.nan
         latest_data['PBR'] = market_cap / total_equity if total_equity and total_equity > 0 else np.nan
         latest_data['ROE'] = net_income / total_equity if total_equity and total_equity > 0 else np.nan
+        latest_data['log_mktcap'] = np.log(market_cap) if market_cap and market_cap > 0 else np.nan
         
         return latest_data
     except Exception:

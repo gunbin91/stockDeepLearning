@@ -122,6 +122,7 @@ def fetch_and_process_ticker_data(stock_info, start_date, end_date, all_fs_data,
         df['PER'] = df['시가총액'] / df['당기순이익']
         df['PBR'] = df['시가총액'] / df['자본총계']
         df['ROE'] = df['당기순이익'] / df['자본총계']
+        df['log_mktcap'] = np.log(df['시가총액'])
         
         df['수익률(1W)'] = df['종가'].pct_change(periods=5)
         df['수익률(2W)'] = df['종가'].pct_change(periods=10)
@@ -229,7 +230,7 @@ def create_training_data(stock_list, period_days=365*4): # 학습 기간을 4년
     print(f"2. 워밍업 기간 제외 후: {len(final_df):,} 행")
 
     features = [
-        '수익률(1W)', '수익률(2W)', '수익률(1M)', '수익률(3M)', '변동성(1M)', 'PER', 'PBR', 'ROE', 'RSI_14',
+        '수익률(1W)', '수익률(2W)', '수익률(1M)', '수익률(3M)', '변동성(1M)', 'PER', 'PBR', 'ROE', 'log_mktcap', 'RSI_14',
         'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9', '거래대금_MA20', '단기 정배열', '52주_신고가_비율'
     ]
     target = 'target'
