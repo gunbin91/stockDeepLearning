@@ -80,10 +80,8 @@ def fetch_stock_list():
         return pd.DataFrame(columns=['종목코드', '종목명', '상장주식수'])
 
 
-def fetch_and_process_ticker_data(stock_info, start_date, end_date, all_fs_data):
-    # 이 함수는 data_fetcher.py와 동일한 로직 + target 변수 생성
+def fetch_and_process_ticker_data(stock_info, start_date, end_date, all_fs_data, df_marcap_history):
     ticker = stock_info['종목코드']
-    shares = stock_info['상장주식수']
     
     try:
         df_price = fdr.DataReader(ticker, start_date, end_date)
@@ -92,7 +90,25 @@ def fetch_and_process_ticker_data(stock_info, start_date, end_date, all_fs_data)
         
         df = df_price[['종가', '거래량']].copy()
         df['연도'] = df.index.year
+
+        # --- START: 수정된 병합 로직 ---
+        if df_marcap_history.empty: return None
+        df_marcap_ticker = df_marcap_history[df_marcap_history['Code'] == ticker][['Marcap']].copy()
+        if df_marcap_ticker.empty: return None
+
+        # merge_asof를 사용하기 위해 인덱스 정렬
+        df.sort_index(inplace=True)
+        df_marcap_ticker.sort_index(inplace=True)
+
+        # 각 일별 데이터(df)에 가장 가까운 과거의 시가총액(df_marcap_ticker) 데이터를 병합
+        df = pd.merge_asof(df, df_marcap_ticker, left_index=True, right_index=True, direction='backward')
+        df.rename(columns={'Marcap': '시가총액'}, inplace=True)
+        # --- END: 수정된 병합 로직 ---
         
+        # 시가총액을 계산할 수 없는 초기 데이터 행들을 제거
+        df.dropna(subset=['시가총액'], inplace=True)
+        if df.empty: return None
+
         for year, fs_year_data in all_fs_data.items():
             if ticker in fs_year_data:
                 fs_data = fs_year_data[ticker]
@@ -102,7 +118,7 @@ def fetch_and_process_ticker_data(stock_info, start_date, end_date, all_fs_data)
         df[['당기순이익', '자본총계']] = df[['당기순이익', '자본총계']].ffill().bfill()
         if df[['당기순이익', '자본총계']].isnull().values.any(): return None
 
-        df['시가총액'] = df['종가'] * shares
+        # 시가총액이 이미 있으므로 PER, PBR 바로 계산
         df['PER'] = df['시가총액'] / df['당기순이익']
         df['PBR'] = df['시가총액'] / df['자본총계']
         df['ROE'] = df['당기순이익'] / df['자본총계']
@@ -135,12 +151,46 @@ def fetch_and_process_ticker_data(stock_info, start_date, end_date, all_fs_data)
     except Exception:
         return None
 
-def create_training_data(stock_list, period_days=365*3):
+def create_training_data(stock_list, period_days=365*4): # 학습 기간을 4년으로 늘려 장기 지표 계산을 위한 데이터 확보
     print("안정적인 API(FDR, DART) 기반으로 학습 데이터 생성을 시작합니다...")
     today = datetime.now()
     end_date = today.strftime('%Y-%m-%d')
     start_date = (today - timedelta(days=period_days)).strftime('%Y-%m-%d')
     
+    # --- START: 수정된 로직 ---
+    print("KRX 전 종목의 과거 시가총액 데이터를 수집합니다 (매월 말 기준, 시간이 다소 소요될 수 있습니다)...")
+    try:
+        # 수집할 날짜 리스트 생성 (매월 말일)
+        month_end_dates = pd.date_range(start=start_date, end=end_date, freq='M').strftime('%Y-%m-%d').tolist()
+        
+        marcap_dfs = []
+        # ThreadPoolExecutor를 사용하여 데이터 수집 가속
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            future_to_date = {executor.submit(fdr.StockListing, 'KRX-MARCAP', date): date for date in month_end_dates}
+            
+            for future in tqdm(concurrent.futures.as_completed(future_to_date), total=len(month_end_dates), desc="전체 시가총액 데이터 수집"):
+                try:
+                    date = future_to_date[future]
+                    result_df = future.result()
+                    if not result_df.empty:
+                        result_df['Date'] = date # 해결책: 수집 시점에 날짜 정보를 칼럼으로 추가
+                        marcap_dfs.append(result_df)
+                except Exception:
+                    # 특정 날짜에 데이터가 없는 경우 (휴장일 등) 무시하고 계속
+                    continue
+        
+        if not marcap_dfs:
+            raise Exception("수집된 시가총액 데이터가 없습니다.")
+
+        df_marcap_history = pd.concat(marcap_dfs)
+        df_marcap_history['Date'] = pd.to_datetime(df_marcap_history['Date'])
+        df_marcap_history.set_index('Date', inplace=True)
+        
+    except Exception as e:
+        print(f"과거 시가총액 데이터 수집 실패: {e}")
+        df_marcap_history = pd.DataFrame()
+    # --- END: 수정된 로직 ---
+
     try:
         df_corp_map = pd.read_csv('corp_code_map.csv', dtype={'corp_code': str, '종목코드': str})
     except FileNotFoundError: return None, None, None
@@ -148,13 +198,13 @@ def create_training_data(stock_list, period_days=365*3):
     target_stocks = pd.merge(stock_list, df_corp_map, on='종목코드')
     corp_codes = target_stocks['corp_code'].unique().tolist()
 
-    all_fs_data = get_financial_data_for_training_http(corp_codes, today.year - 4, today.year - 1)
+    all_fs_data = get_financial_data_for_training_http(corp_codes, today.year - 5, today.year - 1) # 재무 데이터도 1년 더 수집
     if not all_fs_data: return None, None, None
 
     all_data = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = {
-            executor.submit(fetch_and_process_ticker_data, row, start_date, end_date, all_fs_data): row
+            executor.submit(fetch_and_process_ticker_data, row, start_date, end_date, all_fs_data, df_marcap_history): row
             for row in target_stocks.to_dict('records')
         }
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(target_stocks), desc="학습 데이터 생성"):
@@ -162,22 +212,44 @@ def create_training_data(stock_list, period_days=365*3):
             if result_df is not None:
                 all_data.append(result_df)
 
-    if not all_data: return None, None, None
+    if not all_data: 
+        print("생성된 데이터가 없습니다. 프로세스를 중단합니다.")
+        return None, None, None
 
     final_df = pd.concat(all_data)
     final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     
+    # --- START: 신규 추가된 로깅 로직 ---
+    print("\n--- 생성된 학습 데이터 요약 ---")
+    print(f"1. 전체 수집 데이터 (Raw): {len(final_df):,} 행")
+
+    # 워밍업 기간(1년)을 제외하고 실제 학습에 사용할 데이터(3년)만 선택
+    training_start_date = (today - timedelta(days=365*3)).strftime('%Y-%m-%d')
+    final_df = final_df[final_df.index >= training_start_date]
+    print(f"2. 워밍업 기간 제외 후: {len(final_df):,} 행")
+
     features = [
         '수익률(1W)', '수익률(2W)', '수익률(1M)', '수익률(3M)', '변동성(1M)', 'PER', 'PBR', 'ROE', 'RSI_14',
         'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9', '거래대금_MA20', '단기 정배열', '52주_신고가_비율'
     ]
     target = 'target'
     
+    print(f"3. 결측치(NaN) 제거 전: {len(final_df):,} 행")
     final_df.dropna(subset=[target] + features, inplace=True)
-    
+    print(f"4. 결측치(NaN) 제거 후: {len(final_df):,} 행")
+
+    if final_df.empty:
+        print("오류: 최종 학습 데이터가 비어있습니다. 데이터 수집 또는 처리 과정에 문제가 있습니다.")
+        return None, None, None
+
     X = final_df[features].astype(np.float32)
     y = final_df[target]
     
+    print(f"5. 최종 학습 데이터셋 (X): {X.shape}")
+    print(f"   - 타겟 분포 (y):\n{y.value_counts(normalize=True).to_string()}")
+    print("---------------------------------\n")
+    # --- END: 신규 추가된 로깅 로직 ---
+
     print("학습 데이터 생성 완료!")
     return X, y, features
 

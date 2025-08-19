@@ -204,8 +204,6 @@ def fetch_all_data(stock_list):
 
     final_df = pd.DataFrame(all_feature_data)
     final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    final_df.fillna(final_df.median(numeric_only=True), inplace=True)
-    final_df.fillna(0, inplace=True)
 
     print("모든 피처 데이터 생성 완료!")
     return final_df, final_df
