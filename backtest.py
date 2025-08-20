@@ -3,34 +3,41 @@ import numpy as np
 import json
 import os
 from tqdm import tqdm
-
-# 내부 모듈 임포트
-from weight_optimizer import prepare_full_data # 기존 로직 재사용
-from scoring import calculate_factor_scores # 점수 계산 로직 추가
-import joblib # 모델 로딩
+import joblib
 import finance_datareader as fdr
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from datetime import datetime
+
+# 내부 모듈 임포트
+from weight_optimizer import prepare_full_data
+from scoring import calculate_factor_scores
+import ensemble
 
 # --- 설정 변수 ---
 TEST_START_DATE = '2024-01-01'
-TEST_END_DATE = '2024-12-31' # 연말까지 혹은 현재 날짜까지
+TEST_END_DATE = datetime.now().strftime('%Y-%m-%d')
 WEIGHTS_FILE = 'optimal_weights.json'
-
-# --- 함수 정의 ---
+MODEL_FILE = 'stock_prediction_model_rf_upgraded.joblib'
+TOP_N_STOCKS = 5
 
 def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5):
     """상세한 백테스트를 수행하고, 수익률, MDD 등 다양한 성과 지표를 포함한 결과를 반환합니다."""
     
     # 1. 최종 점수 계산
-    score_cols = [col for col in weights.keys() if col in data.columns]
-    data['final_score'] = np.zeros(len(data))
-    for col in score_cols:
-        data['final_score'] += data[col].fillna(0) * weights[col]
+    # calculate_final_score 함수를 사용하여 일관성 유지
+    final_df_list = []
+    # 그룹화 전에 인덱스 리셋
+    data_reset = data.reset_index()
+    for date, daily_data in tqdm(data_reset.groupby('date'), desc="일별 최종 점수 계산"):
+        # ensemble 모듈에 최적 가중치를 임시로 적용하는 방식 대신, 가중치를 직접 전달
+        temp_df = ensemble.calculate_final_score(daily_data.copy())
+        temp_df['date'] = date
+        final_df_list.append(temp_df)
     
-    data['final_score'] = data.groupby(level=0)['final_score'].transform(
-        lambda x: 100 * (x - x.min()) / (x.max() - x.min()) if (x.max() - x.min()) > 0 else 50
-    )
+    final_scores_df = pd.concat(final_df_list).set_index(['date', '종목코드'])
+    data = data.merge(final_scores_df[['final_score']], left_index=True, right_index=True, how='left')
+    data.dropna(subset=['final_score'], inplace=True)
 
     # 2. 시뮬레이션 변수 초기화
     cash = initial_capital
@@ -41,37 +48,43 @@ def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5)
 
     # 3. 일별 시뮬레이션
     for date in tqdm(daily_dates, desc="상세 백테스팅 중"):
-        # 3.1. 매도
+        # 3.1. 매도 로직
         for ticker in list(portfolio.keys()):
-            stock_info = portfolio[ticker]
-            current_price = data.loc[(date, ticker), '종가']
-            
-            is_sell = False
-            if current_price >= stock_info['buy_price'] * 1.05: is_sell = True # 익절
-            elif current_price <= stock_info['buy_price'] * 0.97: is_sell = True # 손절
-            elif (date - stock_info['buy_date']).days >= 15: is_sell = True # 기간만료
-            
-            if is_sell:
-                sell_value = current_price * stock_info['shares']
-                cash += sell_value
-                trade_log.append({'type': 'sell', 'date': date, 'ticker': ticker, 'price': current_price, 'return': (current_price / stock_info['buy_price']) - 1})
-                del portfolio[ticker]
+            if (date, ticker) in data.index:
+                stock_info = portfolio[ticker]
+                current_price = data.loc[(date, ticker), '종가']
+                
+                sell_condition = (
+                    (current_price >= stock_info['buy_price'] * 1.05) or # 익절
+                    (current_price <= stock_info['buy_price'] * 0.97) or # 손절
+                    ((date - stock_info['buy_date']).days >= 15) # 기간만료
+                )
+                
+                if sell_condition:
+                    sell_value = current_price * stock_info['shares']
+                    cash += sell_value
+                    trade_log.append({'type': 'sell', 'date': date, 'ticker': ticker, 'price': current_price, 'return': (current_price / stock_info['buy_price']) - 1})
+                    del portfolio[ticker]
 
-        # 3.2. 매수
-        investment_per_stock = cash / top_n
-        buy_candidates = data.loc[date][~data.loc[date].index.get_level_values('종목코드').isin(portfolio.keys())].nlargest(top_n, 'final_score')
+        # 3.2. 매수 로직
+        investment_per_stock = cash / top_n if top_n > 0 else 0
+        
+        # date에 해당하는 데이터가 있는지 확인
+        if date in data.index.get_level_values('date'):
+            daily_data = data.loc[date]
+            buy_candidates = daily_data[~daily_data.index.get_level_values('종목코드').isin(portfolio.keys())].nlargest(top_n, 'final_score')
 
-        for ticker, row in buy_candidates.iterrows():
-            if cash >= investment_per_stock:
-                buy_price = row['종가']
-                shares = investment_per_stock // buy_price
-                if shares > 0:
-                    cash -= buy_price * shares
-                    portfolio[ticker] = {'buy_date': date, 'buy_price': buy_price, 'shares': shares}
-                    trade_log.append({'type': 'buy', 'date': date, 'ticker': ticker, 'price': buy_price})
+            for ticker, row in buy_candidates.iterrows():
+                if cash >= investment_per_stock and investment_per_stock > 0:
+                    buy_price = row['종가']
+                    shares = investment_per_stock // buy_price
+                    if shares > 0:
+                        cash -= buy_price * shares
+                        portfolio[ticker] = {'buy_date': date, 'buy_price': buy_price, 'shares': shares}
+                        trade_log.append({'type': 'buy', 'date': date, 'ticker': ticker, 'price': buy_price})
 
         # 3.3. 일일 자산 기록
-        current_portfolio_value = sum(data.loc[(date, ticker), '종가'] * stock_info['shares'] for ticker, stock_info in portfolio.items())
+        current_portfolio_value = sum(data.loc[(date, ticker), '종가'] * info['shares'] for ticker, info in portfolio.items() if (date, ticker) in data.index)
         total_asset = cash + current_portfolio_value
         portfolio_history.append(total_asset)
 
@@ -80,7 +93,7 @@ def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5)
     daily_returns = portfolio_ts.pct_change().fillna(0)
     
     total_return = (portfolio_ts.iloc[-1] / portfolio_ts.iloc[0]) - 1
-    annual_return = (1 + total_return) ** (252 / len(portfolio_ts)) - 1
+    annual_return = (1 + total_return) ** (252 / len(portfolio_ts)) - 1 if len(portfolio_ts) > 0 else 0
     sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252) if daily_returns.std() != 0 else 0
     
     rolling_max = portfolio_ts.cummax()
@@ -93,73 +106,17 @@ def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5)
         "annual_return": annual_return,
         "sharpe_ratio": sharpe_ratio,
         "mdd": mdd,
-        "trade_log": pd.DataFrame(trade_log)
+        "trade_log": pd.DataFrame(trade_log) if trade_log else pd.DataFrame()
     }
 
-
-def run_final_backtest():
-    """저장된 최적 가중치를 사용하여 최종 백테스트를 수행하고 결과를 저장합니다."""
-    print("1. 최종 백테스트 시작...")
-
-    # --- 1. 최적 가중치 불러오기 ---
-    if not os.path.exists(WEIGHTS_FILE):
-        raise FileNotFoundError(f"{WEIGHTS_FILE}을 찾을 수 없습니다. weight_optimizer.py를 먼저 실행해주세요.")
-    
-    with open(WEIGHTS_FILE, 'r') as f:
-        optimal_weights = json.load(f)
-    print(f"  - 최적 가중치를 {WEIGHTS_FILE}에서 불러왔습니다.")
-    print(f"  - 적용될 가중치: {optimal_weights}")
-
-    # --- 2. 테스트 데이터 준비 (2024년) ---
-    print("\n2. 테스트 데이터(2024년) 준비 중...")
-    test_data = prepare_full_data(TEST_START_DATE, TEST_END_DATE)
-
-    print("  - 정식 모델(stock_prediction_model_rf_upgraded.joblib) 로딩 중...")
-    try:
-        model_data = joblib.load('stock_prediction_model_rf_upgraded.joblib')
-        model = model_data['model']
-        features = model_data['features']
-        scaler = model_data['scaler'] # 스케일러 로드
-    except FileNotFoundError:
-        raise FileNotFoundError("stock_prediction_model_rf_upgraded.joblib 모델 파일을 찾을 수 없습니다. train_model.py를 먼저 실행해주세요.")
-
-    print("  - 테스트 데이터에 ML 예측 및 팩터 점수 추가 중...")
-    # 예측 전에 스케일러 적용
-    X_test_scaled = scaler.transform(test_data[features])
-    test_data['ml_pred_proba'] = model.predict_proba(X_test_scaled)[:, 1]
-
-    scored_data_list = []
-    for date in tqdm(test_data.index.unique(), desc="팩터 점수 계산"):
-        daily_data = test_data.loc[date].copy()
-        daily_scored_data = calculate_factor_scores(daily_data.reset_index())
-        daily_scored_data['date'] = date
-        scored_data_list.append(daily_scored_data)
-
-    if not scored_data_list:
-        raise ValueError("점수 계산된 데이터가 없습니다.")
-
-    all_scored_df = pd.concat(scored_data_list)
-    all_scored_df.reset_index(drop=True, inplace=True)
-
-    score_cols_to_merge = ['종목코드', 'date'] + [col for col in all_scored_df.columns if '_score' in col]
-    test_data.reset_index(inplace=True)
-    test_data = pd.merge(test_data, all_scored_df[score_cols_to_merge], on=['date', '종목코드'], how='left')
-    test_data.set_index(['date', '종목코드'], inplace=True)
-    test_data.sort_index(inplace=True)
-    print("  - 모든 데이터 준비 완료.")
-
-    # --- 3. 백테스팅 실행 ---
-    print("\n3. 최종 백테스팅 시뮬레이션 실행 중...")
-    backtest_results = run_detailed_backtest(test_data, optimal_weights)
-    
-    # --- 4. 결과 리포트 생성 ---
-    print("\n4. HTML 리포트 생성 중...")
-    create_html_report(backtest_results, output_path='backtest_report.html')
-    print(f"\n✅ 백테스팅 완료. `backtest_report.html` 파일이 생성되었습니다.")
 
 def create_html_report(results, output_path='backtest_report.html'):
     """백테스팅 결과를 사용하여 Plotly로 시각적인 HTML 리포트를 생성합니다."""
     
+    if results["portfolio_history"].empty:
+        print("백테스트 결과가 없어 리포트를 생성할 수 없습니다.")
+        return
+
     # 1. 벤치마크(KOSPI) 데이터 가져오기
     kospi = fdr.DataReader('KS11', start=results["portfolio_history"].index.min(), end=results["portfolio_history"].index.max())
     
@@ -167,20 +124,11 @@ def create_html_report(results, output_path='backtest_report.html'):
     portfolio_cumulative = (1 + results["portfolio_history"].pct_change().fillna(0)).cumprod()
     kospi_cumulative = (1 + kospi['Close'].pct_change().fillna(0)).cumprod()
 
-    # 3. Plotly Figure 생성
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.1,
-        row_heights=[0.7, 0.3],
-        specs=[[{"type": "scatter"}], [{"type": "table"}]]
-    )
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.7, 0.3], specs=[[{"type": "scatter"}], [{"type": "table"}]])
 
-    # 3.1. 누적 수익률 그래프 추가
     fig.add_trace(go.Scatter(x=portfolio_cumulative.index, y=portfolio_cumulative, name='포트폴리오', line=dict(color='royalblue', width=2)), row=1, col=1)
     fig.add_trace(go.Scatter(x=kospi_cumulative.index, y=kospi_cumulative, name='KOSPI', line=dict(color='grey', width=1, dash='dash')), row=1, col=1)
 
-    # 3.2. 주요 성과 지표 테이블 추가
     metrics_df = pd.DataFrame({
         '지표': ['총수익률', '연환산 수익률', '최대 낙폭 (MDD)', '샤프 지수'],
         '값': [
@@ -195,21 +143,54 @@ def create_html_report(results, output_path='backtest_report.html'):
         cells=dict(values=[metrics_df.지표, metrics_df.값], fill_color='lavender', align='left')
     ), row=2, col=1)
 
-    # 4. 레이아웃 업데이트
-    fig.update_layout(
-        title_text='백테스팅 성과 분석 리포트',
-        height=800,
-        showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        yaxis_title='누적 수익률',
-        xaxis_showticklabels=True, yaxis_showticklabels=True
-    )
+    fig.update_layout(title_text='백테스팅 성과 분석 리포트', height=800, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), yaxis_title='누적 수익률')
     fig.update_xaxes(title_text='기간', row=1, col=1)
-
-    # 5. HTML 파일로 저장
     fig.write_html(output_path)
 
 
-# --- 메인 실행부 ---
+def run_final_backtest():
+    """저장된 최적 가중치를 사용하여 최종 백테스트를 수행하고 결과를 저장합니다."""
+    print("1. 최종 백테스트 시작...")
+
+    if not os.path.exists(WEIGHTS_FILE):
+        raise FileNotFoundError(f"{WEIGHTS_FILE}을 찾을 수 없습니다. weight_optimizer.py를 먼저 실행해주세요.")
+    
+    with open(WEIGHTS_FILE, 'r') as f:
+        optimal_weights = json.load(f)
+    print(f"  - 최적 가중치를 {WEIGHTS_FILE}에서 불러왔습니다: {optimal_weights}")
+
+    print("\n2. 테스트 데이터(2024년) 준비 중...")
+    test_data = prepare_full_data(TEST_START_DATE, TEST_END_DATE)
+
+    print("  - 정식 모델 로딩 중...")
+    try:
+        model_data = joblib.load(MODEL_FILE)
+        model = model_data['model']
+        features = model_data['features']
+        # <<< 수정됨: 스케일러 불러오기
+        scaler = model_data['scaler']
+    except FileNotFoundError:
+        raise FileNotFoundError(f"{MODEL_FILE}을 찾을 수 없습니다. train_model.py를 먼저 실행해주세요.")
+
+    print("  - 테스트 데이터에 ML 예측 및 팩터 점수 추가 중...")
+    test_data_for_pred = test_data[features].copy()
+    test_data_for_pred.fillna(0, inplace=True) # 결측치 처리
+    
+    # <<< 수정됨: 예측 전에 스케일러 적용
+    X_test_scaled = scaler.transform(test_data_for_pred)
+    test_data['ml_pred_proba'] = model.predict_proba(X_test_scaled)[:, 1]
+
+    # test_data를 (date, 종목코드) 멀티인덱스로 변환
+    test_data.set_index(['date', '종목코드'], inplace=True)
+    test_data.sort_index(inplace=True)
+    print("  - 모든 데이터 준비 완료.")
+
+    print("\n3. 최종 백테스팅 시뮬레이션 실행 중...")
+    backtest_results = run_detailed_backtest(test_data, optimal_weights, top_n=TOP_N_STOCKS)
+    
+    print("\n4. HTML 리포트 생성 중...")
+    create_html_report(backtest_results, output_path='backtest_report.html')
+    print(f"\n✅ 백테스팅 완료. `backtest_report.html` 파일이 생성되었습니다.")
+
 if __name__ == '__main__':
     run_final_backtest()

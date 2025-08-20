@@ -39,55 +39,45 @@ def main():
 
     if st.button("실제 데이터 수집 및 분석 시작"):
         with st.spinner("데이터 수집 및 분석 중... (최대 5분 소요)"):
-            # <<< 개선점: 데이터 처리 로직 수정 >>>
-            # 1. 모든 데이터 수집
-            # fetch_all_data는 이제 두 개의 데이터프레임을 반환한다고 가정합니다.
-            # 1) ml_feature_df: ML 모델 예측에 필요한 원본 피처들이 있는 데이터프레임
-            # 2) factor_base_df: 팩터 점수 계산에 필요한 재무, 수급, 가격 데이터가 있는 데이터프레임
-            ml_feature_df, factor_base_df = data_fetcher.fetch_all_data(stock_list_df)
+            # <<< 개선됨: 데이터 처리 로직 수정 >>>
+            # 1. 모든 데이터 수집 (하나의 데이터프레임으로 통합)
+            # fetch_all_data는 ML 예측과 팩터 점수 계산에 필요한 모든 피처가 포함된 데이터프레임을 반환
+            feature_df = data_fetcher.fetch_all_data(stock_list_df)
             
             # 데이터 수집 실패 시 처리
-            if factor_base_df.empty:
+            if feature_df.empty:
                 st.error("데이터를 수집하는 데 실패했거나 분석할 종목이 없습니다. 잠시 후 다시 시도해주세요.")
                 st.stop()
             
             # 2. 팩터 점수 계산
             st.write("### 2. 팩터 점수 계산")
-            # 팩터 점수는 factor_base_df를 기반으로 계산
-            scored_df = scoring.calculate_factor_scores(factor_base_df)
+            scored_df = scoring.calculate_factor_scores(feature_df)
             st.dataframe(scored_df.head())
 
             # 3. 머신러닝 예측
             st.write("### 3. 머신러닝 예측")
-            # ML 모델 예측은 ml_feature_df를 사용
-            # predict_with_ml_model 함수는 내부적으로 모델을 로드하고, ml_feature_df에서 필요한 피처만 선택하여 예측
-            ml_predicted_df = ml_model.predict_with_ml_model(ml_feature_df)
+            # ML 모델 예측은 전체 feature_df를 사용
+            ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
             
-            # 모델 로드 실패 시 분석 중단
+            # 모델 로드 또는 예측 실패 시 분석 중단
             if ml_predicted_df is None:
                 st.error("머신러닝 모델 예측에 실패했습니다. 콘솔 로그를 확인해주세요.")
                 st.stop()
 
-            st.dataframe(ml_predicted_df.head()) # '종목코드', 'ml_pred_proba' 컬럼 등이 있을 것으로 예상
+            st.dataframe(ml_predicted_df.head())
 
             # --- 예측 결과와 팩터 점수 데이터 병합 ---
             # ml_predicted_df와 scored_df를 '종목코드' 기준으로 병합
-            # 이 작업을 통해 각 종목의 팩터 점수와 ML 예측 확률을 하나의 DataFrame으로 합침
-            # (두 DataFrame에 공통된 '종목코드' 또는 '종목명' 컬럼이 있어야 함)
             merged_df = pd.merge(scored_df, ml_predicted_df, on='종목코드', how='left')
 
             # 4. 딥러닝 시계열 예측 (더미 데이터 사용)
             st.write("### 4. 딥러닝 시계열 예측 (더미)")
-            # dl_model은 현재 더미 데이터를 반환하도록 유지
             dl_predicted_df = dl_model.predict_with_deep_learning(merged_df)
             st.dataframe(dl_predicted_df.head())
 
             # 5. 뉴스 감성 분석 (임시 비활성화)
             st.write("### 5. 뉴스 감성 분석 (추후 업데이트 예정)")
-            # nlp_analyzed_df = nlp.analyze_news_sentiment(dl_predicted_df)
-            # st.dataframe(nlp_analyzed_df.head())
-            
-            # 임시로 sentiment_score 컬럼을 0으로 채웁니다.
+            # 임시로 sentiment_score 컬럼을 0으로 채움
             nlp_analyzed_df = dl_predicted_df.copy()
             nlp_analyzed_df['sentiment_score'] = 0
             st.info("현재 감성 분석 기능은 성능 최적화를 위해 임시 비활성화되었습니다.")
@@ -123,7 +113,7 @@ def main():
                 '모멘텀(점)', '가치(점)', '퀄리티(점)', '수급(점)', '변동성(점)',
                 '시가총액(억)'
             ]
-            # 혹시 모를 오류 방지를 위해 실제 존재하는 컬럼만 선택
+            # 실제 존재하는 컬럼만 선택하여 오류 방지
             display_columns = [col for col in display_columns if col in display_df.columns]
             
             st.dataframe(display_df[display_columns])

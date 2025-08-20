@@ -2,297 +2,271 @@ import pandas as pd
 import numpy as np
 import joblib
 from datetime import datetime, timedelta
-from tqdm import tqdm
 import itertools
 import json
 import concurrent.futures
 from tqdm import tqdm
 from sklearn.ensemble import RandomForestClassifier
+import FinanceDataReader as fdr
+import os
+import requests
+import time
 
 # 내부 모듈 임포트
-from train_model import fetch_stock_list, get_financial_data_for_training_http, fetch_and_process_ticker_data
 from scoring import calculate_factor_scores
-
-from scoring import calculate_factor_scores
+import ensemble
 
 # --- 설정 변수 ---
 VALIDATION_START_DATE = '2023-01-01'
 VALIDATION_END_DATE = '2023-12-31'
 TRAIN_END_DATE = '2022-12-31'
-TRAIN_START_DATE = '2021-01-01'
+TRAIN_START_DATE = '2020-01-01'
+DART_API_KEY = "03ac38be54eb9bb095c2304b254c756ebe73c522" # 본인의 키로 교체
 
-
-
-# 가중치 탐색 후보군 정의
 WEIGHT_GRID = {
-    'value_score': np.arange(0.0, 0.31, 0.05),
-    'quality_score': np.arange(0.0, 0.31, 0.05),
-    'momentum_score': np.arange(0.0, 0.31, 0.05),
-    'supply_score': np.arange(0.0, 0.31, 0.05), # 수급 점수 추가
-    'volatility_score': np.arange(0.0, 0.31, 0.05),
-    'ml_score': np.arange(0.1, 0.91, 0.05),
+    'value_score': np.arange(0.0, 0.31, 0.1),
+    'quality_score': np.arange(0.0, 0.31, 0.1),
+    'momentum_score': np.arange(0.0, 0.41, 0.1),
+    'supply_score': np.arange(0.0, 0.21, 0.1),
+    'volatility_score': np.arange(0.0, 0.21, 0.1),
+    'ml_pred_proba': np.arange(0.1, 0.51, 0.1),
 }
 
-# --- 함수 정의 ---
+def get_financial_data_for_training_http(corp_codes, start_year, end_year):
+    if DART_API_KEY == "여기에_발급받은_DART_인증키를_붙여넣으세요": return {}
+    all_fs_data = {}
+    for year in range(start_year, end_year + 1):
+        print(f"HTTP 통신으로 {year}년 재무 데이터 수집 중 (최적화용)...")
+        year_fs_data = []
+        for i in tqdm(range(0, len(corp_codes), 100), desc=f"{year}년 재무 데이터"):
+            corp_code_chunk = corp_codes[i:i+100]
+            corp_code_str = ','.join(corp_code_chunk)
+            url = "https://opendart.fss.or.kr/api/fnlttMultiAcnt.json"
+            params = { 'crtfc_key': DART_API_KEY, 'corp_code': corp_code_str, 'bsns_year': str(year), 'reprt_code': '11011' }
+            try:
+                res = requests.get(url, params=params)
+                if res.status_code != 200:
+                    print(f"  [오류] DART API 요청 실패 (상태 코드: {res.status_code}) 응답: {res.text}")
+                    continue
+                data = res.json()
+                if data.get('status') != '000':
+                    print(f"  [오류] DART API가 에러를 반환했습니다. (상태: {data.get('status')}, 메시지: {data.get('message')})")
+                    continue
+                year_fs_data.extend(data['list'])
+            except Exception as e:
+                print(f"  [오류] DART API 처리 중 예외 발생: {e}")
+                continue
+            time.sleep(0.1)
+        if year_fs_data:
+            df = pd.DataFrame(year_fs_data)
+            df['thstrm_amount'] = pd.to_numeric(df['thstrm_amount'].str.replace(',', ''), errors='coerce')
+            df_pivot = df.pivot_table(index='stock_code', columns='account_nm', values='thstrm_amount')
+            all_fs_data[year] = df_pivot.to_dict('index')
+    return all_fs_data
+
+def fetch_stock_list():
+    try:
+        df_kospi = fdr.StockListing('KOSPI')
+        df_kosdaq = fdr.StockListing('KOSDAQ')
+        stock_list = pd.concat([df_kospi, df_kosdaq], ignore_index=True)
+        stock_list = stock_list[~stock_list['Name'].str.contains('스팩|리츠', na=False)].copy()
+        stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명'}, inplace=True)
+        return stock_list[['종목코드', '종목명']]
+    except Exception: return pd.DataFrame()
+
+def process_single_ticker_data(stock_info, start_date, end_date, all_fs_data, df_marcap_long):
+    ticker = stock_info['종목코드']
+    try:
+        df_price = fdr.DataReader(ticker, start_date, end_date)
+        if df_price.empty or len(df_price) < 251 + 60: return None
+        df_price.rename(columns={'Close':'종가', 'Volume':'거래량'}, inplace=True)
+        df = df_price[['종가', '거래량']].copy()
+        df['연도'] = df.index.year
+        
+        df_marcap_ticker = df_marcap_long[df_marcap_long['Code'] == ticker].copy()
+        if df_marcap_ticker.empty: return None
+        df.sort_index(inplace=True)
+        df_marcap_ticker.sort_values(by='Date', inplace=True)
+        
+        df = pd.merge_asof(left=df, right=df_marcap_ticker[['Date', 'Marcap']],
+                           left_index=True, right_on='Date', direction='backward')
+        
+        df.rename(columns={'Marcap': '시가총액'}, inplace=True)
+        df['거래대금'] = df['종가'] * df['거래량']
+        df.dropna(subset=['시가총액'], inplace=True)
+        if df.empty: return None
+        
+        for year, fs_year_data in all_fs_data.items():
+            if ticker in fs_year_data:
+                fs_data = fs_year_data[ticker]
+                df.loc[df['연도'] == year, '당기순이익'] = fs_data.get('당기순이익')
+                df.loc[df['연도'] == year, '자본총계'] = fs_data.get('자본총계')
+        if '당기순이익' not in df.columns or '자본총계' not in df.columns: return None
+        df[['당기순이익', '자본총계']] = df[['당기순이익', '자본총계']].ffill()
+        if df[['당기순이익', '자본총계']].isnull().values.any(): return None
+        df['PER'] = df['시가총액'] / df['당기순이익']
+        df['PBR'] = df['시가총액'] / df['자본총계']
+        df['ROE'] = df['당기순이익'] / df['자본총계']
+        df['수익률(1M)'] = df['종가'].pct_change(periods=20)
+        df['수익률(3M)'] = df['종가'].pct_change(periods=60)
+        df['변동성(1M)'] = df['종가'].rolling(window=20).std() / df['종가'].rolling(window=20).mean()
+        df['거래대금_MA20'] = df['거래대금'].rolling(window=20).mean()
+        df['target'] = (df['종가'].shift(-15) / df['종가'] > 1.05).astype(int)
+        df['종목코드'] = ticker
+        
+        df.set_index('Date', inplace=True)
+        return df
+    except Exception: return None
 
 def prepare_full_data(start_date, end_date):
-    """지정된 기간 동안의 모든 종목에 대한 피처 및 타겟이 포함된 전체 데이터프레임을 생성합니다."""
     print(f"데이터 준비 중 ({start_date} ~ {end_date})...")
     stock_list = fetch_stock_list()
-    if stock_list.empty:
-        raise ValueError("종목 리스트를 가져올 수 없습니다.")
-
+    if stock_list.empty: raise ValueError("종목 리스트를 가져올 수 없습니다.")
     try:
         df_corp_map = pd.read_csv('corp_code_map.csv', dtype={'corp_code': str, '종목코드': str})
-    except FileNotFoundError:
-        raise FileNotFoundError("corp_code_map.csv 파일을 찾을 수 없습니다. make_corp_map.py를 먼저 실행해주세요.")
-
+    except FileNotFoundError: raise FileNotFoundError("corp_code_map.csv 파일이 없습니다.")
     target_stocks = pd.merge(stock_list, df_corp_map, on='종목코드')
     corp_codes = target_stocks['corp_code'].unique().tolist()
-
-    start_year = int(start_date[:4])
-    end_year = int(end_date[:4])
-    all_fs_data = get_financial_data_for_training_http(corp_codes, start_year - 1, end_year)
-    if not all_fs_data:
-        raise ValueError("재무 데이터를 가져올 수 없습니다.")
-
+    all_fs_data = get_financial_data_for_training_http(corp_codes, int(start_date[:4]) - 1, int(end_date[:4]))
+    if not all_fs_data: raise ValueError("재무 데이터를 가져올 수 없습니다. DART API 키/서버 상태를 확인하세요.")
+    try:
+        month_end_dates = pd.date_range(start=start_date, end=end_date, freq='M').strftime('%Y%m%d').tolist()
+        marcap_dfs = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            future_to_date = {executor.submit(fdr.StockListing, 'KRX-MARCAP', date): date for date in month_end_dates}
+            for future in tqdm(concurrent.futures.as_completed(future_to_date), total=len(month_end_dates), desc="시가총액 데이터 수집 (최적화용)"):
+                try:
+                    date_str = future_to_date[future]
+                    result_df = future.result()
+                    if not result_df.empty:
+                        result_df['Date'] = pd.to_datetime(date_str)
+                        marcap_dfs.append(result_df)
+                except Exception: continue
+        if not marcap_dfs: raise Exception("수집된 시가총액 데이터가 없습니다.")
+        df_marcap_long = pd.concat(marcap_dfs, ignore_index=True)
+        df_marcap_long.sort_values(by=['Code', 'Date'], inplace=True)
+    except Exception as e:
+        raise ConnectionError(f"과거 시가총액 데이터 수집 실패: {e}")
     all_data = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {
-            executor.submit(fetch_and_process_ticker_data, row, start_date, end_date, all_fs_data): row
-            for row in target_stocks.to_dict('records')
-        }
-        for future in tqdm(concurrent.futures.as_completed(futures), total=len(target_stocks), desc="피처 데이터 생성"):
-            result_df = future.result()
-            if result_df is not None:
-                # 인덱스가 DatetimeIndex인지 확인하고 'date'라는 컬럼으로 리셋
-                if isinstance(result_df.index, pd.DatetimeIndex):
-                    # 인덱스에 이름이 있다면 임시로 저장한 다음 리셋
-                    original_index_name = result_df.index.name
-                    result_df.reset_index(inplace=True)
-                    # 새 컬럼의 이름이 'date'가 아니라면 'date'로 변경
-                    if original_index_name is not None and original_index_name != 'date':
-                        result_df.rename(columns={original_index_name: 'date'}, inplace=True)
-                    elif original_index_name is None: # 이름이 없었다면 기본적으로 'index'가 됨
-                        result_df.rename(columns={'index': 'date'}, inplace=True)
-                
-                all_data.append(result_df)
-
-    if not all_data:
-        raise ValueError("처리된 데이터가 없습니다.")
-
-    final_df = pd.concat(all_data)
+    stock_records = target_stocks.to_dict('records')
+    for row in tqdm(stock_records, desc="피처 데이터 생성 (최적화용)"):
+        result_df = process_single_ticker_data(row, start_date, end_date, all_fs_data, df_marcap_long)
+        if result_df is not None:
+            all_data.append(result_df)
+    if not all_data: raise ValueError("처리된 데이터가 없습니다.")
+    final_df = pd.concat(all_data).reset_index()
+    final_df.rename(columns={'Date': 'date'}, inplace=True)
     final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    
-    # 'date'가 인덱스이고 컬럼으로 필요하다면 리셋
-    if 'date' not in final_df.columns and final_df.index.name == 'date':
-        final_df.reset_index(inplace=True)
-    
-    # '종목코드'가 MultiIndex의 일부라면 리셋하여 컬럼으로 만듦
-    if isinstance(final_df.index, pd.MultiIndex) and '종목코드' in final_df.index.names:
-        final_df.reset_index(level='종목코드', inplace=True)
-    
-    # 'date'와 '종목코드' 컬럼에 NaN이 있는 행은 제거 (병합의 핵심 키이므로)
     final_df.dropna(subset=['date', '종목코드'], inplace=True)
-    
     final_df['date'] = pd.to_datetime(final_df['date'])
     final_df.sort_values(by=['date', '종목코드'], inplace=True)
-    
     print("데이터 준비 완료.")
     return final_df
 
 def get_model_and_data():
-    """최적화를 위해 특정 기간의 모델과 데이터를 준비합니다."""
     print("1. 최적화를 위한 데이터 준비 및 모델 학습 시작...")
-
-    # --- 1. 전체 기간 데이터 준비 (2021-01-01 ~ 2023-12-31) ---
     full_data_df = prepare_full_data(TRAIN_START_DATE, VALIDATION_END_DATE)
-
-    # --- 2. 훈련/검증 데이터 분리 ---
-    # 날짜 문자열을 datetime 객체로 변환하여 비교
-    train_end_date_dt = pd.to_datetime(TRAIN_END_DATE)
-    validation_start_date_dt = pd.to_datetime(VALIDATION_START_DATE)
-
-    # 'date' 컬럼을 사용하여 필터링
-    train_df = full_data_df[full_data_df['date'] <= train_end_date_dt]
-    validation_df = full_data_df[full_data_df['date'] >= validation_start_date_dt]
-    print(f"  - 훈련 데이터({TRAIN_START_DATE}~{TRAIN_END_DATE}) {len(train_df)} 행 준비 완료.")
-    print(f"  - 검증 데이터({VALIDATION_START_DATE}~{VALIDATION_END_DATE}) {len(validation_df)} 행 준비 완료.")
-
-    # --- 3. 모델 학습 ---
-    features = [
-        '수익률(1W)', '수익률(2W)', '수익률(1M)', '수익률(3M)', '변동성(1M)', 'PER', 'PBR', 'ROE', 'RSI_14',
-        'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9', '거래대금_MA20', '단기 정배열', '52주_신고가_비율'
-    ]
-    X_train = train_df[features].astype(np.float32)
+    train_df = full_data_df[full_data_df['date'] <= pd.to_datetime(TRAIN_END_DATE)].copy()
+    validation_df = full_data_df[full_data_df['date'] >= pd.to_datetime(VALIDATION_START_DATE)].copy()
+    print(f"  - 훈련 데이터 {len(train_df)} 행, 검증 데이터 {len(validation_df)} 행 준비 완료.")
+    features = ['수익률(1M)', '수익률(3M)', '변동성(1M)', 'PER', 'PBR', 'ROE', '거래대금_MA20']
+    train_df.dropna(subset=features + ['target'], inplace=True)
+    validation_df.dropna(subset=features + ['종가'], inplace=True)
+    X_train = train_df[features]
     y_train = train_df['target']
-
     print("  - 임시 모델 학습 중 (RandomForestClassifier)...")
     model = RandomForestClassifier(random_state=42, class_weight='balanced', n_jobs=-1)
     model.fit(X_train, y_train)
     print("  - 임시 모델 학습 완료.")
-
-    # --- 4. 검증 데이터에 예측 및 점수 추가 ---
     print("  - 검증 데이터에 ML 예측 및 팩터 점수 추가 중...")
     validation_df.loc[:, 'ml_pred_proba'] = model.predict_proba(validation_df[features])[:, 1]
-
     scored_data_list = []
-    for date in tqdm(validation_df['date'].unique(), desc="팩터 점수 계산"):
-        daily_data = validation_df[validation_df['date'] == date].copy()
-        processed_daily_data = daily_data.reset_index() # Ensure '종목코드' is a column
-        daily_scored_data = calculate_factor_scores(processed_daily_data)
-        
-        if '종목코드' not in daily_scored_data.columns:
-            daily_scored_data['종목코드'] = processed_daily_data['종목코드']
-        
-        daily_scored_data['date'] = date
-        scored_data_list.append(daily_scored_data)
-
-    if not scored_data_list:
-        raise ValueError("점수 계산된 데이터가 없습니다.")
-
+    grouped = validation_df.groupby('date')
+    for date, daily_data in tqdm(grouped, desc="일별 팩터 점수 계산"):
+        scored_daily = calculate_factor_scores(daily_data.copy().reset_index())
+        scored_daily['date'] = date
+        scored_data_list.append(scored_daily)
+    if not scored_data_list: raise ValueError("점수 계산된 데이터가 없습니다.")
     all_scored_df = pd.concat(scored_data_list)
-    all_scored_df.reset_index(inplace=True) # 'date' 인덱스를 컬럼으로 변환
-    
-    # 점수들을 기존 검증 데이터프레임에 병합
-    score_cols_to_merge = ['종목코드', 'date'] + [col for col in all_scored_df.columns if '_score' in col]
-    validation_df.reset_index(inplace=True)
-    validation_df = pd.merge(validation_df, all_scored_df[score_cols_to_merge], on=['date', '종목코드'], how='left')
-    
-    # 백테스팅을 위해 (date, 종목코드) MultiIndex 설정
+    score_cols = ['종목코드', 'date', 'value_score', 'quality_score', 'momentum_score', 'supply_score', 'volatility_score']
+    validation_df.reset_index(inplace=True, drop=True)
+    validation_df = pd.merge(validation_df, all_scored_df[score_cols], on=['date', '종목코드'], how='left')
     validation_df.set_index(['date', '종목코드'], inplace=True)
     validation_df.sort_index(inplace=True)
-
     print("  - 모든 데이터 준비 완료.")
-    return model, validation_df
+    return validation_df
 
-def run_backtest_for_weights(weights, data, initial_capital=1_000_000_000, top_n=5):
-    """주어진 가중치로 상세한 일별 백테스트를 실행하고 샤프 지수를 반환합니다."""
-    
-    # --- 1. 일별 final_score 계산 ---
-    score_cols = [col for col in weights.keys() if col in data.columns]
-    data['final_score'] = np.zeros(len(data))
-    for col in score_cols:
-        data['final_score'] += data[col].fillna(0) * weights[col]
-    
-    # 일별로 final_score를 0-100으로 정규화 (Min-Max Scaling)
-    data['final_score'] = data.groupby(level=0)['final_score'].transform(
-        lambda x: 100 * (x - x.min()) / (x.max() - x.min()) if (x.max() - x.min()) > 0 else 50
-    )
-
-    # --- 2. 시뮬레이션 준비 ---
+def run_backtest_for_weights(weights_tuple):
+    weights, data, initial_capital, top_n = weights_tuple
+    backtest_data = data.copy()
+    backtest_data['final_score'] = 0
+    total_weight = sum(weights.values())
+    if total_weight == 0: return 0.0
+    for factor, weight in weights.items():
+        if factor in backtest_data.columns:
+            norm_col = factor + '_norm'
+            backtest_data[norm_col] = backtest_data.groupby(level='date')[factor].transform(
+                lambda x: (x - x.min()) / (x.max() - x.min()) if (x.max() - x.min()) > 0 else 0.5
+            )
+            backtest_data['final_score'] += backtest_data[norm_col].fillna(0.5) * (weight / total_weight)
     cash = initial_capital
     portfolio = {}
     portfolio_history = []
-    daily_dates = data.index.get_level_values('date').unique().sort_values()
-
-    # --- 3. 일별 시뮬레이션 루프 ---
-    for date in tqdm(daily_dates, desc="시뮬레이션 중", leave=False):
-        # --- 3.1. 매도 로직 ---
+    daily_dates = backtest_data.index.get_level_values('date').unique().sort_values()
+    for date in daily_dates:
         for ticker in list(portfolio.keys()):
-            stock_info = portfolio[ticker]
-            days_held = (date - stock_info['buy_date']).days
-            current_price = data.loc[(date, ticker), '종가']
-            
-            # 매도 조건 확인 (수익률은 종가 기준)
-            sell_condition = (
-                (current_price >= stock_info['buy_price'] * 1.05) or # 익절
-                (current_price <= stock_info['buy_price'] * 0.97) or # 손절
-                (days_held >= 15) # 기간 만료
-            )
-            
-            if sell_condition:
-                cash += current_price * stock_info['shares']
-                del portfolio[ticker]
-
-        # --- 3.2. 매수 로직 ---
-        investment_per_stock = cash / top_n # 가용 현금을 N등분하여 투자
-        daily_data = data.loc[date].reset_index()
-        buy_candidates = daily_data[~daily_data['종목코드'].isin(portfolio.keys())].nlargest(top_n, 'final_score')
-
-        for i, row in buy_candidates.iterrows():
-            if cash >= investment_per_stock:
-                ticker = row['종목코드']
-                buy_price = row['종가']
-                shares = investment_per_stock // buy_price
-                
-                if shares > 0:
-                    cash -= buy_price * shares
-                    portfolio[ticker] = {
-                        'buy_date': date,
-                        'buy_price': buy_price,
-                        'shares': shares
-                    }
-
-        # --- 3.3. 일일 포트폴리오 가치 기록 ---
-        current_portfolio_value = 0
-        for ticker, stock_info in portfolio.items():
-            current_price = data.loc[(date, ticker), '종가']
-            current_portfolio_value += current_price * stock_info['shares']
-        
-        total_asset = cash + current_portfolio_value
+            if 'buy_date' in portfolio[ticker] and (date - portfolio[ticker]['buy_date']).days >= 15:
+                if (date, ticker) in backtest_data.index:
+                    current_price = backtest_data.loc[(date, ticker), '종가']
+                    cash += current_price * portfolio[ticker]['shares']
+                    del portfolio[ticker]
+        investment_per_stock = cash / top_n if top_n > 0 else 0
+        if date in backtest_data.index.get_level_values('date'):
+            daily_candidates = backtest_data.loc[date].nlargest(top_n, 'final_score')
+            for ticker, row in daily_candidates.iterrows():
+                if cash >= investment_per_stock:
+                    buy_price = row['종가']
+                    shares = investment_per_stock // buy_price
+                    if shares > 0:
+                        cash -= buy_price * shares
+                        portfolio[ticker] = {'shares': shares, 'buy_date': date, 'buy_price': buy_price}
+        portfolio_value = sum(backtest_data.loc[(date, ticker), '종가'] * info['shares'] for ticker, info in portfolio.items() if (date, ticker) in backtest_data.index)
+        total_asset = cash + portfolio_value
         portfolio_history.append(total_asset)
-
-    # --- 4. 최종 성과 계산 ---
     portfolio_ts = pd.Series(portfolio_history, index=daily_dates)
     daily_returns = portfolio_ts.pct_change().fillna(0)
+    return (daily_returns.mean() / daily_returns.std()) * np.sqrt(252) if daily_returns.std() != 0 else 0.0
 
-    if daily_returns.std() == 0:
-        return 0.0
-        
-    sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
-    return sharpe_ratio
-
-def find_optimal_weights(top_n_stocks):
-    """그리드 서치를 통해 최적의 가중치를 찾습니다."""
-    
-    model, data = get_model_and_data()
-    
+def find_optimal_weights(top_n_stocks, data):
     print("2. 가중치 조합 생성 및 탐색 시작...")
     keys = list(WEIGHT_GRID.keys())
     value_lists = list(WEIGHT_GRID.values())
-    
-    # 모든 가능한 조합을 생성 (itertools.product)
     all_combinations = list(itertools.product(*value_lists))
-    
-    # 가중치의 합이 1.0에 가까운 조합만 필터링 (부동소수점 오차 감안)
     valid_combinations = [dict(zip(keys, combo)) for combo in all_combinations if np.isclose(sum(combo), 1.0)]
-    
-    print(f"총 {len(valid_combinations)}개의 유효한 가중치 조합을 찾았습니다.")
-
+    print(f"총 {len(valid_combinations)}개의 유효한 가중치 조합을 테스트합니다.")
     best_weights = None
     best_sharpe = -np.inf
-    
-    # 각 조합을 테스트하는 루프
-    for weights in tqdm(valid_combinations, desc="가중치 최적화 중"):
-        sharpe = run_backtest_for_weights(weights, data, top_n=top_n_stocks)
+    tasks = [(w, data, 1_000_000_000, top_n_stocks) for w in valid_combinations]
+    results = []
+    for task in tqdm(tasks, desc="가중치 최적화 중"):
+        results.append(run_backtest_for_weights(task))
+    for weights, sharpe in zip(valid_combinations, results):
         if sharpe > best_sharpe:
             best_sharpe = sharpe
             best_weights = weights
+            print(f"\n새로운 최적 가중치 발견! Sharpe: {best_sharpe:.4f}, Weights: {best_weights}")
+    return best_sharpe, best_weights
 
+if __name__ == '__main__':
+    top_n = int(input("시뮬레이션 시 매수할 상위 종목 수를 입력하세요 (예: 5): "))
+    validation_data = get_model_and_data()
+    best_sharpe, best_weights = find_optimal_weights(top_n_stocks=top_n, data=validation_data)
     print(f"\n3. 최적 가중치 탐색 완료!")
     print(f"  - 최적 샤프 지수: {best_sharpe:.4f}")
     print(f"  - 최적 가중치: {best_weights}")
-
-    # 결과를 파일로 저장
     if best_weights:
         with open('optimal_weights.json', 'w') as f:
             json.dump(best_weights, f, indent=4)
-        print("\n`optimal_weights.json` 파일에 최적 가중치를 저장했습니다.")
+        print("`optimal_weights.json` 파일에 최적 가중치를 저장했습니다.")
     else:
-        print("\n유효한 최적 가중치를 찾지 못했습니다.")
-
-
-# --- 메인 실행부 ---
-if __name__ == '__main__':
-    while True:
-        try:
-            user_input = input("시뮬레이션 시 매수할 상위 종목 수를 입력하세요 (예: 5): ")
-            top_n_stocks_input = int(user_input)
-            if top_n_stocks_input > 0:
-                break
-            else:
-                print("0보다 큰 정수를 입력해주세요.")
-        except ValueError:
-            print("유효한 정수를 입력해주세요.")
-    find_optimal_weights(top_n_stocks=top_n_stocks_input)
+        print("유효한 최적 가중치를 찾지 못했습니다.")

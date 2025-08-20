@@ -39,10 +39,25 @@
 
 --- 
 
-## 협업 워크플로우
+## 시스템 실행 가이드
 
-1.  **Gemini**: `gemini.md` 계획에 따라 스크립트를 개발한다.
-2.  **사용자**: 개발된 스크립트를 실행하여 결과물(`json`, `html` 등)을 얻는다.
-3.  **사용자**: Gemini에게 결과 파일 분석을 요청한다. (예: "`backtest_report.html` 파일을 읽고 분석해줘.")
-4.  **Gemini**: 결과 파일을 읽고, 데이터 기반의 분석과 함께 다음 개선점을 구체적으로 제안한다.
-5.  위 과정을 반복하며 시스템을 고도화한다.
+AI 기반 주식 추천 시스템을 실행하기 위한 단계별 가이드입니다.
+
+1.  **DART API 키 설정**:
+    *   `data_fetcher.py`, `train_model.py`, `weight_optimizer.py` 파일 내의 `DART_API_KEY` 변수에 발급받은 DART API 인증키를 입력해야 합니다.
+    *   `DART_API_KEY = "여기에_발급받은_DART_인증키를_붙여넣으세요"` 부분을 본인의 키로 교체하세요.
+
+2.  **기업 코드 맵 생성 (필요시 1회)**:
+    *   `corp_code_map.csv` 파일이 없다면, `python make_corp_map.py` 스크립트를 실행하여 생성합니다. 이 파일은 DART API를 통해 기업 정보를 가져오는 데 필요합니다.
+
+3.  **머신러닝 모델 학습**:
+    *   `python train_model.py` 스크립트를 실행하여 머신러닝 모델을 학습시키고, 스케일러와 함께 `stock_prediction_model_rf_upgraded.joblib` 파일로 저장합니다. 이 과정은 데이터 수집 및 모델 학습에 시간이 다소 소요될 수 있습니다.
+
+4.  **최적 가중치 탐색**:
+    *   `python weight_optimizer.py` 스크립트를 실행하여 `final_score` 계산에 사용될 최적의 가중치 조합을 찾습니다. 이 과정은 백테스팅 시뮬레이션을 포함하므로 시간이 오래 걸릴 수 있습니다. 최적화된 가중치는 `optimal_weights.json` 파일로 저장됩니다.
+
+5.  **백테스팅 실행 (선택 사항)**:
+    *   `python backtest.py` 스크립트를 실행하여 확정된 ML 모델과 최적 가중치를 사용하여 시스템의 최종 성능을 검증합니다. 결과는 `backtest_report.html` 파일로 생성됩니다.
+
+6.  **웹 애플리케이션 실행**:
+    *   모든 준비가 완료되면, `streamlit run app.py` 명령어를 사용하여 웹 기반 주식 추천 시스템을 실행합니다.

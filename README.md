@@ -33,9 +33,10 @@
 
 1.  **DART API 키 발급**
     - **[DART 인증키 신청 페이지](https://opendart.fss.or.kr/uss/umt/EgovStplat.do)**에 접속하여 **무료 인증키를 발급**받습니다.
-    - 발급받은 키(약 40자)를 복사하여 아래 2개 파일의 최상단에 있는 `DART_API_KEY` 변수에 붙여넣습니다.
+    - 발급받은 키(약 40자)를 복사하여 아래 3개 파일의 최상단에 있는 `DART_API_KEY` 변수에 붙여넣습니다.
       - `data_fetcher.py`
       - `train_model.py`
+      - `weight_optimizer.py`
 
 2.  **종목-고유번호 매핑 파일 생성 (최초 1회 필수)**
     - DART API는 종목코드가 아닌 고유번호를 사용하므로, 이를 변환해주는 매핑 파일이 필요합니다.
@@ -50,31 +51,21 @@
       pip install -r requirements.txt
       ```
 
-### 4.2. 모델 학습 (선택 사항, 권장)
+### 4.2. 시스템 실행
 
-최신 데이터로 모델을 직접 학습시키려면, 대화형 스크립트를 실행합니다.
+사전 준비가 완료되면, 다음 순서대로 스크립트를 실행하여 시스템을 준비하고 웹 애플리케이션을 실행합니다.
 
--   **macOS / Linux**:
-    ```bash
-    ./train_model.command
-    ```
--   **Windows**:
-    ```bash
-    ./train_model.bat
-    ```
--   스크립트를 실행하면 CPU 코어 수, 테스트 반복 횟수(`n_iter`), `max_depth` 등을 순서대로 질문합니다. 입력 후 엔터를 누르면 학습이 시작되며, 완료 시 `stock_prediction_model_rf_upgraded.joblib` 파일이 생성/업데이트됩니다.
+1.  **머신러닝 모델 학습**:
+    -   `python train_model.py` 스크립트를 실행하여 머신러닝 모델을 학습시키고, 스케일러와 함께 `stock_prediction_model_rf_upgraded.joblib` 파일로 저장합니다. 이 과정은 데이터 수집 및 모델 학습에 시간이 다소 소요될 수 있습니다.
 
-### 4.3. 웹 애플리케이션 실행
+2.  **최적 가중치 탐색**:
+    -   `python weight_optimizer.py` 스크립트를 실행하여 `final_score` 계산에 사용될 최적의 가중치 조합을 찾습니다. 이 과정은 백테스팅 시뮬레이션을 포함하므로 시간이 오래 걸릴 수 있습니다. 최적화된 가중치는 `optimal_weights.json` 파일로 저장됩니다.
 
--   **macOS / Linux**:
-    ```bash
-    ./start_app.command
-    ```
--   **Windows**:
-    ```bash
-    ./start_app.bat
-    ```
--   또는 터미널에서 직접 `streamlit run app.py`를 실행할 수도 있습니다.
+3.  **웹 애플리케이션 실행**:
+    -   모든 준비가 완료되면, `streamlit run app.py` 명령어를 사용하여 웹 기반 주식 추천 시스템을 실행합니다.
+
+4.  **백테스팅 실행 (선택 사항)**:
+    -   `python backtest.py` 스크립트를 실행하여 확정된 ML 모델과 최적 가중치를 사용하여 시스템의 최종 성능을 검증합니다. 결과는 `backtest_report.html` 파일로 생성됩니다.
 
 ## 5. 시스템 로직 상세 설명
 
@@ -133,7 +124,7 @@
     *   `quality_score`: 0.20
     *   `momentum_score`: 0.30
     *   `volatility_score`: 0.10
-    *   `ml_pred_proba`: 0.20
+    *   `ml_pred_proba`: 0.30
     *   (기타 사용되지 않는 점수는 0.00)
 
 3.  **가중치 정규화 및 최종 점수 계산**: 사용하는 가중치들의 총합이 1이 되도록 정규화한 후, 각 팩터 점수에 곱하여 `final_score`를 계산합니다.
@@ -146,12 +137,12 @@
 
 -   **최적화 목표**: 백테스트 시뮬레이션 결과의 샤프 지수(Sharpe Ratio)를 최대화하는 가중치 조합을 탐색합니다.
 -   **탐색 범위 (`WEIGHT_GRID`)**: 각 팩터에 대해 미리 정의된 이산적인 가중치 후보군을 설정하고, 이들의 모든 유효한 조합을 탐색합니다. 현재 설정된 주요 팩터별 가중치 탐색 범위는 다음과 같습니다:
-    *   `value_score`: 0.0 ~ 0.30 (0.05 간격)
-    *   `quality_score`: 0.0 ~ 0.30 (0.05 간격)
-    *   `momentum_score`: 0.0 ~ 0.30 (0.05 간격)
-    *   `supply_score`: 0.0 ~ 0.30 (0.05 간격)
-    *   `volatility_score`: 0.0 ~ 0.30 (0.05 간격)
-    *   `ml_score`: 0.1 ~ 0.90 (0.05 간격)
+    *   `value_score`: 0.0 ~ 0.31 (0.1 간격)
+    *   `quality_score`: 0.0 ~ 0.31 (0.1 간격)
+    *   `momentum_score`: 0.0 ~ 0.41 (0.1 간격)
+    *   `supply_score`: 0.0 ~ 0.21 (0.1 간격)
+    *   `volatility_score`: 0.0 ~ 0.21 (0.1 간격)
+    *   `ml_pred_proba`: 0.1 ~ 0.51 (0.1 간격)
 -   **시뮬레이션 기준**: 
     *   **매수**: `final_score` 기준 상위 N개 종목 매수 (N은 사용자 입력에 따라 설정).
     *   **매도**: 
