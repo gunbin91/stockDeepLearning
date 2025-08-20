@@ -2,7 +2,7 @@
     "value_score": 0.0,
     "quality_score": 0.0,
     "momentum_score": 0.0,
-    "supply_score": 0.30000000000000004,
-    "volatility_score": 0.2,
-    "ml_score": 0.5000000000000001
+    "supply_score": 0.0,
+    "volatility_score": 0.1,
+    "ml_score": 0.9000000000000000
 }

@@ -19,9 +19,12 @@ if [ ! -d "$VENV_DIR" ]; then
   pip install -r requirements.txt
   pip install pandas-ta
 
-  # NLP 관련 패키지 추가 설치 (requirements.txt에 주석 처리되어 있으므로 별도 명시)
+  # NLP 관련 패키지 추가 설치
   pip install 'transformers[torch]' sentencepiece
-  
+
+  # numpy 버전을 1.26.4로 고정
+  pip install --no-cache-dir --force-reinstall numpy==1.26.4
+
   # 비활성화
   deactivate
   echo "설치가 완료되었습니다. 앱을 시작합니다."
@@ -35,6 +38,10 @@ echo "최신 패키지를 설치합니다..."
 pip install -r requirements.txt
 pip install pandas-ta
 pip install 'transformers[torch]' sentencepiece
+
+# numpy 버전을 1.26.4로 최종 고정
+echo "Numpy 버전을 호환되는 1.26.4로 고정합니다..."
+pip install --no-cache-dir --force-reinstall numpy==1.26.4
 
 # Streamlit 앱 실행
 echo "AI 주식 추천 플랫폼을 시작합니다..."

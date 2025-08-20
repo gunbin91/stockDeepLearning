@@ -13,3 +13,4 @@ imbalanced-learn
 pandas-ta
 finance-datareader
 requests
+dart-fss
