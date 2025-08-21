@@ -45,17 +45,11 @@ def get_financial_data_for_training_http(corp_codes, start_year, end_year):
             params = { 'crtfc_key': DART_API_KEY, 'corp_code': corp_code_str, 'bsns_year': str(year), 'reprt_code': '11011' }
             try:
                 res = requests.get(url, params=params)
-                if res.status_code != 200:
-                    print(f"  [오류] DART API 요청 실패 (상태 코드: {res.status_code}) 응답: {res.text}")
-                    continue
+                if res.status_code != 200: continue
                 data = res.json()
-                if data.get('status') != '000':
-                    print(f"  [오류] DART API가 에러를 반환했습니다. (상태: {data.get('status')}, 메시지: {data.get('message')})")
-                    continue
+                if data.get('status') != '000': continue
                 year_fs_data.extend(data['list'])
-            except Exception as e:
-                print(f"  [오류] DART API 처리 중 예외 발생: {e}")
-                continue
+            except Exception: continue
             time.sleep(0.1)
         if year_fs_data:
             df = pd.DataFrame(year_fs_data)
@@ -82,20 +76,15 @@ def process_single_ticker_data(stock_info, start_date, end_date, all_fs_data, df
         df_price.rename(columns={'Close':'종가', 'Volume':'거래량'}, inplace=True)
         df = df_price[['종가', '거래량']].copy()
         df['연도'] = df.index.year
-        
         df_marcap_ticker = df_marcap_long[df_marcap_long['Code'] == ticker].copy()
         if df_marcap_ticker.empty: return None
         df.sort_index(inplace=True)
         df_marcap_ticker.sort_values(by='Date', inplace=True)
-        
-        df = pd.merge_asof(left=df, right=df_marcap_ticker[['Date', 'Marcap']],
-                           left_index=True, right_on='Date', direction='backward')
-        
+        df = pd.merge_asof(left=df, right=df_marcap_ticker[['Date', 'Marcap']], left_index=True, right_on='Date', direction='backward')
         df.rename(columns={'Marcap': '시가총액'}, inplace=True)
         df['거래대금'] = df['종가'] * df['거래량']
         df.dropna(subset=['시가총액'], inplace=True)
         if df.empty: return None
-        
         for year, fs_year_data in all_fs_data.items():
             if ticker in fs_year_data:
                 fs_data = fs_year_data[ticker]
@@ -113,7 +102,6 @@ def process_single_ticker_data(stock_info, start_date, end_date, all_fs_data, df
         df['거래대금_MA20'] = df['거래대금'].rolling(window=20).mean()
         df['target'] = (df['종가'].shift(-15) / df['종가'] > 1.05).astype(int)
         df['종목코드'] = ticker
-        
         df.set_index('Date', inplace=True)
         return df
     except Exception: return None
@@ -130,7 +118,7 @@ def prepare_full_data(start_date, end_date):
     all_fs_data = get_financial_data_for_training_http(corp_codes, int(start_date[:4]) - 1, int(end_date[:4]))
     if not all_fs_data: raise ValueError("재무 데이터를 가져올 수 없습니다. DART API 키/서버 상태를 확인하세요.")
     try:
-        month_end_dates = pd.date_range(start=start_date, end=end_date, freq='M').strftime('%Y%m%d').tolist()
+        month_end_dates = pd.date_range(start=start_date, end=end_date, freq='ME').strftime('%Y%m%d').tolist()
         marcap_dfs = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             future_to_date = {executor.submit(fdr.StockListing, 'KRX-MARCAP', date): date for date in month_end_dates}
@@ -183,16 +171,26 @@ def get_model_and_data():
     scored_data_list = []
     grouped = validation_df.groupby('date')
     for date, daily_data in tqdm(grouped, desc="일별 팩터 점수 계산"):
-        scored_daily = calculate_factor_scores(daily_data.copy().reset_index())
+        scored_daily = calculate_factor_scores(daily_data.copy())
         scored_daily['date'] = date
         scored_data_list.append(scored_daily)
     if not scored_data_list: raise ValueError("점수 계산된 데이터가 없습니다.")
     all_scored_df = pd.concat(scored_data_list)
     score_cols = ['종목코드', 'date', 'value_score', 'quality_score', 'momentum_score', 'supply_score', 'volatility_score']
-    validation_df.reset_index(inplace=True, drop=True)
+    
+    validation_df.reset_index(inplace=True, drop=True) # 컬럼 충돌 방지를 위해 기존 인덱스 제거
     validation_df = pd.merge(validation_df, all_scored_df[score_cols], on=['date', '종목코드'], how='left')
+    
+    # <<< 핵심 수정: 중복 제거 라인 추가 >>>
+    validation_df.drop_duplicates(subset=['date', '종목코드'], keep='first', inplace=True)
+    
     validation_df.set_index(['date', '종목코드'], inplace=True)
     validation_df.sort_index(inplace=True)
+
+    # 최종적으로 인덱스가 유니크한지 확인 (디버깅용)
+    if not validation_df.index.is_unique:
+        print("[경고] 최종 검증 데이터에 중복된 인덱스가 발견되었습니다.")
+
     print("  - 모든 데이터 준비 완료.")
     return validation_df
 
@@ -258,7 +256,17 @@ def find_optimal_weights(top_n_stocks, data):
     return best_sharpe, best_weights
 
 if __name__ == '__main__':
-    top_n = int(input("시뮬레이션 시 매수할 상위 종목 수를 입력하세요 (예: 5): "))
+    # Move top_n input to the beginning with error handling
+    try:
+        top_n_input = input("시뮬레이션 시 매수할 상위 종목 수를 입력하세요 (예: 5, 기본값 적용 시 Enter): ")
+        top_n = int(top_n_input)
+        if top_n <= 0:
+            print("상위 종목 수는 1 이상이어야 합니다. 기본값 5를 사용합니다.")
+            top_n = 5
+    except ValueError:
+        print("유효하지 않은 입력입니다. 기본값 5를 사용합니다.")
+        top_n = 5
+
     validation_data = get_model_and_data()
     best_sharpe, best_weights = find_optimal_weights(top_n_stocks=top_n, data=validation_data)
     print(f"\n3. 최적 가중치 탐색 완료!")
