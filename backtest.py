@@ -9,12 +9,11 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
 import time
-import pandas_ta as ta # pandas-ta 라이브러리 임포트 추가
+import pandas_ta as ta
 from datetime import datetime
 import concurrent.futures
 
 # 내부 모듈 임포트
-# weight_optimizer에서 함수를 가져오는 대신, 독립적인 함수로 재정의
 from scoring import calculate_factor_scores
 import ensemble
 
@@ -26,13 +25,10 @@ MODEL_FILE = 'stock_prediction_model_rf_upgraded.joblib'
 TOP_N_STOCKS = 5
 DART_API_KEY = "03ac38be54eb9bb095c2304b254c756ebe73c522" # 본인의 키로 교체
 
-# --- 데이터 준비 함수들 (train_model.py와 완전히 동일하게 수정) ---
-
+# --- 데이터 준비 함수들 (이전과 동일) ---
 def get_financial_data_for_training_http(corp_codes, start_year, end_year):
-    # ... (train_model.py와 동일)
     all_fs_data = {}
     for year in range(start_year, end_year + 1):
-        # ... (이하 로직은 이미 안정화되었으므로 그대로 둠)
         year_fs_data = []
         for i in tqdm(range(0, len(corp_codes), 100), desc=f"{year}년 재무 데이터 수집"):
             corp_code_chunk = corp_codes[i:i+100]
@@ -52,7 +48,6 @@ def get_financial_data_for_training_http(corp_codes, start_year, end_year):
     return all_fs_data
 
 def fetch_stock_list():
-    # ... (train_model.py와 동일)
     try:
         df_kospi = fdr.StockListing('KOSPI')
         df_kosdaq = fdr.StockListing('KOSDAQ')
@@ -62,7 +57,6 @@ def fetch_stock_list():
         return stock_list[['종목코드', '종목명']]
     except Exception: return pd.DataFrame()
 
-# <<< 핵심 수정: train_model.py의 함수를 그대로 복사하여 피처 생성 로직 동기화 >>>
 def process_single_ticker_data(stock_info, start_date, end_date, all_fs_data, df_marcap_long):
     ticker = stock_info['종목코드']
     try:
@@ -88,8 +82,6 @@ def process_single_ticker_data(stock_info, start_date, end_date, all_fs_data, df
         if '당기순이익' not in df.columns or '자본총계' not in df.columns: return None
         df[['당기순이익', '자본총계']] = df[['당기순이익', '자본총계']].ffill()
         if df[['당기순이익', '자본총계']].isnull().values.any(): return None
-        
-        # --- 피처 생성 로직 (train_model.py와 100% 동일하게) ---
         df['PER'] = df['시가총액'] / df['당기순이익']
         df['PBR'] = df['시가총액'] / df['자본총계']
         df['ROE'] = df['당기순이익'] / df['자본총계']
@@ -107,17 +99,14 @@ def process_single_ticker_data(stock_info, start_date, end_date, all_fs_data, df
         df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
         df.ta.rsi(close='종가', length=14, append=True)
         df.ta.macd(close='종가', fast=12, slow=26, signal=9, append=True)
-        
         df['종목코드'] = ticker
         df.set_index('Date', inplace=True)
         return df
     except Exception: return None
 
 def prepare_full_data(start_date, end_date):
-    # ... (weight_optimizer.py와 동일하게 이미 안정화된 로직)
     print(f"백테스트 데이터 준비 중 ({start_date} ~ {end_date})...")
     stock_list = fetch_stock_list()
-    # ... 이하 로직은 동일
     if stock_list.empty: raise ValueError("종목 리스트를 가져올 수 없습니다.")
     try:
         df_corp_map = pd.read_csv('corp_code_map.csv', dtype={'corp_code': str, '종목코드': str})
@@ -159,130 +148,177 @@ def prepare_full_data(start_date, end_date):
     final_df.sort_values(by=['date', '종목코드'], inplace=True)
     return final_df
 
-# ... (이하 백테스트 실행 및 리포트 생성 함수는 수정 필요 없음)
 def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5):
-    """상세한 백테스트를 수행하고, 수익률, MDD 등 다양한 성과 지표를 포함한 결과를 반환합니다."""
-    
-    # 1. 최종 점수 계산
-    # calculate_final_score 함수를 사용하여 일관성 유지
     final_df_list = []
-    # 그룹화 전에 인덱스 리셋
     data_reset = data.reset_index()
     for date, daily_data in tqdm(data_reset.groupby('date'), desc="일별 최종 점수 계산"):
-        # ensemble 모듈에 최적 가중치를 임시로 적용하는 방식 대신, 가중치를 직접 전달
         temp_df = ensemble.calculate_final_score(daily_data.copy())
         temp_df['date'] = date
         final_df_list.append(temp_df)
-    
     final_scores_df = pd.concat(final_df_list).set_index(['date', '종목코드'])
     data = data.merge(final_scores_df[['final_score']], left_index=True, right_index=True, how='left')
     data.dropna(subset=['final_score'], inplace=True)
-
-    # 2. 시뮬레이션 변수 초기화
     cash = initial_capital
     portfolio = {}
     portfolio_history = []
     trade_log = []
     daily_dates = data.index.get_level_values('date').unique().sort_values()
+    
+    score_cols_to_log = ['final_score', 'ml_pred_proba', 'value_score', 'quality_score', 'momentum_score', 'supply_score', 'volatility_score']
 
-    # 3. 일별 시뮬레이션
     for date in tqdm(daily_dates, desc="상세 백테스팅 중"):
-        # 3.1. 매도 로직
         for ticker in list(portfolio.keys()):
             if (date, ticker) in data.index:
                 stock_info = portfolio[ticker]
                 current_price = data.loc[(date, ticker), '종가']
-                
-                sell_condition = (
-                    (current_price >= stock_info['buy_price'] * 1.05) or # 익절
-                    (current_price <= stock_info['buy_price'] * 0.97) or # 손절
-                    ((date - stock_info['buy_date']).days >= 15) # 기간만료
-                )
-                
+                sell_condition = ((current_price >= stock_info['buy_price'] * 1.05) or (current_price <= stock_info['buy_price'] * 0.97) or ((date - stock_info['buy_date']).days >= 15))
                 if sell_condition:
                     sell_value = current_price * stock_info['shares']
                     cash += sell_value
-                    trade_log.append({'type': 'sell', 'date': date, 'ticker': ticker, 'price': current_price, 'return': (current_price / stock_info['buy_price']) - 1})
+                    
+                    log_entry = {
+                        'type': 'sell', 'sell_date': date, 'ticker': ticker, 
+                        'sell_price': current_price, 'return': (current_price / stock_info['buy_price']) - 1,
+                        'buy_date': stock_info['buy_date'], 'buy_price': stock_info['buy_price'],
+                        'buy_market_cap': stock_info.get('buy_market_cap')
+                    }
+                    log_entry.update(stock_info['buy_scores'])
+                    trade_log.append(log_entry)
+                    
                     del portfolio[ticker]
 
-        # 3.2. 매수 로직
         investment_per_stock = cash / top_n if top_n > 0 else 0
-        
-        # date에 해당하는 데이터가 있는지 확인
         if date in data.index.get_level_values('date'):
             daily_data = data.loc[date]
             buy_candidates = daily_data[~daily_data.index.get_level_values('종목코드').isin(portfolio.keys())].nlargest(top_n, 'final_score')
-
             for ticker, row in buy_candidates.iterrows():
                 if cash >= investment_per_stock and investment_per_stock > 0:
                     buy_price = row['종가']
                     shares = investment_per_stock // buy_price
                     if shares > 0:
                         cash -= buy_price * shares
-                        portfolio[ticker] = {'buy_date': date, 'buy_price': buy_price, 'shares': shares}
-                        trade_log.append({'type': 'buy', 'date': date, 'ticker': ticker, 'price': buy_price})
-
-        # 3.3. 일일 자산 기록
+                        
+                        buy_scores = {col: row.get(col) for col in score_cols_to_log if col in row}
+                        portfolio[ticker] = {
+                            'buy_date': date, 
+                            'buy_price': buy_price, 
+                            'shares': shares, 
+                            'buy_scores': buy_scores,
+                            'buy_market_cap': row.get('시가총액')
+                        }
+                        
         current_portfolio_value = sum(data.loc[(date, ticker), '종가'] * info['shares'] for ticker, info in portfolio.items() if (date, ticker) in data.index)
         total_asset = cash + current_portfolio_value
         portfolio_history.append(total_asset)
-
-    # 4. 성과 지표 계산
+        
     portfolio_ts = pd.Series(portfolio_history, index=daily_dates)
     daily_returns = portfolio_ts.pct_change().fillna(0)
-    
-    total_return = (portfolio_ts.iloc[-1] / portfolio_ts.iloc[0]) - 1
+    total_return = (portfolio_ts.iloc[-1] / portfolio_ts.iloc[0]) - 1 if len(portfolio_ts) > 1 else 0
     annual_return = (1 + total_return) ** (252 / len(portfolio_ts)) - 1 if len(portfolio_ts) > 0 else 0
     sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252) if daily_returns.std() != 0 else 0
-    
     rolling_max = portfolio_ts.cummax()
     drawdown = (portfolio_ts - rolling_max) / rolling_max
     mdd = drawdown.min()
-
-    return {
-        "portfolio_history": portfolio_ts,
-        "total_return": total_return,
-        "annual_return": annual_return,
-        "sharpe_ratio": sharpe_ratio,
-        "mdd": mdd,
-        "trade_log": pd.DataFrame(trade_log) if trade_log else pd.DataFrame()
-    }
+    
+    # <<< 수정: 승률 계산 로직 추가
+    trade_log_df = pd.DataFrame(trade_log) if trade_log else pd.DataFrame()
+    win_rate = 0.0
+    if not trade_log_df.empty and len(trade_log_df) > 0:
+        winning_trades = len(trade_log_df[trade_log_df['return'] > 0])
+        total_trades = len(trade_log_df)
+        win_rate = winning_trades / total_trades if total_trades > 0 else 0.0
+        
+    return {"portfolio_history": portfolio_ts, "total_return": total_return, "annual_return": annual_return,
+            "sharpe_ratio": sharpe_ratio, "mdd": mdd, "trade_log": trade_log_df, "win_rate": win_rate}
 
 def create_html_report(results, output_path='backtest_report.html'):
-    """백테스팅 결과를 사용하여 Plotly로 시각적인 HTML 리포트를 생성합니다."""
-    
     if results["portfolio_history"].empty:
         print("백테스트 결과가 없어 리포트를 생성할 수 없습니다.")
         return
 
-    # 1. 벤치마크(KOSPI) 데이터 가져오기
     kospi = fdr.DataReader('KS11', start=results["portfolio_history"].index.min(), end=results["portfolio_history"].index.max())
-    
-    # 2. 포트폴리오와 벤치마크 누적 수익률 계산
     portfolio_cumulative = (1 + results["portfolio_history"].pct_change().fillna(0)).cumprod()
     kospi_cumulative = (1 + kospi['Close'].pct_change().fillna(0)).cumprod()
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.7, 0.3], specs=[[{"type": "scatter"}], [{"type": "table"}]])
+    sell_log = results['trade_log'].copy()
+    if not sell_log.empty:
+        stock_list = fetch_stock_list()
+        sell_log = pd.merge(sell_log, stock_list, left_on='ticker', right_on='종목코드', how='left')
+        
+        sell_log['holding_period'] = (sell_log['sell_date'] - sell_log['buy_date']).dt.days
+        
+        sell_log['buy_date_str'] = sell_log['buy_date'].dt.strftime('%Y-%m-%d')
+        sell_log['sell_date_str'] = sell_log['sell_date'].dt.strftime('%Y-%m-%d')
+        sell_log['buy_price'] = sell_log['buy_price'].apply(lambda x: f"{x:,.0f}원")
+        sell_log['sell_price'] = sell_log['sell_price'].apply(lambda x: f"{x:,.0f}원")
+        sell_log['return_str'] = sell_log['return'].apply(lambda x: f"{x:+.2%}")
+        
+        if 'buy_market_cap' in sell_log.columns:
+            sell_log['buy_market_cap_str'] = (sell_log['buy_market_cap'] / 1_0000_0000).apply(lambda x: f"{x:,.0f}억" if pd.notna(x) else 'N/A')
+        else:
+            sell_log['buy_market_cap_str'] = 'N/A'
+
+        if 'ml_pred_proba' in sell_log.columns:
+            sell_log['ml_pred_proba'] = (sell_log['ml_pred_proba'] * 100).round(2)
+        score_cols = ['final_score', 'ml_pred_proba', 'value_score', 'quality_score', 'momentum_score', 'supply_score', 'volatility_score']
+        for col in score_cols:
+            if col in sell_log.columns:
+                sell_log[col] = sell_log[col].round(2)
+        
+        return_colors = sell_log['return'].apply(lambda x: 'rgba(255, 220, 220, 0.7)' if x > 0 else ('rgba(220, 220, 255, 0.7)' if x < 0 else 'white'))
+        
+        rename_map = {
+            'buy_date_str': '매수일', 'sell_date_str': '매도일', 'holding_period': '보유기간(일)',
+            '종목명': '종목명', 'buy_market_cap_str': '매수시점 시총', 'buy_price': '매수가', 
+            'sell_price': '매도가', 'return_str': '수익률', 'final_score': '최종점수(점)', 
+            'ml_pred_proba': '상승확률(%)', 'value_score': '가치(점)', 'quality_score': '퀄리티(점)', 
+            'momentum_score': '모멘텀(점)', 'supply_score': '수급(점)', 'volatility_score': '변동성(점)'
+        }
+        display_columns = list(rename_map.keys())
+        sell_log = sell_log[[col for col in display_columns if col in sell_log.columns]].rename(columns=rename_map)
+    
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
+        row_heights=[0.5, 0.1, 0.4],
+        specs=[[{"type": "scatter"}], [{"type": "table"}], [{"type": "table"}]]
+    )
 
     fig.add_trace(go.Scatter(x=portfolio_cumulative.index, y=portfolio_cumulative, name='포트폴리오', line=dict(color='royalblue', width=2)), row=1, col=1)
     fig.add_trace(go.Scatter(x=kospi_cumulative.index, y=kospi_cumulative, name='KOSPI', line=dict(color='grey', width=1, dash='dash')), row=1, col=1)
 
+    # <<< 수정: 지표 데이터프레임에 '승률' 추가
     metrics_df = pd.DataFrame({
-        '지표': ['총수익률', '연환산 수익률', '최대 낙폭 (MDD)', '샤프 지수'],
-        '값': [
-            f"{results['total_return']:.2%}",
-            f"{results['annual_return']:.2%}",
-            f"{results['mdd']:.2%}",
-            f"{results['sharpe_ratio']:.2f}"
-        ]
+        '지표': ['총수익률', '연환산 수익률', '최대 낙폭 (MDD)', '샤프 지수', '승률'],
+        '값': [f"{results['total_return']:.2%}", f"{results['annual_return']:.2%}", 
+               f"{results['mdd']:.2%}", f"{results['sharpe_ratio']:.2f}", f"{results.get('win_rate', 0.0):.2%}"]
     })
     fig.add_trace(go.Table(
-        header=dict(values=list(metrics_df.columns), fill_color='paleturquoise', align='left'),
-        cells=dict(values=[metrics_df.지표, metrics_df.값], fill_color='lavender', align='left')
+        header=dict(values=list(metrics_df.columns), fill_color='paleturquoise', align='left', font=dict(size=14)),
+        cells=dict(values=[metrics_df.지표, metrics_df.값], fill_color='lavender', align='left', font=dict(size=14), height=30)
     ), row=2, col=1)
+    
+    if not sell_log.empty:
+        fig.add_trace(go.Table(
+            header=dict(values=list(sell_log.columns), fill_color='lightskyblue', align='left', font=dict(size=12)),
+            cells=dict(
+                values=[sell_log[k].tolist() for k in sell_log.columns],
+                fill_color=[['white'] * len(sell_log)] * 7 + [return_colors.tolist()] + [['white'] * len(sell_log)] * 7,
+                align=['left', 'left', 'center', 'left', 'right', 'right', 'right', 'right'] + ['right']*7,
+                font=dict(size=11),
+                height=25
+            )
+        ), row=3, col=1)
 
-    fig.update_layout(title_text='백테스팅 성과 분석 리포트', height=800, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), yaxis_title='누적 수익률')
-    fig.update_xaxes(title_text='기간', row=1, col=1)
+    fig.update_layout(
+        title_text='<b>백테스팅 성과 분석 리포트</b>', height=1400, showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=50, r=50, t=100, b=50)
+    )
+    fig.update_yaxes(title_text='누적 수익률', row=1, col=1)
+    fig.add_annotation(text="<b>주요 성과 지표</b>", xref="paper", yref="paper", x=0.0, y=0.49, showarrow=False, font=dict(size=16))
+    if not sell_log.empty:
+        fig.add_annotation(text="<b>상세 매매 기록 (매도 완료 기준)</b>", xref="paper", yref="paper", x=0.0, y=0.38, showarrow=False, font=dict(size=16))
+    
     fig.write_html(output_path)
 
 def run_final_backtest():
@@ -292,12 +328,8 @@ def run_final_backtest():
     with open(WEIGHTS_FILE, 'r') as f:
         optimal_weights = json.load(f)
     print(f"  - 최적 가중치를 {WEIGHTS_FILE}에서 불러왔습니다.")
-    
-    # --- 데이터 준비 기간 조정 ---
-    # 모델 예측에 필요한 최소 과거 데이터(약 1년치)를 포함하여 데이터를 불러옴
     backtest_start_date_with_warmup = (pd.to_datetime(TEST_START_DATE) - pd.DateOffset(days=400)).strftime('%Y-%m-%d')
     test_data = prepare_full_data(backtest_start_date_with_warmup, TEST_END_DATE)
-
     print("  - 정식 모델 로딩 중...")
     try:
         model_data = joblib.load(MODEL_FILE)
@@ -306,42 +338,31 @@ def run_final_backtest():
         scaler = model_data['scaler']
     except FileNotFoundError:
         raise FileNotFoundError(f"{MODEL_FILE}을 찾을 수 없습니다. train_model.py를 먼저 실행해주세요.")
-    
-    # --- 예측 전 피처 결측치 처리 ---
     test_data_for_pred = test_data[features].copy()
-    # 결측치를 0으로 채우는 것은 간단한 방법이며, 평균/중앙값 대체가 더 좋을 수 있음
-    test_data_for_pred.fillna(0, inplace=True) 
-
+    test_data_for_pred.fillna(0, inplace=True)
     print("  - 테스트 데이터에 ML 예측 적용 중...")
     X_test_scaled = scaler.transform(test_data_for_pred)
     test_data['ml_pred_proba'] = model.predict_proba(X_test_scaled)[:, 1]
-    
-    # --- 실제 백테스트 기간 데이터만 필터링 ---
     test_data = test_data[test_data['date'] >= TEST_START_DATE]
-
     print("  - 팩터 점수 계산 중...")
     scored_data_list = []
     for date, daily_data in tqdm(test_data.groupby('date'), desc="일별 팩터 점수 계산"):
         daily_scored_data = calculate_factor_scores(daily_data.copy())
         daily_scored_data['date'] = date
         scored_data_list.append(daily_scored_data)
-
     if not scored_data_list:
         raise ValueError("점수 계산된 데이터가 없습니다.")
     all_scored_df = pd.concat(scored_data_list)
     score_cols_to_merge = ['종목코드', 'date'] + [col for col in all_scored_df.columns if '_score' in col]
     test_data = pd.merge(test_data, all_scored_df[score_cols_to_merge], on=['date', '종목코드'], how='left')
-    
     test_data.drop_duplicates(subset=['date', '종목코드'], keep='first', inplace=True)
     test_data.set_index(['date', '종목코드'], inplace=True)
     test_data.sort_index(inplace=True)
-    
     print("\n3. 최종 백테스팅 시뮬레이션 실행 중...")
     backtest_results = run_detailed_backtest(test_data, optimal_weights, top_n=TOP_N_STOCKS)
-    
     print("\n4. HTML 리포트 생성 중...")
     create_html_report(backtest_results, output_path='backtest_report.html')
-    print(f"\n✅ 백테스팅 완료. `backtest_report.html` 파일이 생성되었습니다.")
+    print("Backtest complete. Report generated: backtest_report.html")
 
 if __name__ == '__main__':
     run_final_backtest()

@@ -4,6 +4,7 @@ import time
 import os
 from datetime import datetime
 import joblib
+import streamlit.components.v1 as components
 
 # 사용자 정의 모듈 임포트
 import data_fetcher
@@ -73,8 +74,6 @@ def display_model_analysis_page():
 def run_stock_recommendation():
     st.title("주식 추천 시스템")
 
-    # <<< 핵심 수정 1: session_state 초기화 >>>
-    # 앱이 처음 실행되거나 새로고침 될 때, 분석 결과를 저장할 공간을 만듭니다.
     if 'analysis_result' not in st.session_state:
         st.session_state.analysis_result = None
 
@@ -87,7 +86,6 @@ def run_stock_recommendation():
     st.success("종목 목록 수신 완료!")
     st.dataframe(stock_list_df.head())
 
-    # 분석 시작 버튼과 결과 초기화 버튼을 나란히 배치
     col1, col2, _ = st.columns([1, 1, 5])
     with col1:
         start_analysis = st.button("실제 데이터 수집 및 분석 시작", type="primary")
@@ -95,13 +93,10 @@ def run_stock_recommendation():
         if st.session_state.analysis_result is not None:
             if st.button("결과 초기화"):
                 st.session_state.analysis_result = None
-                st.rerun() # 페이지를 즉시 새로고침하여 버튼을 사라지게 함
+                st.rerun()
 
-    # <<< 핵심 수정 2: 분석 실행 및 결과 저장 >>>
-    # 분석 시작 버튼을 눌렀을 때만 전체 분석 로직을 실행합니다.
     if start_analysis:
         with st.spinner("데이터 수집 및 분석 중... (최대 5분 소요)"):
-            # 모든 분석 과정을 거친 후 최종 display_df를 생성
             feature_df = data_fetcher.fetch_all_data(stock_list_df)
             if not feature_df.empty:
                 scored_df = scoring.calculate_factor_scores(feature_df)
@@ -125,31 +120,39 @@ def run_stock_recommendation():
                         '최종순위', '종목명', '현재가(원)', '최종점수(점)', '상승확률(%)',
                         '모멘텀(점)', '가치(점)', '퀄리티(점)', '수급(점)', '변동성(점)', '시가총액(억)'
                     ]
-                    # 최종적으로 보여줄 컬럼만 선택
                     display_df = display_df[[col for col in display_columns if col in display_df.columns]]
-                    
-                    # 최종 결과를 session_state에 저장!
                     st.session_state.analysis_result = display_df
                 else:
                     st.error("머신러닝 모델 예측에 실패했습니다.")
             else:
                 st.error("데이터 수집에 실패했습니다.")
     
-    # <<< 핵심 수정 3: 저장된 결과 표시 >>>
-    # session_state에 저장된 분석 결과가 있으면, 그 결과를 화면에 보여줍니다.
     if st.session_state.analysis_result is not None:
         st.success("분석이 완료되었습니다. 아래는 종합 분석 결과입니다.")
         st.dataframe(st.session_state.analysis_result)
 
+# --- 백테스팅 리포트 페이지 ---
+def display_backtest_report():
+    st.header("백테스팅 리포트")
+    report_path = 'backtest_report.html'
+    if os.path.exists(report_path):
+        with open(report_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        st.success(f"'{report_path}' 파일을 성공적으로 불러왔습니다.")
+        components.html(html_content, height=1500, scrolling=True)
+    else:
+        st.error(f"리포트 파일('{report_path}')을 찾을 수 없습니다. `backtest.py`를 먼저 실행하여 리포트를 생성해주세요.")
 
 def main():
     st.set_page_config(layout="wide")
     st.sidebar.title("메뉴")
-    page = st.sidebar.radio("페이지 선택", ["주식 추천", "학습 모델 분석"])
+    page = st.sidebar.radio("페이지 선택", ["주식 추천", "학습 모델 분석", "백테스팅 리포트"])
     if page == "주식 추천":
         run_stock_recommendation()
     elif page == "학습 모델 분석":
         display_model_analysis_page()
+    elif page == "백테스팅 리포트":
+        display_backtest_report()
 
 if __name__ == "__main__":
     main()
