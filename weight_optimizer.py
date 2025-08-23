@@ -38,17 +38,25 @@ WEIGHT_GRID = {
 
 def get_model_and_data():
     print("1. 최적화를 위한 데이터 준비 및 모델 학습 시작...")
-    # 캐시 관리 모듈을 통해 전체 기간 데이터 로드
     full_data_df = data_cacher.get_preprocessed_data(TRAIN_START_DATE, VALIDATION_END_DATE)
     
     train_df = full_data_df[full_data_df['date'] <= pd.to_datetime(TRAIN_END_DATE)].copy()
     validation_df = full_data_df[full_data_df['date'] >= pd.to_datetime(VALIDATION_START_DATE)].copy()
     
-    # 이하 로직은 이전과 거의 동일
     print(f"  - 훈련 데이터 {len(train_df)} 행, 검증 데이터 {len(validation_df)} 행 준비 완료.")
-    features = ['수익률(1M)', '수익률(3M)', '변동성(1M)', 'PER', 'PBR', 'ROE', '거래대금_MA20']
+    
+    # <<< 핵심 수정: 임시 모델 학습용 features 리스트에도 동일하게 적용 >>>
+    features = [
+        '수익률(1M)', '수익률(3M)', '변동성(1M)', 'PER', 'PBR', 'ROE', '거래대금_MA20',
+        # 새로 추가된 거시 경제 피처
+        'KOSPI_pct_1d', 'KOSPI_pct_5d', 
+        'USDKRW_pct_1d', 'USDKRW_pct_5d', 
+        'VIX_pct_1d', 'VIX_pct_5d'
+    ]
+    
     train_df.dropna(subset=features + ['target'], inplace=True)
-    validation_df.dropna(subset=features + ['종가'], inplace=True)
+    # validation_df는 모든 피처가 필요하므로 target만 제외하고 dropna 수행 안 함
+    validation_df.dropna(subset=['종가'], inplace=True)
     
     X_train = train_df[features]
     y_train = train_df['target']
@@ -59,7 +67,10 @@ def get_model_and_data():
     print("  - 임시 모델 학습 완료.")
     
     print("  - 검증 데이터에 ML 예측 추가 중...")
-    validation_df.loc[:, 'ml_pred_proba'] = model.predict_proba(validation_df[features])[:, 1]
+    # 예측 시점에 validation_df에 거시경제 피처가 없으면 에러 발생 가능하므로, fillna(0) 추가
+    X_val = validation_df[features].copy()
+    X_val.fillna(0, inplace=True)
+    validation_df.loc[:, 'ml_pred_proba'] = model.predict_proba(X_val)[:, 1]
     
     print("  - 팩터 점수는 데이터 로딩 시 이미 계산되었습니다.")
     validation_df.set_index(['date', '종목코드'], inplace=True)

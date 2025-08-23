@@ -8,20 +8,11 @@ from sklearn.preprocessing import StandardScaler
 from scipy.stats import randint
 import warnings
 import argparse
-import os
 from datetime import datetime, timedelta
 
-# 새로 추가: 캐시 관리 모듈 임포트
 import data_cacher 
 
 warnings.filterwarnings('ignore', category=FutureWarning)
-
-# DART_API_KEY는 data_cacher.py에서 관리하므로 여기서는 제거합니다.
-
-# ----------------------------------------------------------------------------------
-# get_financial_data_for_training_http, fetch_stock_list, process_single_ticker_data
-# 함수들을 모두 삭제합니다.
-# ----------------------------------------------------------------------------------
 
 def create_training_data(period_days=365*4):
     print("캐시 관리 모듈을 통해 학습 데이터 생성을 시작합니다...")
@@ -29,7 +20,6 @@ def create_training_data(period_days=365*4):
     end_date = today.strftime('%Y-%m-%d')
     start_date = (today - timedelta(days=period_days)).strftime('%Y-%m-%d')
     
-    # data_cacher의 함수를 호출하여 데이터를 가져옵니다.
     final_df = data_cacher.get_preprocessed_data(start_date, end_date)
     
     if final_df is None or final_df.empty:
@@ -40,12 +30,18 @@ def create_training_data(period_days=365*4):
     print(f"1. 전체 수집 데이터 (Raw): {len(final_df):,} 행")
     
     training_start_date = (today - timedelta(days=365*3)).strftime('%Y-%m-%d')
-    final_df = final_df[final_df['date'] >= training_start_date]
+    final_df = final_df[final_df['date'] >= pd.to_datetime(training_start_date)]
     print(f"2. 워밍업 기간 제외 후: {len(final_df):,} 행")
 
+    # <<< 핵심 수정: features 리스트에 거시 경제 지표 추가 >>>
     features = [
+        # 기존 피처
         '수익률(1W)', '수익률(2W)', '수익률(1M)', '수익률(3M)', '변동성(1M)', 'PER', 'PBR', 'ROE', 'log_mktcap', 'RSI_14',
-        'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9', '거래대금_MA20', '단기 정배열', '52주_신고가_비율'
+        'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9', '거래대금_MA20', '단기 정배열', '52주_신고가_비율',
+        # 새로 추가된 거시 경제 피처
+        'KOSPI_pct_1d', 'KOSPI_pct_5d', 
+        'USDKRW_pct_1d', 'USDKRW_pct_5d', 
+        'VIX_pct_1d', 'VIX_pct_5d'
     ]
     target = 'target'
     
@@ -66,9 +62,8 @@ def create_training_data(period_days=365*4):
     print("학습 데이터 생성 완료!")
     return X, y, features
 
-
+# train_evaluate_and_save_model 함수와 main 함수는 변경할 필요가 없습니다.
 def train_evaluate_and_save_model(X, y, features, n_jobs, n_iter, max_depth_list, model_path='stock_prediction_model_rf_upgraded.joblib'):
-    # 이 함수의 내용은 변경할 필요가 없습니다 (이전과 동일).
     if X is None or y is None or X.empty or y.empty:
         print("학습 데이터가 없어 모델링을 건너뜁니다.")
         return
@@ -127,13 +122,10 @@ def main():
     parser.add_argument('--n_iter', type=int, default=10, help='RandomizedSearchCV 반복 횟수')
     parser.add_argument('--max_depth', type=int, nargs='+', default=[10, 20, 30], help='max_depth 후보 리스트')
     args = parser.parse_args()
-
-    # DART API 키 확인 로직은 data_cacher로 이동했으므로 여기서는 불필요
     
     X, y, features = create_training_data()
     if X is not None:
         train_evaluate_and_save_model(X, y, features, args.n_jobs, args.n_iter, args.max_depth)
-
 
 if __name__ == '__main__':
     main()

@@ -9,14 +9,10 @@ import concurrent.futures
 from tqdm import tqdm
 import os
 
-# -----------------------------------------------------------------------------
-# ⚠️ [필수] 여기에 발급받은 DART API 인증키를 입력하세요!
-# -----------------------------------------------------------------------------
 DART_API_KEY = "03ac38be54eb9bb095c2304b254c756ebe73c522" # 본인의 키로 교체
-# -----------------------------------------------------------------------------
 
 def get_latest_annual_fs_http(stock_list):
-    """'다중회사 주요계정' API를 직접 HTTP 통신으로 호출하여 재무 데이터를 가져옵니다."""
+    # 이 함수는 변경할 필요가 없습니다.
     if DART_API_KEY == "여기에_발급받은_DART_인증키를_붙여넣으세요":
         print("DART API 키가 설정되지 않아 재무 데이터를 수집할 수 없습니다.")
         return pd.DataFrame()
@@ -25,7 +21,6 @@ def get_latest_annual_fs_http(stock_list):
         df_corp_map = pd.read_csv('corp_code_map.csv', dtype={'corp_code': str, '종목코드': str})
     except FileNotFoundError:
         print("[오류] 'corp_code_map.csv' 파일을 찾을 수 없습니다.")
-        print("사전 준비 단계의 'make_corp_map.py' 스크립트를 먼저 실행하여 파일을 생성해주세요.")
         return pd.DataFrame()
         
     target_stocks = pd.merge(stock_list, df_corp_map, on='종목코드')
@@ -45,7 +40,7 @@ def get_latest_annual_fs_http(stock_list):
             'crtfc_key': DART_API_KEY,
             'corp_code': corp_code_str,
             'bsns_year': year,
-            'reprt_code': '11011', # 사업보고서
+            'reprt_code': '11011',
         }
         
         try:
@@ -81,7 +76,7 @@ def get_latest_annual_fs_http(stock_list):
     return fs_pivot
 
 def fetch_stock_list():
-    """FinanceDataReader를 사용하여 KOSPI와 KOSDAQ의 전 종목 리스트와 시가총액 정보를 수집합니다."""
+    # 이 함수는 변경할 필요가 없습니다.
     print("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보를 수집합니다 (KRX-MARCAP)...")
     try:
         df_marcap = fdr.StockListing('KRX-MARCAP')
@@ -98,21 +93,44 @@ def fetch_stock_list():
         print(f"FinanceDataReader API 통신 실패 (KRX-MARCAP): {e}")
         return pd.DataFrame(columns=['종목코드', '종목명', '상장주식수'])
 
+# <<< 핵심 수정 1: data_cacher와 동일한 거시 경제 지표 수집 함수 추가 >>>
+def _fetch_latest_macro_data(start_date, end_date):
+    print("최신 거시 경제 지표 데이터 수집 중...")
+    try:
+        kospi = fdr.DataReader('KS11', start_date, end_date)
+        usdkrw = fdr.DataReader('USD/KRW', start_date, end_date)
+        vix = fdr.DataReader('^VIX', start_date, end_date)
+
+        macro_df = pd.concat([
+            kospi['Close'].rename('KOSPI'),
+            usdkrw['Close'].rename('USDKRW'),
+            vix['Close'].rename('VIX')
+        ], axis=1)
+        
+        macro_df.ffill(inplace=True)
+
+        for col in macro_df.columns:
+            macro_df[f'{col}_pct_1d'] = macro_df[col].pct_change(1)
+            macro_df[f'{col}_pct_5d'] = macro_df[col].pct_change(5)
+        
+        # 가장 마지막 날짜의 데이터(오늘의 시장 상황)만 반환
+        return macro_df.iloc[-1:] 
+    except Exception as e:
+        print(f"최신 거시 경제 지표 수집 실패: {e}")
+        return pd.DataFrame()
 
 def fetch_and_process_ticker_data(stock_info, start_date, end_date, latest_fs_df):
-    """한 종목의 데이터를 수집/가공합니다."""
+    # 이 함수는 변경할 필요가 없습니다.
     ticker = stock_info['종목코드']
     shares = stock_info['상장주식수']
     
     try:
         df_price = fdr.DataReader(ticker, start_date, end_date)
-        if df_price.empty or len(df_price) < 251: return None # 52주 데이터 확보
+        if df_price.empty or len(df_price) < 251: return None
 
         df_price.rename(columns={'Close':'종가', 'Volume':'거래량'}, inplace=True)
-        
         df = df_price.copy()
         
-        # 기술적 지표 계산
         df['수익률(1W)'] = df['종가'].pct_change(periods=5)
         df['수익률(2W)'] = df['종가'].pct_change(periods=10)
         df['수익률(1M)'] = df['종가'].pct_change(periods=20)
@@ -132,7 +150,6 @@ def fetch_and_process_ticker_data(stock_info, start_date, end_date, latest_fs_df
         fs_data = latest_fs_df[latest_fs_df['종목코드'] == ticker]
         if fs_data.empty: return None
         
-        # 최신 데이터 추출
         latest_data = df.iloc[-1].to_dict()
         latest_data['종목코드'] = stock_info['종목코드']
         latest_data['종목명'] = stock_info['종목명']
@@ -141,7 +158,6 @@ def fetch_and_process_ticker_data(stock_info, start_date, end_date, latest_fs_df
         market_cap = latest_data['현재가'] * shares
         latest_data['시가총액'] = market_cap / 1_0000_0000
         
-        # 재무 지표 계산
         net_income = fs_data['당기순이익'].iloc[0] if '당기순이익' in fs_data.columns and not fs_data['당기순이익'].empty else 0
         total_equity = fs_data['자본총계'].iloc[0] if '자본총계' in fs_data.columns and not fs_data['자본총계'].empty else 0
         
@@ -155,7 +171,7 @@ def fetch_and_process_ticker_data(stock_info, start_date, end_date, latest_fs_df
         return None
 
 def fetch_all_data(stock_list):
-    """주어진 종목 리스트에 대해 모든 피처를 병렬로 계산합니다."""
+    # <<< 핵심 수정 2: 모든 피처 데이터에 최신 거시 경제 지표를 추가 >>>
     today = datetime.now()
     end_date = today.strftime('%Y-%m-%d')
     start_date = (today - timedelta(days=400)).strftime('%Y-%m-%d')
@@ -185,12 +201,16 @@ def fetch_all_data(stock_list):
     if not all_feature_data: return pd.DataFrame()
 
     final_df = pd.DataFrame(all_feature_data)
-    final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     
-    # 필수 컬럼 결측치 제거
+    # 최신 거시 경제 데이터 가져오기
+    latest_macro_df = _fetch_latest_macro_data(start_date, end_date)
+    if not latest_macro_df.empty:
+        # 모든 종목 데이터에 동일한 (오늘의) 거시 경제 상황을 적용
+        for col in latest_macro_df.columns:
+            final_df[col] = latest_macro_df[col].values[0]
+
+    final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     final_df.dropna(subset=['종목코드', '종목명', '현재가'], inplace=True)
 
-
     print("모든 피처 데이터 생성 완료!")
-    # <<< 개선됨: 하나의 데이터프레임만 반환
     return final_df

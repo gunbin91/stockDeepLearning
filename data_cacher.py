@@ -8,7 +8,7 @@ import pandas_ta as ta
 import concurrent.futures
 from tqdm import tqdm
 import os
-import json # json 모듈 추가
+import json
 
 # 내부 모듈 임포트
 from scoring import calculate_factor_scores
@@ -20,13 +20,8 @@ CACHE_END_DATE = datetime(datetime.now().year - 1, 12, 31).strftime('%Y-%m-%d')
 CACHE_FILENAME = f"historical_data_up_to_{CACHE_END_DATE.replace('-', '')}.parquet"
 CACHE_FILE_PATH = os.path.join(CACHE_DIR, CACHE_FILENAME)
 
-# --- 데이터 수집 및 전처리 함수 (기존 스크립트들의 함수를 통합) ---
-
 def get_financial_data_for_training_http(corp_codes, start_year, end_year):
-    """
-    <<< 수정됨: 재무 데이터 캐싱 기능 추가 >>>
-    연도별 재무 데이터를 캐시에서 먼저 찾고, 없는 경우에만 API로 수집합니다.
-    """
+    # 이 함수는 이전과 동일, 문제가 없습니다.
     if DART_API_KEY == "여기에_발급받은_DART_인증키를_붙여넣으세요": return {}
     os.makedirs(CACHE_DIR, exist_ok=True)
     
@@ -35,18 +30,16 @@ def get_financial_data_for_training_http(corp_codes, start_year, end_year):
     for year in range(start_year, end_year + 1):
         fs_cache_path = os.path.join(CACHE_DIR, f"fs_data_{year}.json")
         
-        # 과거 연도 데이터는 캐시 확인
         if year < current_year and os.path.exists(fs_cache_path):
             print(f"✅ 캐시된 재무 데이터 로딩: {fs_cache_path}")
             with open(fs_cache_path, 'r', encoding='utf-8') as f:
                 all_fs_data[year] = json.load(f)
             continue
 
-        # 현재 연도이거나, 과거 연도지만 캐시가 없는 경우 API로 수집
         if year < current_year:
             print(f"⚠️ {year}년 재무 데이터 캐시 없음. API를 통해 수집합니다.")
         else:
-            print(f"🔄 현재 연도({year}) 재무 데이터는 항상 새로 수집합니다.")
+            print(f" 현재 연도({year}) 재무 데이터는 항상 새로 수집합니다.")
 
         year_fs_data = []
         for i in tqdm(range(0, len(corp_codes), 100), desc=f"{year}년 재무 데이터 수집"):
@@ -72,16 +65,14 @@ def get_financial_data_for_training_http(corp_codes, start_year, end_year):
             year_data_dict = df_pivot.where(pd.notnull(df_pivot), None).to_dict('index')
             all_fs_data[year] = year_data_dict
             
-            # 과거 연도 데이터만 캐시 파일로 저장
             if year < current_year:
                 with open(fs_cache_path, 'w', encoding='utf-8') as f:
                     json.dump(year_data_dict, f, ensure_ascii=False, indent=4)
                 print(f"✅ {year}년 재무 데이터 캐시 저장 완료: {fs_cache_path}")
-
     return all_fs_data
 
-
 def fetch_stock_list():
+    # 이 함수는 이전과 동일, 문제가 없습니다.
     try:
         df_kospi = fdr.StockListing('KOSPI')
         df_kosdaq = fdr.StockListing('KOSDAQ')
@@ -91,7 +82,47 @@ def fetch_stock_list():
         return stock_list[['종목코드', '종목명']]
     except Exception: return pd.DataFrame()
 
+# <<< 핵심 수정: 훨씬 더 견고하게 만든 거시 경제 지표 수집 함수 >>>
+def _fetch_macro_data(start_date, end_date):
+    """지정된 기간의 주요 거시 경제 지표를 안정적으로 수집하고 변화율을 계산합니다."""
+    print("거시 경제 지표 데이터 수집 중 (KOSPI, USD/KRW, VIX)...")
+    try:
+        # 1. 각 지표를 개별적으로 수집
+        kospi = fdr.DataReader('KS11', start_date, end_date)[['Close']].rename(columns={'Close': 'KOSPI'})
+        usdkrw = fdr.DataReader('USD/KRW', start_date, end_date)[['Close']].rename(columns={'Close': 'USDKRW'})
+        vix = fdr.DataReader('^VIX', start_date, end_date)[['Close']].rename(columns={'Close': 'VIX'})
+
+        # 2. Outer Join으로 안전하게 병합
+        macro_df = pd.merge(kospi, usdkrw, on='Date', how='outer')
+        macro_df = pd.merge(macro_df, vix, on='Date', how='outer')
+        
+        # 날짜 순으로 정렬
+        macro_df.sort_index(inplace=True)
+
+        # 3. 휴장일 등으로 인한 결측치를 직전 값으로 채우기 (Forward Fill)
+        macro_df.ffill(inplace=True)
+        
+        # 맨 처음에 NaN이 있을 경우를 대비해 맨 뒤 값으로 채우기 (Backward Fill)
+        macro_df.bfill(inplace=True)
+
+        # 4. 모든 값이 채워진 후, 안전하게 변화율 계산
+        for col in macro_df.columns:
+            macro_df[f'{col}_pct_1d'] = macro_df[col].pct_change(1)
+            macro_df[f'{col}_pct_5d'] = macro_df[col].pct_change(5)
+        
+        # 5. 날짜 인덱스를 'date' 컬럼으로 변환
+        macro_df.reset_index(inplace=True)
+        macro_df.rename(columns={'Date': 'date'}, inplace=True)
+        
+        print("✅ 거시 경제 지표 수집 및 처리 완료.")
+        return macro_df
+    except Exception as e:
+        print(f"!!!!!!!! [치명적 오류] 거시 경제 지표 수집 실패. 프로세스를 중단합니다. (에러: {e}) !!!!!!!!")
+        # 근본적인 문제일 수 있으므로, 프로그램을 중단시키는 것이 더 안전합니다.
+        raise e
+
 def process_single_ticker_data(stock_info, start_date, end_date, all_fs_data, df_marcap_long):
+    # 이 함수는 이전과 동일, 문제가 없습니다.
     ticker = stock_info['종목코드']
     try:
         df_price = fdr.DataReader(ticker, start_date, end_date)
@@ -145,7 +176,7 @@ def process_single_ticker_data(stock_info, start_date, end_date, all_fs_data, df
     except Exception: return None
 
 def _fetch_and_prepare_data(start_date, end_date):
-    """지정된 기간의 데이터를 처음부터 생성하는 내부 함수"""
+    # 이 함수는 이전과 동일, 문제가 없습니다.
     print(f"데이터 준비 중 ({start_date} ~ {end_date})...")
     stock_list = fetch_stock_list()
     if stock_list.empty: raise ValueError("종목 리스트를 가져올 수 없습니다.")
@@ -157,12 +188,11 @@ def _fetch_and_prepare_data(start_date, end_date):
     target_stocks = pd.merge(stock_list, df_corp_map, on='종목코드')
     corp_codes = target_stocks['corp_code'].unique().tolist()
     
-    # 수정된 함수 호출 (캐시 우선)
     all_fs_data = get_financial_data_for_training_http(corp_codes, int(start_date[:4]) - 1, int(end_date[:4]))
     if not all_fs_data: raise ValueError("재무 데이터를 가져올 수 없습니다.")
     
     try:
-        month_end_dates = pd.date_range(start=start_date, end=end_date, freq='ME').strftime('%Y%m%d').tolist()
+        month_end_dates = pd.date_range(start=start_date, end=end_date, freq='M').strftime('%Y%m%d').tolist()
         marcap_dfs = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             future_to_date = {executor.submit(fdr.StockListing, 'KRX-MARCAP', date): date for date in month_end_dates}
@@ -182,7 +212,7 @@ def _fetch_and_prepare_data(start_date, end_date):
         
     all_data = []
     stock_records = target_stocks.to_dict('records')
-    for row in tqdm(stock_records, desc="피처 데이터 생성"):
+    for row in tqdm(stock_records, desc="개별 종목 피처 데이터 생성"):
         result_df = process_single_ticker_data(row, start_date, end_date, all_fs_data, df_marcap_long)
         if result_df is not None:
             all_data.append(result_df)
@@ -193,6 +223,11 @@ def _fetch_and_prepare_data(start_date, end_date):
     raw_feature_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     raw_feature_df.dropna(subset=['date', '종목코드'], inplace=True)
     raw_feature_df['date'] = pd.to_datetime(raw_feature_df['date'])
+    
+    macro_df = _fetch_macro_data(start_date, end_date)
+    
+    raw_feature_df = pd.merge(raw_feature_df, macro_df, on='date', how='left')
+
     raw_feature_df.sort_values(by=['date', '종목코드'], inplace=True)
 
     print("일별 팩터 점수 계산 중...")
@@ -214,7 +249,7 @@ def _fetch_and_prepare_data(start_date, end_date):
     return final_df
 
 def get_preprocessed_data(start_date, end_date):
-    """캐시를 확인하고, 없으면 생성하며, 최신 데이터를 반영하여 최종 데이터를 반환하는 메인 함수"""
+    # 이 함수는 이전과 동일, 문제가 없습니다.
     os.makedirs(CACHE_DIR, exist_ok=True)
     
     if os.path.exists(CACHE_FILE_PATH):
