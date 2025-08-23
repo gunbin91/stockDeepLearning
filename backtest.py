@@ -7,15 +7,12 @@ import joblib
 import FinanceDataReader as fdr
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import requests
-import time
-import pandas_ta as ta
-from datetime import datetime
-import concurrent.futures
+from datetime import datetime, timedelta
 
 # 내부 모듈 임포트
-from scoring import calculate_factor_scores
+from scoring import calculate_factor_scores # 이 라인은 이제 없어도 되지만, 혹시 모르니 유지
 import ensemble
+import data_cacher
 
 # --- 설정 변수 ---
 TEST_START_DATE = '2024-01-01'
@@ -23,130 +20,8 @@ TEST_END_DATE = datetime.now().strftime('%Y-%m-%d')
 WEIGHTS_FILE = 'optimal_weights.json'
 MODEL_FILE = 'stock_prediction_model_rf_upgraded.joblib'
 TOP_N_STOCKS = 5
-DART_API_KEY = "03ac38be54eb9bb095c2304b254c756ebe73c522" # 본인의 키로 교체
 
-# --- 데이터 준비 함수들 (이전과 동일) ---
-def get_financial_data_for_training_http(corp_codes, start_year, end_year):
-    all_fs_data = {}
-    for year in range(start_year, end_year + 1):
-        year_fs_data = []
-        for i in tqdm(range(0, len(corp_codes), 100), desc=f"{year}년 재무 데이터 수집"):
-            corp_code_chunk = corp_codes[i:i+100]
-            corp_code_str = ','.join(corp_code_chunk)
-            url = "https://opendart.fss.or.kr/api/fnlttMultiAcnt.json"
-            params = { 'crtfc_key': DART_API_KEY, 'corp_code': corp_code_str, 'bsns_year': str(year), 'reprt_code': '11011' }
-            try:
-                res = requests.get(url, params=params)
-                if res.status_code == 200 and res.json().get('status') == '000': year_fs_data.extend(res.json()['list'])
-            except Exception: continue
-            time.sleep(0.1)
-        if year_fs_data:
-            df = pd.DataFrame(year_fs_data)
-            df['thstrm_amount'] = pd.to_numeric(df['thstrm_amount'].str.replace(',', ''), errors='coerce')
-            df_pivot = df.pivot_table(index='stock_code', columns='account_nm', values='thstrm_amount')
-            all_fs_data[year] = df_pivot.to_dict('index')
-    return all_fs_data
-
-def fetch_stock_list():
-    try:
-        df_kospi = fdr.StockListing('KOSPI')
-        df_kosdaq = fdr.StockListing('KOSDAQ')
-        stock_list = pd.concat([df_kospi, df_kosdaq], ignore_index=True)
-        stock_list = stock_list[~stock_list['Name'].str.contains('스팩|리츠', na=False)].copy()
-        stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명'}, inplace=True)
-        return stock_list[['종목코드', '종목명']]
-    except Exception: return pd.DataFrame()
-
-def process_single_ticker_data(stock_info, start_date, end_date, all_fs_data, df_marcap_long):
-    ticker = stock_info['종목코드']
-    try:
-        df_price = fdr.DataReader(ticker, start_date, end_date)
-        if df_price.empty or len(df_price) < 251 + 60: return None
-        df_price.rename(columns={'Close':'종가', 'Volume':'거래량'}, inplace=True)
-        df = df_price[['종가', '거래량']].copy()
-        df['연도'] = df.index.year
-        df_marcap_ticker = df_marcap_long[df_marcap_long['Code'] == ticker].copy()
-        if df_marcap_ticker.empty: return None
-        df.sort_index(inplace=True)
-        df_marcap_ticker.sort_values(by='Date', inplace=True)
-        df = pd.merge_asof(left=df, right=df_marcap_ticker[['Date', 'Marcap']], left_index=True, right_on='Date', direction='backward')
-        df.rename(columns={'Marcap': '시가총액'}, inplace=True)
-        df['거래대금'] = df['종가'] * df['거래량']
-        df.dropna(subset=['시가총액'], inplace=True)
-        if df.empty: return None
-        for year, fs_year_data in all_fs_data.items():
-            if ticker in fs_year_data:
-                fs_data = fs_year_data[ticker]
-                df.loc[df['연도'] == year, '당기순이익'] = fs_data.get('당기순이익')
-                df.loc[df['연도'] == year, '자본총계'] = fs_data.get('자본총계')
-        if '당기순이익' not in df.columns or '자본총계' not in df.columns: return None
-        df[['당기순이익', '자본총계']] = df[['당기순이익', '자본총계']].ffill()
-        if df[['당기순이익', '자본총계']].isnull().values.any(): return None
-        df['PER'] = df['시가총액'] / df['당기순이익']
-        df['PBR'] = df['시가총액'] / df['자본총계']
-        df['ROE'] = df['당기순이익'] / df['자본총계']
-        df['log_mktcap'] = np.log(df['시가총액'])
-        df['수익률(1W)'] = df['종가'].pct_change(periods=5)
-        df['수익률(2W)'] = df['종가'].pct_change(periods=10)
-        df['수익률(1M)'] = df['종가'].pct_change(periods=20)
-        df['수익률(3M)'] = df['종가'].pct_change(periods=60)
-        df['변동성(1M)'] = df['종가'].rolling(window=20).std() / df['종가'].rolling(window=20).mean()
-        df['거래대금_MA20'] = df['거래대금'].rolling(window=20).mean()
-        df['MA5'] = df['종가'].rolling(window=5).mean()
-        df['MA20'] = df['종가'].rolling(window=20).mean()
-        df['단기 정배열'] = (df['MA5'] > df['MA20']).astype(int)
-        df['52주_최고가'] = df['종가'].rolling(window=250).max()
-        df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
-        df.ta.rsi(close='종가', length=14, append=True)
-        df.ta.macd(close='종가', fast=12, slow=26, signal=9, append=True)
-        df['종목코드'] = ticker
-        df.set_index('Date', inplace=True)
-        return df
-    except Exception: return None
-
-def prepare_full_data(start_date, end_date):
-    print(f"백테스트 데이터 준비 중 ({start_date} ~ {end_date})...")
-    stock_list = fetch_stock_list()
-    if stock_list.empty: raise ValueError("종목 리스트를 가져올 수 없습니다.")
-    try:
-        df_corp_map = pd.read_csv('corp_code_map.csv', dtype={'corp_code': str, '종목코드': str})
-    except FileNotFoundError: raise FileNotFoundError("corp_code_map.csv 파일이 없습니다.")
-    target_stocks = pd.merge(stock_list, df_corp_map, on='종목코드')
-    corp_codes = target_stocks['corp_code'].unique().tolist()
-    all_fs_data = get_financial_data_for_training_http(corp_codes, int(start_date[:4]) - 1, int(end_date[:4]))
-    if not all_fs_data: raise ValueError("재무 데이터를 가져올 수 없습니다.")
-    try:
-        month_end_dates = pd.date_range(start=start_date, end=end_date, freq='ME').strftime('%Y%m%d').tolist()
-        marcap_dfs = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            future_to_date = {executor.submit(fdr.StockListing, 'KRX-MARCAP', date): date for date in month_end_dates}
-            for future in tqdm(concurrent.futures.as_completed(future_to_date), total=len(month_end_dates), desc="시가총액 데이터 수집 (백테스트용)"):
-                try:
-                    date_str = future_to_date[future]
-                    result_df = future.result()
-                    if not result_df.empty:
-                        result_df['Date'] = pd.to_datetime(date_str)
-                        marcap_dfs.append(result_df)
-                except Exception: continue
-        if not marcap_dfs: raise Exception("수집된 시가총액 데이터가 없습니다.")
-        df_marcap_long = pd.concat(marcap_dfs, ignore_index=True)
-        df_marcap_long.sort_values(by=['Code', 'Date'], inplace=True)
-    except Exception as e:
-        raise ConnectionError(f"과거 시가총액 데이터 수집 실패: {e}")
-    all_data = []
-    stock_records = target_stocks.to_dict('records')
-    for row in tqdm(stock_records, desc="피처 데이터 생성 (백테스트용)"):
-        result_df = process_single_ticker_data(row, start_date, end_date, all_fs_data, df_marcap_long)
-        if result_df is not None:
-            all_data.append(result_df)
-    if not all_data: raise ValueError("처리된 데이터가 없습니다.")
-    final_df = pd.concat(all_data).reset_index()
-    final_df.rename(columns={'Date': 'date'}, inplace=True)
-    final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    final_df.dropna(subset=['date', '종목코드'], inplace=True)
-    final_df['date'] = pd.to_datetime(final_df['date'])
-    final_df.sort_values(by=['date', '종목코드'], inplace=True)
-    return final_df
+# run_detailed_backtest, create_html_report 함수는 이전과 동일하게 유지
 
 def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5):
     final_df_list = []
@@ -220,7 +95,6 @@ def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5)
     drawdown = (portfolio_ts - rolling_max) / rolling_max
     mdd = drawdown.min()
     
-    # <<< 수정: 승률 계산 로직 추가
     trade_log_df = pd.DataFrame(trade_log) if trade_log else pd.DataFrame()
     win_rate = 0.0
     if not trade_log_df.empty and len(trade_log_df) > 0:
@@ -242,7 +116,7 @@ def create_html_report(results, output_path='backtest_report.html'):
 
     sell_log = results['trade_log'].copy()
     if not sell_log.empty:
-        stock_list = fetch_stock_list()
+        stock_list = data_cacher.fetch_stock_list()
         sell_log = pd.merge(sell_log, stock_list, left_on='ticker', right_on='종목코드', how='left')
         
         sell_log['holding_period'] = (sell_log['sell_date'] - sell_log['buy_date']).dt.days
@@ -265,7 +139,7 @@ def create_html_report(results, output_path='backtest_report.html'):
             if col in sell_log.columns:
                 sell_log[col] = sell_log[col].round(2)
         
-        return_colors = sell_log['return'].apply(lambda x: 'rgba(255, 220, 220, 0.7)' if x > 0 else ('rgba(220, 220, 255, 0.7)' if x < 0 else 'white'))
+        return_colors = sell_log['return'].apply(lambda x: 'rgba(255, 220, 220, 0.7)' if x > 0 else ('rgba(220, 220, 225, 0.7)' if x < 0 else 'white'))
         
         rename_map = {
             'buy_date_str': '매수일', 'sell_date_str': '매도일', 'holding_period': '보유기간(일)',
@@ -286,7 +160,6 @@ def create_html_report(results, output_path='backtest_report.html'):
     fig.add_trace(go.Scatter(x=portfolio_cumulative.index, y=portfolio_cumulative, name='포트폴리오', line=dict(color='royalblue', width=2)), row=1, col=1)
     fig.add_trace(go.Scatter(x=kospi_cumulative.index, y=kospi_cumulative, name='KOSPI', line=dict(color='grey', width=1, dash='dash')), row=1, col=1)
 
-    # <<< 수정: 지표 데이터프레임에 '승률' 추가
     metrics_df = pd.DataFrame({
         '지표': ['총수익률', '연환산 수익률', '최대 낙폭 (MDD)', '샤프 지수', '승률'],
         '값': [f"{results['total_return']:.2%}", f"{results['annual_return']:.2%}", 
@@ -321,6 +194,7 @@ def create_html_report(results, output_path='backtest_report.html'):
     
     fig.write_html(output_path)
 
+
 def run_final_backtest():
     print("1. 최종 백테스트 시작...")
     if not os.path.exists(WEIGHTS_FILE):
@@ -328,8 +202,10 @@ def run_final_backtest():
     with open(WEIGHTS_FILE, 'r') as f:
         optimal_weights = json.load(f)
     print(f"  - 최적 가중치를 {WEIGHTS_FILE}에서 불러왔습니다.")
-    backtest_start_date_with_warmup = (pd.to_datetime(TEST_START_DATE) - pd.DateOffset(days=400)).strftime('%Y-%m-%d')
-    test_data = prepare_full_data(backtest_start_date_with_warmup, TEST_END_DATE)
+    
+    backtest_start_date_with_warmup = (pd.to_datetime(TEST_START_DATE) - timedelta(days=400)).strftime('%Y-%m-%d')
+    test_data = data_cacher.get_preprocessed_data(backtest_start_date_with_warmup, TEST_END_DATE)
+    
     print("  - 정식 모델 로딩 중...")
     try:
         model_data = joblib.load(MODEL_FILE)
@@ -338,31 +214,29 @@ def run_final_backtest():
         scaler = model_data['scaler']
     except FileNotFoundError:
         raise FileNotFoundError(f"{MODEL_FILE}을 찾을 수 없습니다. train_model.py를 먼저 실행해주세요.")
+    
     test_data_for_pred = test_data[features].copy()
     test_data_for_pred.fillna(0, inplace=True)
+    
     print("  - 테스트 데이터에 ML 예측 적용 중...")
     X_test_scaled = scaler.transform(test_data_for_pred)
     test_data['ml_pred_proba'] = model.predict_proba(X_test_scaled)[:, 1]
-    test_data = test_data[test_data['date'] >= TEST_START_DATE]
-    print("  - 팩터 점수 계산 중...")
-    scored_data_list = []
-    for date, daily_data in tqdm(test_data.groupby('date'), desc="일별 팩터 점수 계산"):
-        daily_scored_data = calculate_factor_scores(daily_data.copy())
-        daily_scored_data['date'] = date
-        scored_data_list.append(daily_scored_data)
-    if not scored_data_list:
-        raise ValueError("점수 계산된 데이터가 없습니다.")
-    all_scored_df = pd.concat(scored_data_list)
-    score_cols_to_merge = ['종목코드', 'date'] + [col for col in all_scored_df.columns if '_score' in col]
-    test_data = pd.merge(test_data, all_scored_df[score_cols_to_merge], on=['date', '종목코드'], how='left')
-    test_data.drop_duplicates(subset=['date', '종목코드'], keep='first', inplace=True)
+    
+    test_data = test_data[test_data['date'] >= pd.to_datetime(TEST_START_DATE)]
+    
+    # <<< 팩터 점수 계산 루프가 필요 없어짐 >>>
+    # data_cacher에서 이미 모든 _score 컬럼들을 계산해왔기 때문입니다.
+    print("  - 팩터 점수는 데이터 로딩 시 이미 계산되었습니다.")
+    
     test_data.set_index(['date', '종목코드'], inplace=True)
     test_data.sort_index(inplace=True)
+    
     print("\n3. 최종 백테스팅 시뮬레이션 실행 중...")
     backtest_results = run_detailed_backtest(test_data, optimal_weights, top_n=TOP_N_STOCKS)
+    
     print("\n4. HTML 리포트 생성 중...")
     create_html_report(backtest_results, output_path='backtest_report.html')
-    print("Backtest complete. Report generated: backtest_report.html")
+    print(f"\n✅ 백테스팅 완료. `backtest_report.html` 파일이 생성되었습니다.")
 
 if __name__ == '__main__':
     run_final_backtest()
