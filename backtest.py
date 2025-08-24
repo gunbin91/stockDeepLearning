@@ -40,6 +40,9 @@ def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5)
     daily_dates = data.index.get_level_values('date').unique().sort_values()
     
     score_cols_to_log = ['final_score', 'ml_pred_proba', 'value_score', 'quality_score', 'momentum_score', 'supply_score', 'volatility_score']
+    # --- 수정 시작: 로그에 기록할 거시경제 지표 컬럼 목록 추가 ---
+    macro_cols_to_log = ['KOSPI_pct_1d', 'KOSPI_pct_5d', 'USDKRW_pct_1d', 'USDKRW_pct_5d', 'VIX_pct_1d', 'VIX_pct_5d']
+    # --- 수정 종료 ---
 
     for date in tqdm(daily_dates, desc="상세 백테스팅 중"):
         for ticker in list(portfolio.keys()):
@@ -58,6 +61,10 @@ def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5)
                         'buy_market_cap': stock_info.get('buy_market_cap')
                     }
                     log_entry.update(stock_info['buy_scores'])
+                    # --- 수정 시작: 매도 로그에 저장해둔 매수 시점의 거시경제 지표 추가 ---
+                    if 'buy_macro_conditions' in stock_info:
+                        log_entry.update(stock_info['buy_macro_conditions'])
+                    # --- 수정 종료 ---
                     trade_log.append(log_entry)
                     
                     del portfolio[ticker]
@@ -74,13 +81,17 @@ def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5)
                         cash -= buy_price * shares
                         
                         buy_scores = {col: row.get(col) for col in score_cols_to_log if col in row}
+                        # --- 수정 시작: 매수 시점의 거시경제 지표 저장 ---
+                        buy_macro_conditions = {col: row.get(col) for col in macro_cols_to_log if col in row}
                         portfolio[ticker] = {
                             'buy_date': date, 
                             'buy_price': buy_price, 
                             'shares': shares, 
                             'buy_scores': buy_scores,
+                            'buy_macro_conditions': buy_macro_conditions, # 추가
                             'buy_market_cap': row.get('시가총액')
                         }
+                        # --- 수정 종료 ---
                         
         current_portfolio_value = sum(data.loc[(date, ticker), '종가'] * info['shares'] for ticker, info in portfolio.items() if (date, ticker) in data.index)
         total_asset = cash + current_portfolio_value
@@ -127,6 +138,17 @@ def create_html_report(results, output_path='backtest_report.html'):
         sell_log['sell_price'] = sell_log['sell_price'].apply(lambda x: f"{x:,.0f}원")
         sell_log['return_str'] = sell_log['return'].apply(lambda x: f"{x:+.2%}")
         
+        # --- 수정 시작: 거시경제 지표 데이터 포맷팅 ---
+        macro_cols_to_format = {
+            'KOSPI_pct_1d': 'KOSPI(1일)', 'KOSPI_pct_5d': 'KOSPI(5일)',
+            'USDKRW_pct_1d': '환율(1일)', 'USDKRW_pct_5d': '환율(5일)',
+            'VIX_pct_1d': 'VIX(1일)', 'VIX_pct_5d': 'VIX(5일)'
+        }
+        for col, new_name in macro_cols_to_format.items():
+            if col in sell_log.columns:
+                sell_log[col] = sell_log[col].apply(lambda x: f"{x:+.2%}" if pd.notna(x) else 'N/A')
+        # --- 수정 종료 ---
+        
         if 'buy_market_cap' in sell_log.columns:
             sell_log['buy_market_cap_str'] = (sell_log['buy_market_cap'] / 1_0000_0000).apply(lambda x: f"{x:,.0f}억" if pd.notna(x) else 'N/A')
         else:
@@ -146,7 +168,12 @@ def create_html_report(results, output_path='backtest_report.html'):
             '종목명': '종목명', 'buy_market_cap_str': '매수시점 시총', 'buy_price': '매수가', 
             'sell_price': '매도가', 'return_str': '수익률', 'final_score': '최종점수(점)', 
             'ml_pred_proba': '상승확률(%)', 'value_score': '가치(점)', 'quality_score': '퀄리티(점)', 
-            'momentum_score': '모멘텀(점)', 'supply_score': '수급(점)', 'volatility_score': '변동성(점)'
+            'momentum_score': '모멘텀(점)', 'supply_score': '수급(점)', 'volatility_score': '변동성(점)',
+            # --- 수정 시작: 거시경제 지표 컬럼 이름 추가 ---
+            'KOSPI_pct_1d': 'KOSPI(1일)', 'KOSPI_pct_5d': 'KOSPI(5일)',
+            'USDKRW_pct_1d': '환율(1일)', 'USDKRW_pct_5d': '환율(5일)',
+            'VIX_pct_1d': 'VIX(1일)', 'VIX_pct_5d': 'VIX(5일)'
+            # --- 수정 종료 ---
         }
         display_columns = list(rename_map.keys())
         sell_log = sell_log[[col for col in display_columns if col in sell_log.columns]].rename(columns=rename_map)
@@ -171,16 +198,19 @@ def create_html_report(results, output_path='backtest_report.html'):
     ), row=2, col=1)
     
     if not sell_log.empty:
+        # --- 수정 시작: 테이블 셀 속성값 업데이트 (컬럼 추가에 따른 개수 조정) ---
+        num_new_cols = len([col for col in macro_cols_to_format if col in results['trade_log'].columns]) # 실제 추가된 컬럼 수 계산
         fig.add_trace(go.Table(
             header=dict(values=list(sell_log.columns), fill_color='lightskyblue', align='left', font=dict(size=12)),
             cells=dict(
                 values=[sell_log[k].tolist() for k in sell_log.columns],
-                fill_color=[['white'] * len(sell_log)] * 7 + [return_colors.tolist()] + [['white'] * len(sell_log)] * 7,
-                align=['left', 'left', 'center', 'left', 'right', 'right', 'right', 'right'] + ['right']*7,
+                fill_color=[['white'] * len(sell_log)] * 7 + [return_colors.tolist()] + [['white'] * len(sell_log)] * (7 + num_new_cols),
+                align=['left', 'left', 'center', 'left', 'right', 'right', 'right', 'right'] + ['right'] * (7 + num_new_cols),
                 font=dict(size=11),
                 height=25
             )
         ), row=3, col=1)
+        # --- 수정 종료 ---
 
     fig.update_layout(
         title_text='<b>백테스팅 성과 분석 리포트</b>', height=1400, showlegend=True,
