@@ -92,9 +92,9 @@ def _fetch_macro_data(start_date, end_date):
         usdkrw = fdr.DataReader('USD/KRW', start_date, end_date)[['Close']].rename(columns={'Close': 'USDKRW'})
         vix = fdr.DataReader('^VIX', start_date, end_date)[['Close']].rename(columns={'Close': 'VIX'})
 
-        # 2. Outer Join으로 안전하게 병합
-        macro_df = pd.merge(kospi, usdkrw, on='Date', how='outer')
-        macro_df = pd.merge(macro_df, vix, on='Date', how='outer')
+        # 2. Outer Join으로 안전하게 병합 (인덱스 기준)
+        macro_df = pd.merge(kospi, usdkrw, left_index=True, right_index=True, how='outer')
+        macro_df = pd.merge(macro_df, vix, left_index=True, right_index=True, how='outer')
         
         # 날짜 순으로 정렬
         macro_df.sort_index(inplace=True)
@@ -112,7 +112,7 @@ def _fetch_macro_data(start_date, end_date):
         
         # 5. 날짜 인덱스를 'date' 컬럼으로 변환
         macro_df.reset_index(inplace=True)
-        macro_df.rename(columns={'Date': 'date'}, inplace=True)
+        macro_df.rename(columns={'index': 'date'}, inplace=True)
         
         print("✅ 거시 경제 지표 수집 및 처리 완료.")
         return macro_df
@@ -225,7 +225,7 @@ def _fetch_and_prepare_data(start_date, end_date):
     raw_feature_df['date'] = pd.to_datetime(raw_feature_df['date'])
     
     macro_df = _fetch_macro_data(start_date, end_date)
-    
+
     raw_feature_df = pd.merge(raw_feature_df, macro_df, on='date', how='left')
 
     raw_feature_df.sort_values(by=['date', '종목코드'], inplace=True)
