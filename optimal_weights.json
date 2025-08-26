@@ -3,6 +3,6 @@
     "quality_score": 0.0,
     "momentum_score": 0.0,
     "supply_score": 0.0,
-    "volatility_score": 0.2,
-    "ml_pred_proba": 0.8
+    "volatility_score": 0.0,
+    "ml_pred_proba": 1.0
 }

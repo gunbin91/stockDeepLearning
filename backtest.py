@@ -225,7 +225,7 @@ def create_html_report(results, output_path='backtest_report.html'):
     fig.write_html(output_path)
 
 
-def run_final_backtest():
+def run_final_backtest(initial_capital):
     print("1. 최종 백테스트 시작...")
     if not os.path.exists(WEIGHTS_FILE):
         raise FileNotFoundError(f"{WEIGHTS_FILE}을 찾을 수 없습니다. weight_optimizer.py를 먼저 실행해주세요.")
@@ -261,12 +261,26 @@ def run_final_backtest():
     test_data.set_index(['date', '종목코드'], inplace=True)
     test_data.sort_index(inplace=True)
     
-    print("\n3. 최종 백테스팅 시뮬레이션 실행 중...")
-    backtest_results = run_detailed_backtest(test_data, optimal_weights, top_n=TOP_N_STOCKS)
+    print(f"\n3. 최종 백테스팅 시뮬레이션 실행 중... (초기 자본: {initial_capital:,.0f}원)")
+    backtest_results = run_detailed_backtest(test_data, optimal_weights, initial_capital=initial_capital, top_n=TOP_N_STOCKS)
     
     print("\n4. HTML 리포트 생성 중...")
     create_html_report(backtest_results, output_path='backtest_report.html')
     print(f"\n✅ 백테스팅 완료. `backtest_report.html` 파일이 생성되었습니다.")
 
 if __name__ == '__main__':
-    run_final_backtest()
+    while True:
+        try:
+            capital_input = input("초기 투자 자본금을 입력하세요 (기본값: 1,000,000,000) -> ")
+            if not capital_input:
+                initial_capital = 1_000_000_000
+                break
+            initial_capital = int(capital_input)
+            if initial_capital > 0:
+                break
+            else:
+                print("0보다 큰 값을 입력해야 합니다.")
+        except ValueError:
+            print("유효한 숫자를 입력하세요.")
+
+    run_final_backtest(initial_capital)
