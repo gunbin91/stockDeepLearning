@@ -21,8 +21,6 @@ WEIGHTS_FILE = 'optimal_weights.json'
 MODEL_FILE = 'stock_prediction_model_rf_upgraded.joblib'
 TOP_N_STOCKS = 5
 
-# run_detailed_backtest, create_html_report 함수는 이전과 동일하게 유지
-
 def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5):
     final_df_list = []
     data_reset = data.reset_index()
@@ -40,39 +38,43 @@ def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5)
     daily_dates = data.index.get_level_values('date').unique().sort_values()
     
     score_cols_to_log = ['final_score', 'ml_pred_proba', 'value_score', 'quality_score', 'momentum_score', 'supply_score', 'volatility_score']
-    # --- 수정 시작: 로그에 기록할 거시경제 지표 컬럼 목록 추가 ---
-    macro_cols_to_log = ['KOSPI_pct_1d', 'KOSPI_pct_5d', 'USDKRW_pct_1d', 'USDKRW_pct_5d', 'VIX_pct_1d', 'VIX_pct_5d']
-    # --- 수정 종료 ---
 
     for date in tqdm(daily_dates, desc="상세 백테스팅 중"):
+        daily_trades = []
         for ticker in list(portfolio.keys()):
+            stock_info = portfolio[ticker]
+            is_holding_period_expired = (date - stock_info['buy_date']).days >= 15
+
             if (date, ticker) in data.index:
-                stock_info = portfolio[ticker]
                 current_price = data.loc[(date, ticker), '종가']
-                sell_condition = ((current_price >= stock_info['buy_price'] * 1.05) or (current_price <= stock_info['buy_price'] * 0.97) or ((date - stock_info['buy_date']).days >= 15))
-                if sell_condition:
+                
+                sell_condition_price = (current_price >= stock_info['buy_price'] * 1.05) or \
+                                       (current_price <= stock_info['buy_price'] * 0.97)
+
+                if sell_condition_price or is_holding_period_expired:
+                    buy_amount = stock_info['buy_price'] * stock_info['shares']
                     sell_value = current_price * stock_info['shares']
+                    profit = sell_value - buy_amount
                     cash += sell_value
                     
                     log_entry = {
                         'type': 'sell', 'sell_date': date, 'ticker': ticker, 
                         'sell_price': current_price, 'return': (current_price / stock_info['buy_price']) - 1,
                         'buy_date': stock_info['buy_date'], 'buy_price': stock_info['buy_price'],
-                        'buy_market_cap': stock_info.get('buy_market_cap')
+                        'buy_market_cap': stock_info.get('buy_market_cap'),
+                        'buy_amount': buy_amount,
+                        'profit': profit
                     }
                     log_entry.update(stock_info['buy_scores'])
-                    # --- 수정 시작: 매도 로그에 저장해둔 매수 시점의 거시경제 지표 추가 ---
-                    if 'buy_macro_conditions' in stock_info:
-                        log_entry.update(stock_info['buy_macro_conditions'])
-                    # --- 수정 종료 ---
-                    trade_log.append(log_entry)
+                    daily_trades.append(log_entry)
                     
                     del portfolio[ticker]
 
         investment_per_stock = cash / top_n if top_n > 0 else 0
         if date in data.index.get_level_values('date'):
             daily_data = data.loc[date]
-            buy_candidates = daily_data[~daily_data.index.get_level_values('종목코드').isin(portfolio.keys())].nlargest(top_n, 'final_score')
+            daily_data_tradable = daily_data[daily_data['거래량'] > 0]
+            buy_candidates = daily_data_tradable[~daily_data_tradable.index.get_level_values('종목코드').isin(portfolio.keys())].nlargest(top_n, 'final_score')
             for ticker, row in buy_candidates.iterrows():
                 if cash >= investment_per_stock and investment_per_stock > 0:
                     buy_price = row['종가']
@@ -81,22 +83,22 @@ def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5)
                         cash -= buy_price * shares
                         
                         buy_scores = {col: row.get(col) for col in score_cols_to_log if col in row}
-                        # --- 수정 시작: 매수 시점의 거시경제 지표 저장 ---
-                        buy_macro_conditions = {col: row.get(col) for col in macro_cols_to_log if col in row}
                         portfolio[ticker] = {
                             'buy_date': date, 
                             'buy_price': buy_price, 
                             'shares': shares, 
                             'buy_scores': buy_scores,
-                            'buy_macro_conditions': buy_macro_conditions, # 추가
                             'buy_market_cap': row.get('시가총액')
                         }
-                        # --- 수정 종료 ---
                         
         current_portfolio_value = sum(data.loc[(date, ticker), '종가'] * info['shares'] for ticker, info in portfolio.items() if (date, ticker) in data.index)
         total_asset = cash + current_portfolio_value
         portfolio_history.append(total_asset)
         
+        for entry in daily_trades:
+            entry['total_asset'] = total_asset
+            trade_log.append(entry)
+            
     portfolio_ts = pd.Series(portfolio_history, index=daily_dates)
     daily_returns = portfolio_ts.pct_change().fillna(0)
     total_return = (portfolio_ts.iloc[-1] / portfolio_ts.iloc[0]) - 1 if len(portfolio_ts) > 1 else 0
@@ -113,8 +115,11 @@ def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5)
         total_trades = len(trade_log_df)
         win_rate = winning_trades / total_trades if total_trades > 0 else 0.0
         
+    final_asset = portfolio_ts.iloc[-1] if not portfolio_ts.empty else initial_capital
+        
     return {"portfolio_history": portfolio_ts, "total_return": total_return, "annual_return": annual_return,
-            "sharpe_ratio": sharpe_ratio, "mdd": mdd, "trade_log": trade_log_df, "win_rate": win_rate}
+            "sharpe_ratio": sharpe_ratio, "mdd": mdd, "trade_log": trade_log_df, "win_rate": win_rate,
+            "initial_capital": initial_capital, "final_asset": final_asset}
 
 def create_html_report(results, output_path='backtest_report.html'):
     if results["portfolio_history"].empty:
@@ -138,17 +143,10 @@ def create_html_report(results, output_path='backtest_report.html'):
         sell_log['sell_price'] = sell_log['sell_price'].apply(lambda x: f"{x:,.0f}원")
         sell_log['return_str'] = sell_log['return'].apply(lambda x: f"{x:+.2%}")
         
-        # --- 수정 시작: 거시경제 지표 데이터 포맷팅 ---
-        macro_cols_to_format = {
-            'KOSPI_pct_1d': 'KOSPI(1일)', 'KOSPI_pct_5d': 'KOSPI(5일)',
-            'USDKRW_pct_1d': '환율(1일)', 'USDKRW_pct_5d': '환율(5일)',
-            'VIX_pct_1d': 'VIX(1일)', 'VIX_pct_5d': 'VIX(5일)'
-        }
-        for col, new_name in macro_cols_to_format.items():
-            if col in sell_log.columns:
-                sell_log[col] = sell_log[col].apply(lambda x: f"{x:+.2%}" if pd.notna(x) else 'N/A')
-        # --- 수정 종료 ---
-        
+        sell_log['buy_amount_str'] = sell_log['buy_amount'].apply(lambda x: f"{x:,.0f}원")
+        sell_log['profit_str'] = sell_log['profit'].apply(lambda x: f"{x:,.0f}원")
+        sell_log['total_asset_str'] = sell_log['total_asset'].apply(lambda x: f"{x:,.0f}원")
+
         if 'buy_market_cap' in sell_log.columns:
             sell_log['buy_market_cap_str'] = (sell_log['buy_market_cap'] / 1_0000_0000).apply(lambda x: f"{x:,.0f}억" if pd.notna(x) else 'N/A')
         else:
@@ -161,26 +159,24 @@ def create_html_report(results, output_path='backtest_report.html'):
             if col in sell_log.columns:
                 sell_log[col] = sell_log[col].round(2)
         
-        return_colors = sell_log['return'].apply(lambda x: 'rgba(255, 220, 220, 0.7)' if x > 0 else ('rgba(220, 220, 225, 0.7)' if x < 0 else 'white'))
+        profit_numeric = results['trade_log']['profit']
+        profit_colors = ['rgba(255, 220, 220, 0.7)' if p > 0 else 'rgba(220, 220, 255, 0.7)' if p < 0 else 'white' for p in profit_numeric]
+        return_colors = ['rgba(255, 220, 220, 0.7)' if r > 0 else 'rgba(220, 220, 255, 0.7)' if r < 0 else 'white' for r in results['trade_log']['return']]
         
         rename_map = {
-            'buy_date_str': '매수일', 'sell_date_str': '매도일', 'holding_period': '보유기간(일)',
-            '종목명': '종목명', 'buy_market_cap_str': '매수시점 시총', 'buy_price': '매수가', 
-            'sell_price': '매도가', 'return_str': '수익률', 'final_score': '최종점수(점)', 
-            'ml_pred_proba': '상승확률(%)', 'value_score': '가치(점)', 'quality_score': '퀄리티(점)', 
-            'momentum_score': '모멘텀(점)', 'supply_score': '수급(점)', 'volatility_score': '변동성(점)',
-            # --- 수정 시작: 거시경제 지표 컬럼 이름 추가 ---
-            'KOSPI_pct_1d': 'KOSPI(1일)', 'KOSPI_pct_5d': 'KOSPI(5일)',
-            'USDKRW_pct_1d': '환율(1일)', 'USDKRW_pct_5d': '환율(5일)',
-            'VIX_pct_1d': 'VIX(1일)', 'VIX_pct_5d': 'VIX(5일)'
-            # --- 수정 종료 ---
+            'buy_date_str': '매수일', 'sell_date_str': '매도일', 'holding_period': '보유기간',
+            '종목명': '종목명', 'buy_market_cap_str': '매수시점 시총',
+            'buy_price': '매수가', 'sell_price': '매도가', 'buy_amount_str': '매수금액', 'profit_str': '실현손익',
+            'return_str': '수익률', 'total_asset_str': '총자산', 'final_score': '최종점수',
+            'ml_pred_proba': '상승확률', 'value_score': '가치', 'quality_score': '퀄리티',
+            'momentum_score': '모멘텀', 'supply_score': '수급', 'volatility_score': '변동성'
         }
         display_columns = list(rename_map.keys())
         sell_log = sell_log[[col for col in display_columns if col in sell_log.columns]].rename(columns=rename_map)
     
     fig = make_subplots(
-        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
-        row_heights=[0.5, 0.1, 0.4],
+        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.1,
+        row_heights=[0.45, 0.2, 0.35],
         specs=[[{"type": "scatter"}], [{"type": "table"}], [{"type": "table"}]]
     )
 
@@ -188,42 +184,60 @@ def create_html_report(results, output_path='backtest_report.html'):
     fig.add_trace(go.Scatter(x=kospi_cumulative.index, y=kospi_cumulative, name='KOSPI', line=dict(color='grey', width=1, dash='dash')), row=1, col=1)
 
     metrics_df = pd.DataFrame({
-        '지표': ['총수익률', '연환산 수익률', '최대 낙폭 (MDD)', '샤프 지수', '승률'],
-        '값': [f"{results['total_return']:.2%}", f"{results['annual_return']:.2%}", 
-               f"{results['mdd']:.2%}", f"{results['sharpe_ratio']:.2f}", f"{results.get('win_rate', 0.0):.2%}"]
+        '지표': ['초기 자본', '최종 자산', '총수익률', '연환산 수익률', '최대 낙폭 (MDD)', '샤프 지수', '승률'],
+        '값': [
+            f"{results.get('initial_capital', 0):,.0f}원",
+            f"{results.get('final_asset', 0):,.0f}원",
+            f"{results['total_return']:.2%}", 
+            f"{results['annual_return']:.2%}", 
+            f"{results['mdd']:.2%}", 
+            f"{results['sharpe_ratio']:.2f}", 
+            f"{results.get('win_rate', 0.0):.2%}"
+        ]
     })
     fig.add_trace(go.Table(
         header=dict(values=list(metrics_df.columns), fill_color='paleturquoise', align='left', font=dict(size=14)),
-        cells=dict(values=[metrics_df.지표, metrics_df.값], fill_color='lavender', align='left', font=dict(size=14), height=30)
+        cells=dict(values=[metrics_df.지표, metrics_df.값], fill_color='lavender', align=['left', 'right'], font=dict(size=14))
     ), row=2, col=1)
     
     if not sell_log.empty:
-        # --- 수정 시작: 테이블 셀 속성값 업데이트 (컬럼 추가에 따른 개수 조정) ---
-        num_new_cols = len([col for col in macro_cols_to_format if col in results['trade_log'].columns]) # 실제 추가된 컬럼 수 계산
+        col_widths = [1.5, 1.5, 0.8, 1.8, 1.2, 1.2, 1.2, 1.5, 1.2, 1, 1.5, 1, 1, 0.8, 0.8, 0.8, 0.8, 0.8]
+        final_columns = list(sell_log.columns)
+        col_widths = col_widths[:len(final_columns)]
+
+        cell_colors = []
+        for col_name in final_columns:
+            if col_name == '실현손익':
+                cell_colors.append(profit_colors)
+            elif col_name == '수익률':
+                cell_colors.append(return_colors)
+            else:
+                cell_colors.append(['white'] * len(sell_log))
+
         fig.add_trace(go.Table(
-            header=dict(values=list(sell_log.columns), fill_color='lightskyblue', align='left', font=dict(size=12)),
+            header=dict(values=final_columns, fill_color='lightskyblue', align='left', font=dict(size=12)),
+            columnwidth=col_widths,
             cells=dict(
-                values=[sell_log[k].tolist() for k in sell_log.columns],
-                fill_color=[['white'] * len(sell_log)] * 7 + [return_colors.tolist()] + [['white'] * len(sell_log)] * (7 + num_new_cols),
-                align=['left', 'left', 'center', 'left', 'right', 'right', 'right', 'right'] + ['right'] * (7 + num_new_cols),
+                values=[sell_log[k].tolist() for k in final_columns],
+                fill_color=cell_colors,
+                align=['left', 'left', 'center', 'left'] + ['right'] * (len(final_columns) - 4),
                 font=dict(size=11),
                 height=25
             )
         ), row=3, col=1)
-        # --- 수정 종료 ---
 
     fig.update_layout(
-        title_text='<b>백테스팅 성과 분석 리포트</b>', height=1400, showlegend=True,
+        title_text='<b>백테스팅 성과 분석 리포트</b>', height=1600, showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=50, r=50, t=100, b=50)
     )
     fig.update_yaxes(title_text='누적 수익률', row=1, col=1)
-    fig.add_annotation(text="<b>주요 성과 지표</b>", xref="paper", yref="paper", x=0.0, y=0.49, showarrow=False, font=dict(size=16))
+    
+    fig.add_annotation(text="<b>주요 성과 지표</b>", xref="paper", yref="paper", x=0.0, y=0.54, showarrow=False, font=dict(size=16))
     if not sell_log.empty:
-        fig.add_annotation(text="<b>상세 매매 기록 (매도 완료 기준)</b>", xref="paper", yref="paper", x=0.0, y=0.38, showarrow=False, font=dict(size=16))
+        fig.add_annotation(text="<b>상세 매매 기록 (매도 완료 기준)</b>", xref="paper", yref="paper", x=0.0, y=0.34, showarrow=False, font=dict(size=16))
     
     fig.write_html(output_path)
-
 
 def run_final_backtest(initial_capital):
     print("1. 최종 백테스트 시작...")
