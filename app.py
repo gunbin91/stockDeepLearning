@@ -24,7 +24,7 @@ import ensemble
 st.set_page_config(layout="wide")
 
 # --- 설정 ---
-MODEL_PATH = 'stock_prediction_model_rf_upgraded.joblib'
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'data', 'stock_prediction_model_rf_upgraded.joblib')
 
 
 # --- 차트 생성 함수 (요청사항 반영) ---
@@ -267,7 +267,7 @@ def run_stock_recommendation():
 # --- 백테스팅 리포트 페이지 (이전과 동일) ---
 def display_backtest_report():
     st.header("백테스팅 리포트")
-    report_path = 'backtest_report.html'
+    report_path = os.path.join(os.path.dirname(__file__), 'backtest_report.html')
     if os.path.exists(report_path):
         with open(report_path, 'r', encoding='utf-8') as f:
             html_content = f.read()

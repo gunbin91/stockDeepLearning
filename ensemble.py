@@ -22,9 +22,13 @@ def calculate_final_score(df):
     }
 
     # 최적화된 가중치 파일이 있으면 불러오기
-    if os.path.exists('optimal_weights.json'):
-        print("INFO: `optimal_weights.json` 파일을 발견하여 가중치를 적용합니다.")
-        with open('optimal_weights.json', 'r') as f:
+    # ensemble.py 파일의 절대 경로를 기준으로 optimal_weights.json 파일 경로 설정
+    script_dir = os.path.dirname(__file__)
+    optimal_weights_path = os.path.join(script_dir, 'data', 'optimal_weights.json')
+
+    if os.path.exists(optimal_weights_path):
+        print(f"INFO: `{optimal_weights_path}` 파일을 발견하여 가중치를 적용합니다.")
+        with open(optimal_weights_path, 'r') as f:
             loaded_weights = json.load(f)
             factor_weights.update(loaded_weights)
 

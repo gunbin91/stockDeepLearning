@@ -18,9 +18,9 @@ def get_latest_annual_fs_http(stock_list):
         return pd.DataFrame()
         
     try:
-        df_corp_map = pd.read_csv('corp_code_map.csv', dtype={'corp_code': str, '종목코드': str})
+        df_corp_map = pd.read_csv(os.path.join(os.path.dirname(__file__), 'data', 'corp_code_map.csv'), dtype={'corp_code': str, '종목코드': str})
     except FileNotFoundError:
-        print("[오류] 'corp_code_map.csv' 파일을 찾을 수 없습니다.")
+        print("[오류] 'data/corp_code_map.csv' 파일을 찾을 수 없습니다.")
         return pd.DataFrame()
         
     target_stocks = pd.merge(stock_list, df_corp_map, on='종목코드')

@@ -8,11 +8,14 @@ import concurrent.futures
 from tqdm import tqdm
 from sklearn.ensemble import RandomForestClassifier
 import os
+import sys
+import argparse
+
+# 프로젝트 루트 경로를 sys.path에 추가
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 내부 모듈 임포트
-from scoring import calculate_factor_scores
 import ensemble
-# 새로 추가: 캐시 관리 모듈 임포트
 import data_cacher
 
 # --- 설정 변수 ---
@@ -20,7 +23,6 @@ VALIDATION_START_DATE = '2023-01-01'
 VALIDATION_END_DATE = '2023-12-31'
 TRAIN_END_DATE = '2022-12-31'
 TRAIN_START_DATE = '2020-01-01'
-# DART_API_KEY는 data_cacher.py에서 관리
 
 WEIGHT_GRID = {
     'value_score': np.arange(0.0, 0.21, 0.1),
@@ -31,11 +33,6 @@ WEIGHT_GRID = {
     'ml_pred_proba': np.arange(0.1, 0.81, 0.1),
 }
 
-# ----------------------------------------------------------------------------------
-# get_financial_data_for_training_http, fetch_stock_list, 
-# process_single_ticker_data, prepare_full_data 함수들을 모두 삭제합니다.
-# ----------------------------------------------------------------------------------
-
 def get_model_and_data():
     print("1. 최적화를 위한 데이터 준비 및 모델 학습 시작...")
     full_data_df = data_cacher.get_preprocessed_data(TRAIN_START_DATE, VALIDATION_END_DATE)
@@ -45,17 +42,14 @@ def get_model_and_data():
     
     print(f"  - 훈련 데이터 {len(train_df)} 행, 검증 데이터 {len(validation_df)} 행 준비 완료.")
     
-    # <<< 핵심 수정: 임시 모델 학습용 features 리스트에도 동일하게 적용 >>>
     features = [
         '수익률(1M)', '수익률(3M)', '변동성(1M)', 'PER', 'PBR', 'ROE', '거래대금_MA20',
-        # 새로 추가된 거시 경제 피처
         'KOSPI_pct_1d', 'KOSPI_pct_5d', 
         'USDKRW_pct_1d', 'USDKRW_pct_5d', 
         'VIX_pct_1d', 'VIX_pct_5d'
     ]
     
     train_df.dropna(subset=features + ['target'], inplace=True)
-    # validation_df는 모든 피처가 필요하므로 target만 제외하고 dropna 수행 안 함
     validation_df.dropna(subset=['종가'], inplace=True)
     
     X_train = train_df[features]
@@ -67,7 +61,6 @@ def get_model_and_data():
     print("  - 임시 모델 학습 완료.")
     
     print("  - 검증 데이터에 ML 예측 추가 중...")
-    # 예측 시점에 validation_df에 거시경제 피처가 없으면 에러 발생 가능하므로, fillna(0) 추가
     X_val = validation_df[features].copy()
     X_val.fillna(0, inplace=True)
     validation_df.loc[:, 'ml_pred_proba'] = model.predict_proba(X_val)[:, 1]
@@ -82,7 +75,6 @@ def get_model_and_data():
     print("  - 모든 데이터 준비 완료.")
     return validation_df
 
-# run_backtest_for_weights, find_optimal_weights 함수는 변경할 필요가 없습니다 (이전과 동일).
 def run_backtest_for_weights(weights_tuple):
     weights, data, initial_capital, top_n = weights_tuple
     backtest_data = data.copy()
@@ -145,24 +137,23 @@ def find_optimal_weights(top_n_stocks, data):
     return best_sharpe, best_weights
 
 if __name__ == '__main__':
-    try:
-        top_n_input = input("시뮬레이션 시 매수할 상위 종목 수를 입력하세요 (예: 5, 기본값 적용 시 Enter): ")
-        top_n = int(top_n_input)
-        if top_n <= 0:
-            print("상위 종목 수는 1 이상이어야 합니다. 기본값 5를 사용합니다.")
-            top_n = 5
-    except ValueError:
-        print("유효하지 않은 입력입니다. 기본값 5를 사용합니다.")
-        top_n = 5
+    parser = argparse.ArgumentParser(description='Find optimal weights for the scoring model.')
+    parser.add_argument('--top_n', type=int, default=5,
+                        help='Number of top stocks to buy in simulation (default: 5)')
+    args = parser.parse_args()
 
-    validation_data = get_model_and_data()
-    best_sharpe, best_weights = find_optimal_weights(top_n_stocks=top_n, data=validation_data)
-    print(f"\n3. 최적 가중치 탐색 완료!")
-    print(f"  - 최적 샤프 지수: {best_sharpe:.4f}")
-    print(f"  - 최적 가중치: {best_weights}")
-    if best_weights:
-        with open('optimal_weights.json', 'w') as f:
-            json.dump(best_weights, f, indent=4)
-        print("`optimal_weights.json` 파일에 최적 가중치를 저장했습니다.")
+    if args.top_n <= 0:
+        print("Error: top_n must be a positive number.")
     else:
-        print("유효한 최적 가중치를 찾지 못했습니다.")
+        validation_data = get_model_and_data()
+        best_sharpe, best_weights = find_optimal_weights(top_n_stocks=args.top_n, data=validation_data)
+        print(f"\n3. 최적 가중치 탐색 완료!")
+        print(f"  - 최적 샤프 지수: {best_sharpe:.4f}")
+        print(f"  - 최적 가중치: {best_weights}")
+        if best_weights:
+            output_path = 'data/optimal_weights.json'
+            with open(output_path, 'w') as f:
+                json.dump(best_weights, f, indent=4)
+            print(f"`{output_path}` 파일에 최적 가중치를 저장했습니다.")
+        else:
+            print("유효한 최적 가중치를 찾지 못했습니다.")

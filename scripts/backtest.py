@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import json
 import os
+import sys
+import argparse
 from tqdm import tqdm
 import joblib
 import FinanceDataReader as fdr
@@ -9,16 +11,19 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 
+# 프로젝트 루트 경로를 sys.path에 추가
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # 내부 모듈 임포트
-from scoring import calculate_factor_scores # 이 라인은 이제 없어도 되지만, 혹시 모르니 유지
 import ensemble
 import data_cacher
 
 # --- 설정 변수 ---
 TEST_START_DATE = '2024-01-01'
 TEST_END_DATE = datetime.now().strftime('%Y-%m-%d')
-WEIGHTS_FILE = 'optimal_weights.json'
-MODEL_FILE = 'stock_prediction_model_rf_upgraded.joblib'
+WEIGHTS_FILE = 'data/optimal_weights.json'
+MODEL_FILE = 'data/stock_prediction_model_rf_upgraded.joblib'
+REPORT_FILE = 'backtest_report.html' # 루트 디렉토리에 저장
 TOP_N_STOCKS = 5
 
 def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5):
@@ -121,7 +126,7 @@ def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5)
             "sharpe_ratio": sharpe_ratio, "mdd": mdd, "trade_log": trade_log_df, "win_rate": win_rate,
             "initial_capital": initial_capital, "final_asset": final_asset}
 
-def create_html_report(results, output_path='backtest_report.html'):
+def create_html_report(results, output_path=REPORT_FILE):
     if results["portfolio_history"].empty:
         print("백테스트 결과가 없어 리포트를 생성할 수 없습니다.")
         return
@@ -282,22 +287,16 @@ def run_final_backtest(initial_capital):
     backtest_results = run_detailed_backtest(test_data, optimal_weights, initial_capital=initial_capital, top_n=TOP_N_STOCKS)
     
     print("\n4. HTML 리포트 생성 중...")
-    create_html_report(backtest_results, output_path='backtest_report.html')
-    print(f"\n✅ 백테스팅 완료. `backtest_report.html` 파일이 생성되었습니다.")
+    create_html_report(backtest_results, output_path=REPORT_FILE)
+    print(f"\n✅ 백테스팅 완료. `{REPORT_FILE}` 파일이 생성되었습니다.")
 
 if __name__ == '__main__':
-    while True:
-        try:
-            capital_input = input("초기 투자 자본금을 입력하세요 (기본값: 1,000,000,000) -> ")
-            if not capital_input:
-                initial_capital = 1_000_000_000
-                break
-            initial_capital = int(capital_input)
-            if initial_capital > 0:
-                break
-            else:
-                print("0보다 큰 값을 입력해야 합니다.")
-        except ValueError:
-            print("유효한 숫자를 입력하세요.")
+    parser = argparse.ArgumentParser(description='Backtest the stock trading strategy.')
+    parser.add_argument('--capital', type=int, default=1_000_000_000,
+                        help='Initial investment capital (default: 1,000,000,000)')
+    args = parser.parse_args()
 
-    run_final_backtest(initial_capital)
+    if args.capital <= 0:
+        print("Error: Capital must be a positive number.")
+    else:
+        run_final_backtest(args.capital)

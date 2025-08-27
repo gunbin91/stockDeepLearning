@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# 스크립트가 있는 디렉토리로 이동하여 경로 문제를 방지합니다.
-cd "$(dirname "$0")"
+# 프로젝트 루트 디렉토리로 이동
+cd "$(dirname "$0")/.."
 
 echo "=================================================="
 echo "      🚀 주식 예측 모델 학습 스크립트 🚀"
@@ -10,10 +10,10 @@ echo "RandomizedSearchCV를 위한 하이퍼파라미터 값을 설정합니다.
 echo "입력하지 않고 엔터를 누르면 기본값이 사용됩니다."
 
 # CPU 코어 수 입력받기
-MAX_CORES=$(sysctl -n hw.ncpu)
+MAX_CORES=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 echo "
 [1/3] 사용할 CPU 코어 수를 입력하세요."
-echo "      (사용 가능: 1 ~ $MAX_CORES, 전체 사용은 -1, 기본값: -1)"
+echo "      (사용 가능: $MAX_CORES, 전체 사용은 -1, 기본값: -1)"
 read -p "입력: " N_JOBS
 if [ -z "$N_JOBS" ]; then
     N_JOBS=-1
@@ -38,7 +38,7 @@ if [ -z "$MAX_DEPTH" ]; then
 fi
 
 # 실행될 최종 명령어 구성
-COMMAND="./venv/bin/python train_model.py --n_jobs $N_JOBS --n_iter $N_ITER --max_depth $MAX_DEPTH"
+COMMAND="./venv/bin/python ./scripts/train_model.py --n_jobs $N_JOBS --n_iter $N_ITER --max_depth $MAX_DEPTH"
 
 echo "
 --------------------------------------------------"
@@ -49,6 +49,6 @@ echo "--------------------------------------------------"
 # 최종 명령어 실행
 eval $COMMAND
 
-echo "
-학습이 완료되었습니다. 아무 키나 눌러 창을 닫으세요."
+echo ""
+echo "학습이 완료되었습니다. 아무 키나 눌러 창을 닫으세요."
 read -n 1 -s -r

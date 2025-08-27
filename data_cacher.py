@@ -182,8 +182,8 @@ def _fetch_and_prepare_data(start_date, end_date):
     if stock_list.empty: raise ValueError("종목 리스트를 가져올 수 없습니다.")
     
     try:
-        df_corp_map = pd.read_csv('corp_code_map.csv', dtype={'corp_code': str, '종목코드': str})
-    except FileNotFoundError: raise FileNotFoundError("corp_code_map.csv 파일이 없습니다.")
+        df_corp_map = pd.read_csv('data/corp_code_map.csv', dtype={'corp_code': str, '종목코드': str})
+    except FileNotFoundError: raise FileNotFoundError("data/corp_code_map.csv 파일이 없습니다.")
     
     target_stocks = pd.merge(stock_list, df_corp_map, on='종목코드')
     corp_codes = target_stocks['corp_code'].unique().tolist()

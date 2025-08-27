@@ -9,6 +9,11 @@ from scipy.stats import randint
 import warnings
 import argparse
 from datetime import datetime, timedelta
+import os
+import sys
+
+# 프로젝트 루트 경로를 sys.path에 추가
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import data_cacher 
 
@@ -62,8 +67,7 @@ def create_training_data(period_days=365*4):
     print("학습 데이터 생성 완료!")
     return X, y, features
 
-# train_evaluate_and_save_model 함수와 main 함수는 변경할 필요가 없습니다.
-def train_evaluate_and_save_model(X, y, features, n_jobs, n_iter, max_depth_list, model_path='stock_prediction_model_rf_upgraded.joblib'):
+def train_evaluate_and_save_model(X, y, features, n_jobs, n_iter, max_depth_list, model_path='data/stock_prediction_model_rf_upgraded.joblib'):
     if X is None or y is None or X.empty or y.empty:
         print("학습 데이터가 없어 모델링을 건너뜁니다.")
         return

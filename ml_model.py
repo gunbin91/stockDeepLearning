@@ -4,7 +4,7 @@ import joblib
 import os
 
 # 모델 파일 경로
-MODEL_PATH = 'stock_prediction_model_rf_upgraded.joblib'
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'data', 'stock_prediction_model_rf_upgraded.joblib')
 
 def predict_with_ml_model(df):
     """

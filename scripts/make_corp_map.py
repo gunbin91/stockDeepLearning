@@ -1,6 +1,11 @@
 # make_corp_map.py
 import dart_fss as dart
 import pandas as pd
+import os
+import sys
+
+# 프로젝트 루트 경로를 sys.path에 추가
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # -----------------------------------------------------------------------------
 # ⚠️ [필수] 여기에 발급받은 DART API 인증키를 딱 한 번만 입력하세요!
@@ -42,7 +47,7 @@ def create_and_save_corp_code_map():
     # 컬럼명 변경
     df_corp_map.rename(columns={'stock_code':'종목코드'}, inplace=True)
     
-    output_path = 'corp_code_map.csv'
+    output_path = 'data/corp_code_map.csv'
     df_corp_map.to_csv(output_path, index=False, encoding='utf-8-sig')
     
     print(f"'{output_path}' 파일이 성공적으로 생성되었습니다.")

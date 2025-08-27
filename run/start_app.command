@@ -1,7 +1,7 @@
 #!/bin/zsh
 
-# 스크립트가 위치한 디렉토리로 이동
-cd "$(dirname "$0")"
+# 스크립트가 위치한 디렉토리(run)의 상위 디렉토리(프로젝트 루트)로 이동
+cd "$(dirname "$0")/.."
 
 # 가상 환경 폴더 이름
 VENV_DIR="venv"
@@ -46,4 +46,4 @@ pip install --no-cache-dir --force-reinstall numpy==1.26.4
 # Streamlit 앱 실행
 echo "AI 주식 추천 플랫폼을 시작합니다..."
 echo "웹 브라우저에서 앱이 열릴 때까지 잠시 기다려주세요."
-./venv/bin/streamlit run app.py
+streamlit run app.py
