@@ -20,6 +20,9 @@ import dl_model
 import nlp
 import ensemble
 
+# 페이지 레이아웃 설정
+st.set_page_config(layout="wide")
+
 # --- 설정 ---
 MODEL_PATH = 'stock_prediction_model_rf_upgraded.joblib'
 
@@ -263,20 +266,29 @@ def run_stock_recommendation():
         
 # --- 백테스팅 리포트 페이지 (이전과 동일) ---
 def display_backtest_report():
-    # ... (이전과 동일한 내용이므로 생략) ...
     st.header("백테스팅 리포트")
     report_path = 'backtest_report.html'
     if os.path.exists(report_path):
         with open(report_path, 'r', encoding='utf-8') as f:
             html_content = f.read()
         st.success(f"'{report_path}' 파일을 성공적으로 불러왔습니다.")
-        components.html(html_content, height=1500, scrolling=True)
+
+        # HACK: Streamlit의 iframe 너비 강제 재정의 (사용자 제공 클래스명 기반)
+        # Streamlit 업데이트 시 클래스명이 변경되어 작동하지 않을 수 있습니다.
+        st.markdown('''
+        <style>
+            .st-emotion-cache-6osm6r {
+                width: 100%;
+            }
+        </style>
+        ''', unsafe_allow_html=True)
+        
+        components.html(html_content, height=1600, scrolling=True)
     else:
         st.error(f"리포트 파일('{report_path}')을 찾을 수 없습니다. `backtest.py`를 먼저 실행하여 리포트를 생성해주세요.")
 
 # --- 메인 실행 로직 (이전과 동일) ---
 def main():
-    st.set_page_config(layout="wide")
     st.sidebar.title("메뉴")
     page = st.sidebar.radio("페이지 선택", ["주식 추천", "학습 모델 분석", "백테스팅 리포트"])
     if page == "주식 추천":

@@ -237,7 +237,10 @@ def create_html_report(results, output_path='backtest_report.html'):
     if not sell_log.empty:
         fig.add_annotation(text="<b>상세 매매 기록 (매도 완료 기준)</b>", xref="paper", yref="paper", x=0.0, y=0.34, showarrow=False, font=dict(size=16))
     
-    fig.write_html(output_path)
+    # Streamlit과의 호환성을 위해 full_html=False, include_plotlyjs='cdn' 사용
+    html_content = fig.to_html(full_html=False, include_plotlyjs='cdn')
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
 
 def run_final_backtest(initial_capital):
     print("1. 최종 백테스트 시작...")
