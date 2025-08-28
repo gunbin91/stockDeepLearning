@@ -159,6 +159,15 @@ def run_stock_recommendation():
         st.session_state.analysis_date = None
 
     st.write("### 1. 종목 데이터 수집")
+    
+    # 분석 기준일 선택
+    selected_analysis_date = st.date_input(
+        "분석 기준일 선택",
+        value=datetime.now(),
+        max_value=datetime.now(),
+        help="선택된 날짜를 기준으로 종목을 분석합니다. 휴장일 선택 시 가장 가까운 이전 거래일이 기준이 됩니다."
+    )
+    
     with st.spinner("전체 종목 목록을 API로부터 수신하는 중..."):
         stock_list_df = data_fetcher.fetch_stock_list()
     if stock_list_df.empty:
@@ -174,13 +183,14 @@ def run_stock_recommendation():
             if st.button("결과 초기화"):
                 st.session_state.analysis_result = None
                 st.session_state.market_condition = None
+                st.session_state.analysis_date = None
                 if 'selected_stock' in st.session_state:
                     del st.session_state['selected_stock']
                 st.rerun()
 
     if start_analysis:
         with st.spinner("데이터 수집 및 분석 중... (최대 5분 소요)"):
-            feature_df, actual_analysis_date = data_fetcher.fetch_all_data(stock_list_df)
+            feature_df, actual_analysis_date = data_fetcher.fetch_all_data(stock_list_df, selected_analysis_date)
             
             if not feature_df.empty:
                 st.session_state.analysis_date = actual_analysis_date.strftime('%Y년 %m월 %d일') if actual_analysis_date else "알 수 없음"
@@ -206,6 +216,13 @@ def run_stock_recommendation():
                     # '종목명' 누락 방지를 위한 최종 병합
                     final_df_with_names = pd.merge(final_ranked_df, stock_list_df[['종목코드', '종목명']].drop_duplicates(), on='종목코드', how='left')
                     
+                    # 원본 feature_df에서 '현재가'와 '기준일가'를 다시 가져와 할당
+                    # 중간 처리 과정에서 유실될 수 있으므로 최종 단계에서 다시 가져옴
+                    # 종목코드를 기준으로 매핑하여 정확한 값을 할당
+                    price_map = feature_df.set_index('종목코드')[['현재가', '기준일가']].to_dict(orient='index')
+                    final_df_with_names['현재가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('현재가'))
+                    final_df_with_names['기준일가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('기준일가'))
+
                     # 병합 시 종목명 컬럼 충돌 해결
                     if '종목명_x' in final_df_with_names.columns:
                         final_df_with_names['종목명'] = final_df_with_names['종목명_y'].fillna(final_df_with_names['종목명_x'])
@@ -214,11 +231,43 @@ def run_stock_recommendation():
                     display_df = final_df_with_names.copy()
                     if 'ml_pred_proba' in display_df.columns:
                         display_df['ml_pred_proba'] = display_df['ml_pred_proba'] * 100
-                    rename_map = { '현재가': '현재가(원)', '시가총액': '시가총액(억)', 'value_score': '가치(점)', 'quality_score': '퀄리티(점)', 'momentum_score': '모멘텀(점)', 'supply_score': '수급(점)', 'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)'}
+                    
+                    # 현재가(원)와 기준일가(원)의 등락율 계산 및 포맷팅
+                    display_df['등락율'] = ((display_df['현재가'] - display_df['기준일가']) / display_df['기준일가']) * 100
+                    
+                    def format_price_with_change(row):
+                        price = f"{int(row['현재가']):,}"
+                        change_percent = row['등락율']
+                        
+                        if pd.isna(change_percent):
+                            return f"{price}원"
+
+                        if change_percent > 0:
+                            sign = '+'
+                        elif change_percent < 0:
+                            sign = '' # 음수는 f-string에서 자동으로 -가 붙으므로 별도 처리 불필요
+                        else:
+                            sign = ''
+                        
+                        # 등락율을 소수점 둘째 자리까지 표시
+                        # 양수는 + 부호를 붙이고, 음수는 f-string에서 자동으로 -가 붙음
+                        if change_percent < 0:
+                            formatted_change = f"{change_percent:.2f}%"
+                        else:
+                            formatted_change = f"{sign}{change_percent:.2f}%"
+
+                        return f"{price}원 ({formatted_change})"
+
+                    display_df['현재가(원)_formatted'] = display_df.apply(format_price_with_change, axis=1)
+
+                    rename_map = { '현재가': '현재가(원)', '시가총액': '시가총액(억)', 'value_score': '가치(점)', 'quality_score': '퀄리티(점)', 'momentum_score': '모멘텀(점)', 'supply_score': '수급(점)', 'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(원)'}
                     display_df.rename(columns=rename_map, inplace=True)
                     
-                    display_columns = [ '최종순위', '종목명', '종목코드', '현재가(원)', '최종점수(점)', '상승확률(%)', '모멘텀(점)', '가치(점)', '퀄리티(점)', '수급(점)', '변동성(점)', '시가총액(억)']
-                    st.session_state.analysis_result = display_df[[col for col in display_columns if col in display_df.columns]]
+                    display_columns = [ '최종순위', '종목명', '종목코드', '현재가(원)_formatted', '기준일가(원)', '최종점수(점)', '상승확률(%)', '모멘텀(점)', '가치(점)', '퀄리티(점)', '수급(점)', '변동성(점)', '시가총액(억)']
+                    
+                    # st.session_state.analysis_result에 등락율 컬럼도 포함하여 스타일링에 사용
+                    st.session_state.analysis_result = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(원)_formatted': '현재가(원)'})
+
                 else: st.error("머신러닝 모델 예측에 실패했습니다.")
             else: st.error("데이터 수집에 실패했습니다.")
     
@@ -243,32 +292,32 @@ def run_stock_recommendation():
         st.info("테이블의 행을 클릭하면 아래에 상세 차트가 나타납니다.")
         
         display_cols_in_table = [col for col in results_df.columns if col != '종목코드']
-        
+
+        # --- 스타일링 함수 정의 ---
+        def highlight_change(row):
+            # '현재가(원)' 컬럼에만 스타일을 적용하기 위해 Series의 인덱스를 확인
+            # Streamlit의 apply 함수는 DataFrame의 각 행(Series)을 인자로 받음
+            styles = ['' for _ in row.index] # 모든 컬럼에 대한 기본 스타일
+            
+            if '등락율' in row.index:
+                change_percent = row['등락율']
+                if change_percent > 0:
+                    styles[row.index.get_loc('현재가(원)')] = 'color: red;'
+                elif change_percent < 0:
+                    styles[row.index.get_loc('현재가(원)')] = 'color: blue;'
+            return styles
+
+        # '현재가(원)' 컬럼에만 스타일 적용
+        styled_df = results_df[display_cols_in_table].style.apply(highlight_change, axis=1)
+
         st.dataframe(
-            results_df[display_cols_in_table],
+            styled_df,
             on_select="rerun",
             selection_mode="single-row",
             key="selected_stock",
             hide_index=True,
             use_container_width=True
         )
-        
-        # 최신 Streamlit 버전에 맞는 안정적인 선택 확인 로직
-        selection = st.session_state.get('selected_stock', {}).get('selection', {})
-        if selection.get('rows'):
-            selected_index = selection['rows'][0]
-            selected_row = results_df.iloc[selected_index]
-            
-            ticker_code = selected_row['종목코드']
-            stock_name = selected_row['종목명']
-            
-            st.markdown("---")
-            st.subheader(f" {stock_name} ({ticker_code}) 상세 차트")
-
-            with st.spinner(f"차트 데이터 로딩 중..."):
-                fig = create_stock_chart(ticker_code, stock_name)
-                if fig:
-                    st.plotly_chart(fig, use_container_width=True)
         
 # --- 백테스팅 리포트 페이지 (이전과 동일) ---
 def display_backtest_report():
