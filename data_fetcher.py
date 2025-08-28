@@ -166,9 +166,9 @@ def fetch_and_process_ticker_data(stock_info, start_date, end_date, latest_fs_df
         latest_data['ROE'] = net_income / total_equity if total_equity and total_equity > 0 else np.nan
         latest_data['log_mktcap'] = np.log(market_cap) if market_cap and market_cap > 0 else np.nan
         
-        return latest_data
+        return latest_data, df.index.max() # Return latest_data and the actual analysis date
     except Exception:
-        return None
+        return None, None # Return None for both in case of error
 
 def fetch_all_data(stock_list):
     # <<< 핵심 수정 2: 모든 피처 데이터에 최신 거시 경제 지표를 추가 >>>
@@ -180,9 +180,10 @@ def fetch_all_data(stock_list):
 
     if latest_fs_df.empty:
         print("재무 데이터 수집에 실패하여 분석을 중단합니다.")
-        return pd.DataFrame()
+        return pd.DataFrame(), None # Return empty DataFrame and None for analysis_date
 
     all_feature_data = []
+    actual_analysis_date = None # Initialize to store the actual analysis date
     MAX_WORKERS = min(8, os.cpu_count() + 4)
 
     stock_records = stock_list.to_dict('records')
@@ -193,12 +194,15 @@ def fetch_all_data(stock_list):
         }
         for future in tqdm(concurrent.futures.as_completed(future_to_stock), total=len(stock_records), desc="전 종목 피처 생성"):
             try:
-                result = future.result()
-                if result: all_feature_data.append(result)
+                result, date = future.result()
+                if result:
+                    all_feature_data.append(result)
+                    if actual_analysis_date is None and date is not None:
+                        actual_analysis_date = date # Capture the date from the first successful fetch
             except Exception:
                 continue
 
-    if not all_feature_data: return pd.DataFrame()
+    if not all_feature_data: return pd.DataFrame(), None # Return empty DataFrame and None for analysis_date
 
     final_df = pd.DataFrame(all_feature_data)
     
@@ -213,4 +217,4 @@ def fetch_all_data(stock_list):
     final_df.dropna(subset=['종목코드', '종목명', '현재가'], inplace=True)
 
     print("모든 피처 데이터 생성 완료!")
-    return final_df
+    return final_df, actual_analysis_date # Return both DataFrame and analysis_date

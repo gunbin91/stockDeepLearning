@@ -155,6 +155,8 @@ def run_stock_recommendation():
         st.session_state.analysis_result = None
     if 'market_condition' not in st.session_state:
         st.session_state.market_condition = None
+    if 'analysis_date' not in st.session_state:
+        st.session_state.analysis_date = None
 
     st.write("### 1. 종목 데이터 수집")
     with st.spinner("전체 종목 목록을 API로부터 수신하는 중..."):
@@ -178,8 +180,11 @@ def run_stock_recommendation():
 
     if start_analysis:
         with st.spinner("데이터 수집 및 분석 중... (최대 5분 소요)"):
-            feature_df = data_fetcher.fetch_all_data(stock_list_df)
+            feature_df, actual_analysis_date = data_fetcher.fetch_all_data(stock_list_df)
+            
             if not feature_df.empty:
+                st.session_state.analysis_date = actual_analysis_date.strftime('%Y년 %m월 %d일') if actual_analysis_date else "알 수 없음"
+
                 macro_cols = ['KOSPI', 'KOSPI_pct_1d', 'USDKRW', 'USDKRW_pct_1d', 'VIX', 'VIX_pct_1d']
                 if all(col in feature_df.columns for col in macro_cols):
                     st.session_state.market_condition = feature_df.iloc[0][macro_cols].to_dict()
@@ -218,7 +223,8 @@ def run_stock_recommendation():
             else: st.error("데이터 수집에 실패했습니다.")
     
     if st.session_state.analysis_result is not None:
-        st.success("분석이 완료되었습니다. 아래 목록에서 종목을 클릭하여 상세 차트를 확인하세요.")
+        analysis_date_str = st.session_state.get('analysis_date', "알 수 없는 날짜")
+        st.success(f"분석이 완료되었습니다. (분석 기준일: {analysis_date_str}) 아래 목록에서 종목을 클릭하여 상세 차트를 확인하세요.")
         
         market_data = st.session_state.market_condition
         if market_data:
