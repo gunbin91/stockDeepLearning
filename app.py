@@ -151,6 +151,9 @@ def display_model_analysis_page():
 def run_stock_recommendation():
     st.title("주식 추천 시스템")
 
+    # tqdm 진행률 표시줄을 식별하기 위한 정규표현식 (백테스팅에서 복사)
+    TQDM_REGEX = re.compile(r'\s*\d{1,3}%\|.*')
+
     if 'analysis_result' not in st.session_state:
         st.session_state.analysis_result = None
     if 'market_condition' not in st.session_state:
@@ -189,87 +192,111 @@ def run_stock_recommendation():
                 st.rerun()
 
     if start_analysis:
-        with st.spinner("데이터 수집 및 분석 중... (최대 5분 소요)"):
-            feature_df, actual_analysis_date = data_fetcher.fetch_all_data(stock_list_df, selected_analysis_date)
-            
-            if not feature_df.empty:
-                st.session_state.analysis_date = actual_analysis_date.strftime('%Y년 %m월 %d일') if actual_analysis_date else "알 수 없음"
+        # --- 분석 로직을 서브프로세스로 실행 ---
+        st.subheader("실시간 분석 로그")
+        log_placeholder = st.empty()
+        log_lines = []
+        analysis_completed_successfully = False
 
-                macro_cols = ['KOSPI', 'KOSPI_pct_1d', 'USDKRW', 'USDKRW_pct_1d', 'VIX', 'VIX_pct_1d']
-                if all(col in feature_df.columns for col in macro_cols):
-                    st.session_state.market_condition = feature_df.iloc[0][macro_cols].to_dict()
+        with st.spinner('분석 스크립트를 실행하고 실시간 로그를 수신 중입니다...'):
+            try:
+                command = [
+                    'python', '-u', 'scripts/run_analysis.py',
+                    '--date', selected_analysis_date.strftime('%Y-%m-%d')
+                ]
                 
-                scored_df = scoring.calculate_factor_scores(feature_df)
-                ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
+                process = subprocess.Popen(
+                    command, 
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.STDOUT, 
+                    text=True, 
+                    encoding='utf-8',
+                    bufsize=1
+                )
 
-                if ml_predicted_df is not None:
-                    merged_df = pd.merge(scored_df, ml_predicted_df, on='종목코드', how='left')
-                    dl_predicted_df = dl_model.predict_with_deep_learning(merged_df)
-                    nlp_analyzed_df = dl_predicted_df.copy()
-                    nlp_analyzed_df['sentiment_score'] = 0
-                    final_ranked_df = ensemble.calculate_final_score(nlp_analyzed_df)
-                    
-                    # '종목코드'가 인덱스로 설정된 경우를 대비해 컬럼으로 변환
-                    if '종목코드' not in final_ranked_df.columns:
-                        final_ranked_df.reset_index(inplace=True)
+                last_line_was_tqdm = False
+                for line in iter(process.stdout.readline, ''):
+                    # 터미널 출력
+                    if TQDM_REGEX.search(line):
+                        sys.stdout.write(line.strip() + '\r')
+                        last_line_was_tqdm = True
+                    else:
+                        if last_line_was_tqdm:
+                            sys.stdout.write('\n')
+                        sys.stdout.write(line)
+                        last_line_was_tqdm = False
+                    sys.stdout.flush()
 
-                    # '종목명' 누락 방지를 위한 최종 병합
-                    final_df_with_names = pd.merge(final_ranked_df, stock_list_df[['종목코드', '종목명']].drop_duplicates(), on='종목코드', how='left')
-                    
-                    # 원본 feature_df에서 '현재가'와 '기준일가'를 다시 가져와 할당
-                    # 중간 처리 과정에서 유실될 수 있으므로 최종 단계에서 다시 가져옴
-                    # 종목코드를 기준으로 매핑하여 정확한 값을 할당
-                    price_map = feature_df.set_index('종목코드')[['현재가', '기준일가']].to_dict(orient='index')
-                    final_df_with_names['현재가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('현재가'))
-                    final_df_with_names['기준일가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('기준일가'))
-
-                    # 병합 시 종목명 컬럼 충돌 해결
-                    if '종목명_x' in final_df_with_names.columns:
-                        final_df_with_names['종목명'] = final_df_with_names['종목명_y'].fillna(final_df_with_names['종목명_x'])
-                        final_df_with_names.drop(columns=['종목명_x', '종목명_y'], inplace=True)
-
-                    display_df = final_df_with_names.copy()
-                    if 'ml_pred_proba' in display_df.columns:
-                        display_df['ml_pred_proba'] = display_df['ml_pred_proba'] * 100
-                    
-                    # 현재가(원)와 기준일가(원)의 등락율 계산 및 포맷팅
-                    display_df['등락율'] = ((display_df['현재가'] - display_df['기준일가']) / display_df['기준일가']) * 100
-                    
-                    def format_price_with_change(row):
-                        price = f"{int(row['현재가']):,}"
-                        change_percent = row['등락율']
-                        
-                        if pd.isna(change_percent):
-                            return f"{price}원"
-
-                        if change_percent > 0:
-                            sign = '+'
-                        elif change_percent < 0:
-                            sign = '' # 음수는 f-string에서 자동으로 -가 붙으므로 별도 처리 불필요
+                    # UI 출력
+                    if TQDM_REGEX.search(line):
+                        if log_lines and TQDM_REGEX.search(log_lines[-1]):
+                            log_lines[-1] = line
                         else:
-                            sign = ''
-                        
-                        # 등락율을 소수점 둘째 자리까지 표시
-                        # 양수는 + 부호를 붙이고, 음수는 f-string에서 자동으로 -가 붙음
-                        if change_percent < 0:
-                            formatted_change = f"{change_percent:.2f}%"
-                        else:
-                            formatted_change = f"{sign}{change_percent:.2f}%"
-
-                        return f"{price}원 ({formatted_change})"
-
-                    display_df['현재가(원)_formatted'] = display_df.apply(format_price_with_change, axis=1)
-
-                    rename_map = { '현재가': '현재가(원)', '시가총액': '시가총액(억)', 'value_score': '가치(점)', 'quality_score': '퀄리티(점)', 'momentum_score': '모멘텀(점)', 'supply_score': '수급(점)', 'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(원)'}
-                    display_df.rename(columns=rename_map, inplace=True)
+                            log_lines.append(line)
+                    else:
+                        log_lines.append(line)
                     
-                    display_columns = [ '최종순위', '종목명', '종목코드', '현재가(원)_formatted', '기준일가(원)', '최종점수(점)', '상승확률(%)', '모멘텀(점)', '가치(점)', '퀄리티(점)', '수급(점)', '변동성(점)', '시가총액(억)']
-                    
-                    # st.session_state.analysis_result에 등락율 컬럼도 포함하여 스타일링에 사용
-                    st.session_state.analysis_result = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(원)_formatted': '현재가(원)'})
+                    display_text = '\n'.join([l.strip() for l in log_lines])
+                    log_placeholder.code(display_text, language='bash')
+                
+                process.stdout.close()
+                return_code = process.wait()
 
-                else: st.error("머신러닝 모델 예측에 실패했습니다.")
-            else: st.error("데이터 수집에 실패했습니다.")
+                if return_code == 0:
+                    st.success("분석이 성공적으로 완료되었습니다!")
+                    analysis_completed_successfully = True
+                else:
+                    st.error("분석 실행 중 오류가 발생했습니다. 위 로그를 확인해주세요.")
+
+            except FileNotFoundError:
+                st.error("'python' 명령을 찾을 수 없습니다. 가상환경이 올바르게 설정되었는지 확인하세요.")
+            except Exception as e:
+                st.error(f"스크립트 실행 중 예상치 못한 오류가 발생했습니다: {e}")
+
+        # --- 분석 결과 처리 ---
+        if analysis_completed_successfully:
+            try:
+                # 캐시된 결과 파일 읽기
+                result_path = os.path.join('cache', 'analysis_result.json')
+                market_path = os.path.join('cache', 'market_condition.json')
+
+                final_df = pd.read_json(result_path, orient='records')
+                with open(market_path, 'r', encoding='utf-8') as f:
+                    st.session_state.market_condition = json.load(f)
+
+                # 날짜 형식 변환
+                final_df['date'] = pd.to_datetime(final_df['date'])
+                st.session_state.analysis_date = final_df['date'].iloc[0].strftime('%Y년 %m월 %d일')
+
+                # --- 기존의 데이터프레임 후처리 및 UI 표시 로직 ---
+                display_df = final_df.copy()
+                if 'ml_pred_proba' in display_df.columns:
+                    display_df['ml_pred_proba'] = display_df['ml_pred_proba'] * 100
+                
+                display_df['등락율'] = ((display_df['현재가'] - display_df['기준일가']) / display_df['기준일가']) * 100
+                
+                def format_price_with_change(row):
+                    price = f"{int(row['현재가']):,}"
+                    change_percent = row['등락율']
+                    if pd.isna(change_percent): return f"{price}원"
+                    sign = '+' if change_percent > 0 else ''
+                    formatted_change = f"{sign}{change_percent:.2f}%"
+                    return f"{price}원 ({formatted_change})"
+
+                display_df['현재가(원)_formatted'] = display_df.apply(format_price_with_change, axis=1)
+
+                rename_map = { '현재가': '현재가(원)', '시가총액': '시가총액(억)', 'value_score': '가치(점)', 'quality_score': '퀄리티(점)', 'momentum_score': '모멘텀(점)', 'supply_score': '수급(점)', 'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(원)'}
+                display_df.rename(columns=rename_map, inplace=True)
+                
+                display_columns = [ '최종순위', '종목명', '종목코드', '현재가(원)_formatted', '기준일가(원)', '최종점수(점)', '상승확률(%)', '모멘텀(점)', '가치(점)', '퀄리티(점)', '수급(점)', '변동성(점)', '시가총액(억)']
+                
+                st.session_state.analysis_result = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(원)_formatted': '현재가(원)'})
+                st.rerun()
+
+            except FileNotFoundError:
+                st.error("분석 결과 파일을 찾을 수 없습니다. 스크립트가 정상적으로 실행되었는지 확인하세요.")
+            except Exception as e:
+                st.error(f"분석 결과 처리 중 오류가 발생했습니다: {e}")
     
     if st.session_state.analysis_result is not None:
         analysis_date_str = st.session_state.get('analysis_date', "알 수 없는 날짜")
@@ -319,25 +346,119 @@ def run_stock_recommendation():
             use_container_width=True
         )
         
-# --- 백테스팅 리포트 페이지 (이전과 동일) ---
+import subprocess
+import re
+import sys
+import json
+
+# --- 백테스팅 리포트 페이지 ---
 def display_backtest_report():
     st.header("백테스팅 리포트")
+
+    # tqdm 진행률 표시줄을 식별하기 위한 정규표현식
+    TQDM_REGEX = re.compile(r'\s*\d{1,3}%|.*')
+
+    if 'show_backtest_form' not in st.session_state:
+        st.session_state.show_backtest_form = False
+
+    if st.button("백테스팅 신규 실행", type="primary"):
+        st.session_state.show_backtest_form = not st.session_state.show_backtest_form
+
+    form_container = st.empty()
+
+    if st.session_state.show_backtest_form:
+        with form_container.container():
+            with st.form("backtest_form"):
+                st.subheader("백테스팅 조건 설정")
+                st.write("백테스팅에 사용할 파라미터를 입력하세요.")
+                
+                capital = st.number_input("초기 자본 (원)", min_value=1000000, value=10000000, step=1000000)
+                max_hold = st.number_input("최대 보유 기간 (일)", min_value=1, value=15, step=1)
+                take_profit = st.number_input("수익 실현율 (%)", min_value=0.1, value=5.0, step=0.1)
+                stop_loss = st.number_input("손절률 (%)", min_value=0.1, value=3.0, step=0.1)
+                top_n = st.number_input("매수 종목 수 (상위 N개)", min_value=1, value=5, step=1)
+                buy_universe = st.number_input("매수 대상 범위 (상위 N위)", min_value=top_n, value=20, step=1)
+
+                submitted = st.form_submit_button("실행")
+                if submitted:
+                    st.session_state.show_backtest_form = False
+                    
+                    st.subheader("백테스팅 실행 로그")
+                    log_placeholder = st.empty()
+                    log_lines = []
+
+                    with st.spinner('백테스팅 스크립트를 실행하고 실시간 로그를 수신 중입니다...'):
+                        try:
+                            command = [
+                                'python', '-u', 'scripts/backtest.py',
+                                '--capital', str(capital),
+                                '--max-hold', str(max_hold),
+                                '--take-profit', str(take_profit),
+                                '--stop-loss', str(stop_loss),
+                                '--top-n', str(top_n),
+                                '--buy-universe', str(buy_universe)
+                            ]
+                            
+                            process = subprocess.Popen(
+                                command, 
+                                stdout=subprocess.PIPE, 
+                                stderr=subprocess.STDOUT, 
+                                text=True, 
+                                encoding='utf-8',
+                                bufsize=1
+                            )
+
+                            last_line_was_tqdm = False
+                            for line in iter(process.stdout.readline, ''):
+                                is_tqdm_line = TQDM_REGEX.search(line) is not None
+
+                                # --- 터미널 출력 로직 ---
+                                if is_tqdm_line:
+                                    # tqdm 라인이면, 줄바꿈 없이 캐리지 리턴으로 덮어쓰기
+                                    sys.stdout.write(line.strip() + '\r')
+                                    last_line_was_tqdm = True
+                                else:
+                                    # 일반 로그 라인이 tqdm 라인 바로 다음에 오면, 줄바꿈으로 완료 처리
+                                    if last_line_was_tqdm:
+                                        sys.stdout.write('\n')
+                                    sys.stdout.write(line)
+                                    last_line_was_tqdm = False
+                                sys.stdout.flush()
+
+                                # --- UI 출력 로직 (기존과 동일) ---
+                                if is_tqdm_line:
+                                    if log_lines and TQDM_REGEX.search(log_lines[-1]) is not None:
+                                        log_lines[-1] = line
+                                    else:
+                                        log_lines.append(line)
+                                else:
+                                    log_lines.append(line)
+                                
+                                display_text = '\n'.join([l.strip() for l in log_lines])
+                                log_placeholder.code(display_text, language='bash')
+                            
+                            process.stdout.close()
+                            return_code = process.wait()
+
+                            if return_code == 0:
+                                st.success("백테스팅이 성공적으로 완료되었습니다!")
+                            else:
+                                st.error("백테스팅 실행 중 오류가 발생했습니다. 위 로그를 확인해주세요.")
+
+                        except FileNotFoundError:
+                            st.error("'python' 명령을 찾을 수 없습니다. 가상환경이 올바르게 설정되었는지 확인하세요.")
+                        except Exception as e:
+                            st.error(f"스크립트 실행 중 예상치 못한 오류가 발생했습니다: {e}")
+                    
+                    time.sleep(2)
+                    st.rerun()
+
+    st.markdown("---")
     report_path = os.path.join(os.path.dirname(__file__), 'backtest_report.html')
     if os.path.exists(report_path):
         with open(report_path, 'r', encoding='utf-8') as f:
             html_content = f.read()
         st.success(f"'{report_path}' 파일을 성공적으로 불러왔습니다.")
-
-        # HACK: Streamlit의 iframe 너비 강제 재정의 (사용자 제공 클래스명 기반)
-        # Streamlit 업데이트 시 클래스명이 변경되어 작동하지 않을 수 있습니다.
-        st.markdown('''
-        <style>
-            .st-emotion-cache-6osm6r {
-                width: 100%;
-            }
-        </style>
-        ''', unsafe_allow_html=True)
-        
         components.html(html_content, height=1600, scrolling=True)
     else:
         st.error(f"리포트 파일('{report_path}')을 찾을 수 없습니다. `backtest.py`를 먼저 실행하여 리포트를 생성해주세요.")

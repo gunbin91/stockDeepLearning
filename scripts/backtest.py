@@ -26,7 +26,7 @@ MODEL_FILE = 'data/stock_prediction_model_rf_upgraded.joblib'
 REPORT_FILE = 'backtest_report.html' # 루트 디렉토리에 저장
 TOP_N_STOCKS = 5
 
-def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5):
+def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, buy_universe_rank):
     final_df_list = []
     data_reset = data.reset_index()
     for date, daily_data in tqdm(data_reset.groupby('date'), desc="일별 최종 점수 계산"):
@@ -44,17 +44,20 @@ def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5)
     
     score_cols_to_log = ['final_score', 'ml_pred_proba', 'value_score', 'quality_score', 'momentum_score', 'supply_score', 'volatility_score']
 
+    take_profit_multiplier = 1 + (take_profit_pct / 100)
+    stop_loss_multiplier = 1 - (stop_loss_pct / 100)
+
     for date in tqdm(daily_dates, desc="상세 백테스팅 중"):
         daily_trades = []
         for ticker in list(portfolio.keys()):
             stock_info = portfolio[ticker]
-            is_holding_period_expired = (date - stock_info['buy_date']).days >= 15
+            is_holding_period_expired = (date - stock_info['buy_date']).days >= max_hold_period
 
             if (date, ticker) in data.index:
                 current_price = data.loc[(date, ticker), '종가']
                 
-                sell_condition_price = (current_price >= stock_info['buy_price'] * 1.05) or \
-                                       (current_price <= stock_info['buy_price'] * 0.97)
+                sell_condition_price = (current_price >= stock_info['buy_price'] * take_profit_multiplier) or \
+                                       (current_price <= stock_info['buy_price'] * stop_loss_multiplier)
 
                 if sell_condition_price or is_holding_period_expired:
                     buy_amount = stock_info['buy_price'] * stock_info['shares']
@@ -79,7 +82,13 @@ def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5)
         if date in data.index.get_level_values('date'):
             daily_data = data.loc[date]
             daily_data_tradable = daily_data[daily_data['거래량'] > 0]
-            buy_candidates = daily_data_tradable[~daily_data_tradable.index.get_level_values('종목코드').isin(portfolio.keys())].nlargest(top_n, 'final_score')
+            
+            # 매수 대상 유니버스 필터링
+            buy_universe = daily_data_tradable[~daily_data_tradable.index.get_level_values('종목코드').isin(portfolio.keys())].nlargest(buy_universe_rank, 'final_score')
+            
+            # 실제 매수 후보는 유니버스 내에서 다시 선정
+            buy_candidates = buy_universe.nlargest(top_n, 'final_score')
+
             for ticker, row in buy_candidates.iterrows():
                 if cash >= investment_per_stock and investment_per_stock > 0:
                     buy_price = row['종가']
@@ -125,6 +134,7 @@ def run_detailed_backtest(data, weights, initial_capital=1_000_000_000, top_n=5)
     return {"portfolio_history": portfolio_ts, "total_return": total_return, "annual_return": annual_return,
             "sharpe_ratio": sharpe_ratio, "mdd": mdd, "trade_log": trade_log_df, "win_rate": win_rate,
             "initial_capital": initial_capital, "final_asset": final_asset}
+
 
 def create_html_report(results, output_path=REPORT_FILE):
     if results["portfolio_history"].empty:
@@ -247,7 +257,7 @@ def create_html_report(results, output_path=REPORT_FILE):
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(html_content)
 
-def run_final_backtest(initial_capital):
+def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank):
     print("1. 최종 백테스트 시작...")
     if not os.path.exists(WEIGHTS_FILE):
         raise FileNotFoundError(f"{WEIGHTS_FILE}을 찾을 수 없습니다. weight_optimizer.py를 먼저 실행해주세요.")
@@ -284,19 +294,40 @@ def run_final_backtest(initial_capital):
     test_data.sort_index(inplace=True)
     
     print(f"\n3. 최종 백테스팅 시뮬레이션 실행 중... (초기 자본: {initial_capital:,.0f}원)")
-    backtest_results = run_detailed_backtest(test_data, optimal_weights, initial_capital=initial_capital, top_n=TOP_N_STOCKS)
+    backtest_results = run_detailed_backtest(
+        test_data, 
+        optimal_weights, 
+        initial_capital=initial_capital, 
+        top_n=top_n,
+        max_hold_period=max_hold_period,
+        take_profit_pct=take_profit_pct,
+        stop_loss_pct=stop_loss_pct,
+        buy_universe_rank=buy_universe_rank
+    )
     
     print("\n4. HTML 리포트 생성 중...")
     create_html_report(backtest_results, output_path=REPORT_FILE)
     print(f"\n✅ 백테스팅 완료. `{REPORT_FILE}` 파일이 생성되었습니다.")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Backtest the stock trading strategy.')
-    parser.add_argument('--capital', type=int, default=1_000_000_000,
-                        help='Initial investment capital (default: 1,000,000,000)')
+    parser = argparse.ArgumentParser(description='Stock trading strategy backtest.')
+    parser.add_argument('--capital', type=int, default=10000000, help='Initial capital')
+    parser.add_argument('--max-hold', type=int, default=15, help='Maximum holding period in days')
+    parser.add_argument('--take-profit', type=float, default=5.0, help='Take profit percentage')
+    parser.add_argument('--stop-loss', type=float, default=3.0, help='Stop loss percentage')
+    parser.add_argument('--top-n', type=int, default=5, help='Number of stocks to buy')
+    parser.add_argument('--buy-universe', type=int, default=20, help='Rank universe to consider for buying')
     args = parser.parse_args()
 
     if args.capital <= 0:
         print("Error: Capital must be a positive number.")
     else:
-        run_final_backtest(args.capital)
+        run_final_backtest(
+            initial_capital=args.capital, 
+            max_hold_period=args.max_hold, 
+            take_profit_pct=args.take_profit, 
+            stop_loss_pct=args.stop_loss, 
+            top_n=args.top_n, 
+            buy_universe_rank=args.buy_universe
+        )
+
