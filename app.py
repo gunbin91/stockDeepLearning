@@ -31,10 +31,71 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), 'data', 'stock_prediction_m
 def create_stock_chart(ticker_code, stock_name):
     """지정된 종목의 상세 기술적 분석 차트를 생성합니다."""
     try:
+        # Ensure ticker_code is a 6-digit string
+        padded_ticker_code = str(ticker_code).zfill(6)
+
         # 데이터는 2년치를 불러와서 장기 이동평균선 계산에 사용
         end_date = datetime.now()
         start_date = end_date - timedelta(days=2*365)
-        df = fdr.DataReader(ticker_code, start_date, end_date)
+        df = fdr.DataReader(padded_ticker_code, start_date, end_date)
+        if df.empty:
+            st.warning("차트 데이터를 불러오는 데 실패했습니다.")
+            return None
+
+        # 이동평균선(MA) 계산
+        df.ta.bbands(length=20, std=2, append=True)
+        df['MA10'] = df['Close'].rolling(window=10).mean()
+        df['MA20'] = df['Close'].rolling(window=20).mean()
+        df['MA122'] = df['Close'].rolling(window=122).mean()
+        df['MA244'] = df['Close'].rolling(window=244).mean()
+
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                            vertical_spacing=0.03, row_heights=[0.7, 0.3])
+
+        # 캔들스틱 및 이동평균선 추가
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='캔들스틱'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA10'], name='MA 10', line=dict(color='limegreen', width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], name='MA 20', line=dict(color='red', width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA122'], name='MA 122', line=dict(color='orange', width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA244'], name='MA 244', line=dict(color='purple', width=1.5)), row=1, col=1)
+        
+        # 볼린저 밴드
+        fig.add_trace(go.Scatter(x=df.index, y=df['BBU_20_2.0'], name='BB 상단', line=dict(color='gray', width=1, dash='dash')), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['BBL_20_2.0'], name='BB 하단', line=dict(color='gray', width=1, dash='dash'), fill='tonexty', fillcolor='rgba(128,128,128,0.1)'), row=1, col=1)
+        
+        # 등락에 따른 거래량 막대 색상
+        colors = ['red' if row['Close'] > row['Open'] else 'blue' for index, row in df.iterrows()]
+        fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='거래량', marker_color=colors), row=2, col=1)
+        
+        # --- 요청사항 반영: 초기 차트 기간 6개월 및 모든 휴장일 공백 제거 ---
+        # 전체 날짜 범위를 생성
+        full_date_range = pd.date_range(start=df.index.min(), end=df.index.max())
+        # 원본 데이터에 없는 날짜(휴장일)를 찾음
+        missing_dates = full_date_range.difference(df.index)
+
+        six_months_ago = df.index.max() - timedelta(days=183) # 약 6개월
+        fig.update_xaxes(
+            range=[six_months_ago, df.index.max()],
+            rangebreaks=[
+                dict(values=missing_dates)  # 주말 및 공휴일을 모두 제외
+            ]
+        )
+
+        fig.update_layout(
+            title=f'<b>{stock_name} ({padded_ticker_code}) 기술적 분석</b>', yaxis_title='가격 (원)',
+            xaxis_rangeslider_visible=False,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        fig.update_yaxes(title_text="거래량", row=2, col=1)
+        return fig
+    except Exception as e:
+        st.error(f"차트 생성 중 오류 발생: {e}")
+        return None
+
+        # 데이터는 2년치를 불러와서 장기 이동평균선 계산에 사용
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=2*365)
+        df = fdr.DataReader(yfinance_ticker, start_date, end_date) # Use yfinance_ticker here
         if df.empty:
             st.warning("차트 데이터를 불러오는 데 실패했습니다.")
             return None
@@ -342,8 +403,53 @@ def run_stock_recommendation():
             selection_mode="single-row",
             key="selected_stock",
             hide_index=True,
-            use_container_width=True
+            width='stretch' # 경고 수정: use_container_width -> width
         )
+        
+        
+        # --- 선택된 종목의 상세 차트 표시 (차트 미표시 오류 수정) ---
+        if st.session_state.selected_stock and st.session_state.selected_stock.get("selection", {}).get("rows"):
+             # This should now appear if condition is met
+            try:
+                raw_selected_rows = st.session_state.selected_stock["selection"]["rows"]
+                
+                # Attempt to parse the selected index from the "start:end" string format
+                if isinstance(raw_selected_rows, list) and len(raw_selected_rows) > 0:
+                    first_element = raw_selected_rows[0]
+                    if isinstance(first_element, str) and ':' in first_element:
+                        parts = first_element.split(':')
+                        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                            selected_index = int(parts[0]) # Take the start of the slice as the index
+                        else:
+                            raise ValueError(f"Unexpected row string format: {first_element}")
+                    elif isinstance(first_element, int): # Handle standard integer index
+                        selected_index = first_element
+                    else:
+                        raise ValueError(f"Unexpected row element type: {type(first_element)}")
+                else:
+                    raise ValueError("No valid row selected or rows list is empty.")
+
+                selected_row = results_df.iloc[selected_index]
+                ticker_code = str(selected_row['종목코드']) # 종목코드를 문자열로 명시적 변환
+                stock_name = selected_row['종목명']
+                
+                
+                
+                st.markdown("---")
+                st.subheader(f"📈 [{stock_name}] 상세 차트")
+                
+                with st.spinner(f"'{stock_name}'의 상세 차트 데이터를 불러오는 중..."):
+                    fig = create_stock_chart(ticker_code, stock_name)
+                    
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning("차트를 표시할 수 없습니다.")
+            except (KeyError, IndexError, ValueError) as e: # Catch ValueError from parsing
+                st.error(f"선택된 행의 인덱스를 처리하는 중 오류가 발생했습니다: {e}. 다시 시도해주세요.")
+                pass
+            except Exception as e:
+                st.error(f"차트 표시 중 오류 발생: {e}")
         
 import subprocess
 import re
