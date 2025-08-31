@@ -17,7 +17,6 @@ import data_fetcher
 import scoring
 import ml_model
 import dl_model
-import nlp
 import ensemble
 
 # 페이지 레이아웃 설정
