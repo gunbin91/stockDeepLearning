@@ -18,12 +18,12 @@ def create_and_save_corp_code_map():
     dart-fss 라이브러리를 이용해 DART 고유번호와 종목코드 매핑 파일을 생성합니다.
     이 스크립트는 프로젝트 설정 시 단 한 번만 실행하면 됩니다.
     """
-    if DART_API_KEY == "여기에_발급받은_DART_인증키를_붙여넣으세요":
+    if not config.DART_API_KEY or config.DART_API_KEY == "여기에_발급받은_DART_인증키를_붙여넣으세요":
         print("DART API 키를 입력하고 스크립트를 다시 실행해주세요.")
         return
         
     print("DART API 키를 설정합니다...")
-    dart.set_api_key(api_key=DART_API_KEY)
+    dart.set_api_key(api_key=config.DART_API_KEY)
     
     print("전체 기업 고유번호 목록을 가져옵니다...")
     corp_list = dart.get_corp_list()

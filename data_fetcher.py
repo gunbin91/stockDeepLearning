@@ -39,7 +39,7 @@ def get_latest_annual_fs_http(stock_list):
         
         url = "https://opendart.fss.or.kr/api/fnlttMultiAcnt.json"
         params = {
-            'crtfc_key': DART_API_KEY,
+            'crtfc_key': config.DART_API_KEY,
             'corp_code': corp_code_str,
             'bsns_year': year,
             'reprt_code': '11011',

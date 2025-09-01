@@ -48,7 +48,7 @@ def get_financial_data_for_training_http(corp_codes, start_year, end_year):
             corp_code_str = ','.join(corp_code_chunk)
             
             url = "https://opendart.fss.or.kr/api/fnlttMultiAcnt.json"
-            params = { 'crtfc_key': DART_API_KEY, 'corp_code': corp_code_str, 'bsns_year': str(year), 'reprt_code': '11011' }
+            params = { 'crtfc_key': config.DART_API_KEY, 'corp_code': corp_code_str, 'bsns_year': str(year), 'reprt_code': '11011' }
             
             try:
                 res = requests.get(url, params=params)
