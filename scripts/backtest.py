@@ -21,9 +21,9 @@ import data_cacher
 # --- 설정 변수 ---
 TEST_START_DATE = '2024-01-01'
 TEST_END_DATE = datetime.now().strftime('%Y-%m-%d')
-WEIGHTS_FILE = 'data/optimal_weights.json'
-MODEL_FILE = 'data/stock_prediction_model_rf_upgraded.joblib'
-REPORT_FILE = 'backtest_report.html' # 루트 디렉토리에 저장
+WEIGHTS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'optimal_weights.json')
+MODEL_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'stock_prediction_model_rf_upgraded.joblib')
+REPORT_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'backtest_report.html')
 TOP_N_STOCKS = 5
 
 def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, buy_universe_rank):

@@ -151,7 +151,7 @@ if __name__ == '__main__':
         print(f"  - 최적 샤프 지수: {best_sharpe:.4f}")
         print(f"  - 최적 가중치: {best_weights}")
         if best_weights:
-            output_path = 'data/optimal_weights.json'
+            output_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'optimal_weights.json')
             with open(output_path, 'w') as f:
                 json.dump(best_weights, f, indent=4)
             print(f"`{output_path}` 파일에 최적 가중치를 저장했습니다.")

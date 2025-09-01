@@ -47,7 +47,7 @@ def create_and_save_corp_code_map():
     # 컬럼명 변경
     df_corp_map.rename(columns={'stock_code':'종목코드'}, inplace=True)
     
-    output_path = 'data/corp_code_map.csv'
+    output_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'corp_code_map.csv')
     df_corp_map.to_csv(output_path, index=False, encoding='utf-8-sig')
     
     print(f"'{output_path}' 파일이 성공적으로 생성되었습니다.")

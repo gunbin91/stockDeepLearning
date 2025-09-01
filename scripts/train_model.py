@@ -67,7 +67,7 @@ def create_training_data(period_days=365*4):
     print("학습 데이터 생성 완료!")
     return X, y, features
 
-def train_evaluate_and_save_model(X, y, features, n_jobs, n_iter, max_depth_list, model_path='data/stock_prediction_model_rf_upgraded.joblib'):
+def train_evaluate_and_save_model(X, y, features, n_jobs, n_iter, max_depth_list, model_path=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'stock_prediction_model_rf_upgraded.joblib')):
     if X is None or y is None or X.empty or y.empty:
         print("학습 데이터가 없어 모델링을 건너뜁니다.")
         return

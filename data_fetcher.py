@@ -10,6 +10,7 @@ from tqdm import tqdm
 import os
 
 DART_API_KEY = "03ac38be54eb9bb095c2304b254c756ebe73c522" # 본인의 키로 교체
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 def get_latest_annual_fs_http(stock_list):
     # 이 함수는 변경할 필요가 없습니다.
@@ -18,9 +19,10 @@ def get_latest_annual_fs_http(stock_list):
         return pd.DataFrame()
         
     try:
-        df_corp_map = pd.read_csv(os.path.join(os.path.dirname(__file__), 'data', 'corp_code_map.csv'), dtype={'corp_code': str, '종목코드': str})
+        corp_code_map_path = os.path.join(PROJECT_ROOT, 'data', 'corp_code_map.csv')
+        df_corp_map = pd.read_csv(corp_code_map_path, dtype={'corp_code': str, '종목코드': str})
     except FileNotFoundError:
-        print("[오류] 'data/corp_code_map.csv' 파일을 찾을 수 없습니다.")
+        print(f"[오류] '{corp_code_map_path}' 파일을 찾을 수 없습니다.")
         return pd.DataFrame()
         
     target_stocks = pd.merge(stock_list, df_corp_map, on='종목코드')
