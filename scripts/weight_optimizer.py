@@ -9,7 +9,13 @@ from tqdm import tqdm
 from sklearn.ensemble import RandomForestClassifier
 import os
 import sys
+import io
 import argparse
+
+# stdout/stderr를 UTF-8로 설정
+sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
+
 
 # 프로젝트 루트 경로를 sys.path에 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
