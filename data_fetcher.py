@@ -81,20 +81,28 @@ def get_latest_annual_fs_http(stock_list):
 def fetch_stock_list():
     # 이 함수는 변경할 필요가 없습니다.
     print("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보를 수집합니다 (KRX-MARCAP)...")
-    try:
-        df_marcap = fdr.StockListing('KRX-MARCAP')
-        df_marcap = df_marcap[~df_marcap['Name'].str.contains('스팩|리츠', na=False)].copy()
-        
-        stock_list = df_marcap[['Code', 'Name', 'Stocks']].copy()
-        stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명', 'Stocks': '상장주식수'}, inplace=True)
-        
-        stock_list = stock_list[stock_list['상장주식수'] > 0]
+    
+    retries = 3
+    for i in range(retries):
+        try:
+            df_marcap = fdr.StockListing('KRX-MARCAP')
+            df_marcap = df_marcap[~df_marcap['Name'].str.contains('스팩|리츠', na=False)].copy()
+            
+            stock_list = df_marcap[['Code', 'Name', 'Stocks']].copy()
+            stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명', 'Stocks': '상장주식수'}, inplace=True)
+            
+            stock_list = stock_list[stock_list['상장주식수'] > 0]
 
-        print(f"총 {len(stock_list)}개 종목을 찾았습니다.")
-        return stock_list
-    except Exception as e:
-        print(f"FinanceDataReader API 통신 실패 (KRX-MARCAP): {e}")
-        return pd.DataFrame(columns=['종목코드', '종목명', '상장주식수'])
+            print(f"총 {len(stock_list)}개 종목을 찾았습니다.")
+            return stock_list
+        except Exception as e:
+            print(f"FinanceDataReader API 통신 실패 (KRX-MARCAP) - 시도 {i+1}/{retries}: {e}")
+            if i < retries - 1:
+                print("5초 후 재시도합니다...")
+                time.sleep(5)
+            else:
+                print("최종 실패. 빈 데이터프레임을 반환합니다.")
+                return pd.DataFrame(columns=['종목코드', '종목명', '상장주식수'])
 
 def _fetch_macro_data(start_date, end_date):
     """지정된 기간 동안의 거시 경제 지표 데이터를 수집합니다."""
