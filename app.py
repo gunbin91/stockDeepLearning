@@ -261,7 +261,7 @@ def run_stock_recommendation():
         with st.spinner('분석 스크립트를 실행하고 실시간 로그를 수신 중입니다...'):
             try:
                 command = [
-                    'python', '-u', 'scripts/run_analysis.py',
+                    'python', '-u', os.path.join(os.path.dirname(__file__), 'scripts', 'run_analysis.py'),
                     '--date', selected_analysis_date.strftime('%Y-%m-%d')
                 ]
                 
@@ -317,8 +317,8 @@ def run_stock_recommendation():
         if analysis_completed_successfully:
             try:
                 # 캐시된 결과 파일 읽기
-                result_path = os.path.join('cache', 'analysis_result.json')
-                market_path = os.path.join('cache', 'market_condition.json')
+                result_path = os.path.join(os.path.dirname(__file__), 'cache', 'analysis_result.json')
+                market_path = os.path.join(os.path.dirname(__file__), 'cache', 'market_condition.json')
 
                 final_df = pd.read_json(result_path, orient='records')
                 with open(market_path, 'r', encoding='utf-8') as f:
@@ -495,7 +495,7 @@ def display_backtest_report():
                     with st.spinner('백테스팅 스크립트를 실행하고 실시간 로그를 수신 중입니다...'):
                         try:
                             command = [
-                                'python', '-u', 'scripts/backtest.py',
+                                'python', '-u', os.path.join(os.path.dirname(__file__), 'scripts', 'backtest.py'),
                                 '--capital', str(capital),
                                 '--max-hold', str(max_hold),
                                 '--take-profit', str(take_profit),
