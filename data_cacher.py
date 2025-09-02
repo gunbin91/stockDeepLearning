@@ -123,12 +123,29 @@ def _fetch_macro_data(start_date, end_date):
         # 근본적인 문제일 수 있으므로, 프로그램을 중단시키는 것이 더 안전합니다.
         raise e
 
-def process_single_ticker_data(stock_info, start_date, end_date, all_fs_data, df_marcap_long):
-    # 이 함수는 이전과 동일, 문제가 없습니다.
+def process_single_ticker_data(stock_info, start_date, end_date, all_fs_data, df_marcap_long, pbar_lock):
     ticker = stock_info['종목코드']
+    
+    max_retries = 3
+    retry_delay = 2
+    
+    df_price = None
+    for attempt in range(max_retries):
+        try:
+            df_price = fdr.DataReader(ticker, start_date, end_date)
+            break 
+        except Exception as e:
+            if attempt < max_retries - 1:
+                with pbar_lock:
+                    tqdm.write(f"⚠️ {stock_info['종목명']}({ticker}) 데이터 수집 실패 (시도 {attempt + 1}/{max_retries}). {retry_delay}초 후 재시도. 에러: {e}")
+                time.sleep(retry_delay)
+            else:
+                with pbar_lock:
+                    tqdm.write(f" {stock_info['종목명']}({ticker}) 최종 데이터 수집 실패.")
+                return None
     try:
-        df_price = fdr.DataReader(ticker, start_date, end_date)
-        if df_price.empty or len(df_price) < 251 + 60: return None
+        if df_price is None or df_price.empty or len(df_price) < 251 + 60: return None
+        
         df_price.rename(columns={'Close':'종가', 'Volume':'거래량'}, inplace=True)
         df = df_price[['종가', '거래량']].copy()
         df['연도'] = df.index.year
@@ -175,10 +192,12 @@ def process_single_ticker_data(stock_info, start_date, end_date, all_fs_data, df
         df['종목코드'] = ticker
         df.set_index('Date', inplace=True)
         return df
-    except Exception: return None
+    except Exception as e:
+        with pbar_lock:
+            tqdm.write(f"⚠️ {stock_info['종목명']}({ticker}) 데이터 '처리' 중 오류 발생. 건너뜁니다. 에러: {e}")
+        return None
 
 def _fetch_and_prepare_data(start_date, end_date):
-    # 이 함수는 이전과 동일, 문제가 없습니다.
     print(f"데이터 준비 중 ({start_date} ~ {end_date})...")
     stock_list = fetch_stock_list()
     if stock_list.empty: raise ValueError("종목 리스트를 가져올 수 없습니다.")
@@ -214,13 +233,29 @@ def _fetch_and_prepare_data(start_date, end_date):
         
     all_data = []
     stock_records = target_stocks.to_dict('records')
-    for row in tqdm(stock_records, desc="개별 종목 피처 데이터 생성"):
-        result_df = process_single_ticker_data(row, start_date, end_date, all_fs_data, df_marcap_long)
-        if result_df is not None:
-            all_data.append(result_df)
+
+    # <<< 핵심 수정: tqdm 객체를 직접 제어하고 lock을 전달 >>>
+    with tqdm(total=len(stock_records), desc="개별 종목 피처 데이터 생성 (병렬 처리)") as pbar:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+            # 작업 제출 시 pbar의 lock 객체를 전달
+            future_to_stock = {
+                executor.submit(process_single_ticker_data, row, start_date, end_date, all_fs_data, df_marcap_long, pbar.get_lock()): row
+                for row in stock_records
+            }
             
+            for future in concurrent.futures.as_completed(future_to_stock):
+                try:
+                    result_df = future.result()
+                    if result_df is not None:
+                        all_data.append(result_df)
+                except Exception as e:
+                    # 오류 로깅은 이미 worker 내부에서 처리됨
+                    pass
+                pbar.update(1) # 작업이 완료될 때마다 pbar를 수동으로 업데이트
+
     if not all_data: raise ValueError("처리된 데이터가 없습니다.")
     raw_feature_df = pd.concat(all_data).reset_index()
+    
     raw_feature_df.rename(columns={'Date': 'date'}, inplace=True)
     raw_feature_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     raw_feature_df.dropna(subset=['date', '종목코드'], inplace=True)
@@ -233,8 +268,10 @@ def _fetch_and_prepare_data(start_date, end_date):
     raw_feature_df.sort_values(by=['date', '종목코드'], inplace=True)
 
     print("일별 팩터 점수 계산 중...")
+    # tqdm의 total 인자를 정확하게 설정하기 위해 그룹 수를 미리 계산
+    num_groups = len(raw_feature_df.groupby('date'))
     scored_data_list = []
-    for date, daily_data in tqdm(raw_feature_df.groupby('date')):
+    for date, daily_data in tqdm(raw_feature_df.groupby('date'), total=num_groups):
         daily_scored_data = calculate_factor_scores(daily_data.copy())
         daily_scored_data['date'] = date
         scored_data_list.append(daily_scored_data)
