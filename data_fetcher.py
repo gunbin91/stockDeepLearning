@@ -185,8 +185,8 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         latest_data['현재가'] = latest_current_price   # 최신 현재가
         latest_data['기준일가'] = reference_date_price # 분석 기준일 종가
 
-        # 7. 재무 지표 계산 (시가총액은 현재가 기준)
-        market_cap = latest_current_price * shares
+        # 7. 재무 지표 계산 (시가총액은 분석 기준일 종가 기준)
+        market_cap = reference_date_price * shares
         latest_data['시가총액'] = market_cap / 1_0000_0000
         
         net_income = fs_data['당기순이익'].iloc[0] if '당기순이익' in fs_data.columns and not fs_data['당기순이익'].empty else 0
