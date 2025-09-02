@@ -7,10 +7,11 @@ import sys
 # 프로젝트 루트 경로를 sys.path에 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import config
 # -----------------------------------------------------------------------------
 # ⚠️ [필수] 여기에 발급받은 DART API 인증키를 딱 한 번만 입력하세요!
 # -----------------------------------------------------------------------------
-DART_API_KEY = "03ac38be54eb9bb095c2304b254c756ebe73c522"
+# DART_API_KEY = "03ac38be54eb9bb095c2304b254c756ebe73c522" # config.py에서 불러오므로 주석 처리
 # -----------------------------------------------------------------------------
 
 def create_and_save_corp_code_map():

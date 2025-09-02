@@ -9,12 +9,13 @@ import concurrent.futures
 from tqdm import tqdm
 import os
 import json
+import config
 
 # 내부 모듈 임포트
 from scoring import calculate_factor_scores
 
 # --- 설정 변수 ---
-DART_API_KEY = "03ac38be54eb9bb095c2304b254c756ebe73c522" # 본인의 키로 교체
+# DART_API_KEY = "03ac38be54eb9bb095c2304b254c756ebe73c522" # 본인의 키로 교체
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(PROJECT_ROOT, "cache")
 CACHE_END_DATE = datetime(datetime.now().year - 1, 12, 31).strftime('%Y-%m-%d')
@@ -23,7 +24,7 @@ CACHE_FILE_PATH = os.path.join(CACHE_DIR, CACHE_FILENAME)
 
 def get_financial_data_for_training_http(corp_codes, start_year, end_year):
     # 이 함수는 이전과 동일, 문제가 없습니다.
-    if DART_API_KEY == "여기에_발급받은_DART_인증키를_붙여넣으세요": return {}
+    if config.DART_API_KEY == "여기에_발급받은_DART_인증키를_붙여넣으세요": return {}
     os.makedirs(CACHE_DIR, exist_ok=True)
     
     all_fs_data = {}
