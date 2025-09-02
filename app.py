@@ -403,7 +403,8 @@ def run_stock_recommendation():
             selection_mode="single-row",
             key="selected_stock",
             hide_index=True,
-            width='stretch' # 경고 수정: use_container_width -> width
+            use_container_width=True,
+            #width='stretch' # 경고 수정: use_container_width -> width
         )
         
         
