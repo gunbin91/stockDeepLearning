@@ -484,6 +484,15 @@ def display_backtest_report():
                 stop_loss = st.number_input("손절률 (%)", min_value=0.1, value=3.0, step=0.1)
                 top_n = st.number_input("매수 종목 수 (상위 N개)", min_value=1, value=5, step=1)
                 buy_universe = st.number_input("매수 대상 범위 (상위 N위)", min_value=top_n, value=20, step=1)
+                transaction_fee = st.number_input(
+                    "거래 수수료 (%)",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.015, # 기본값 0.015%
+                    step=0.001,
+                    format="%.3f",
+                    help="매수 및 매도 시 적용될 거래 수수료율 (예: 0.015는 0.015%)"
+                )
 
                 submitted = st.form_submit_button("실행")
                 if submitted:
@@ -502,7 +511,8 @@ def display_backtest_report():
                                 '--take-profit', str(take_profit),
                                 '--stop-loss', str(stop_loss),
                                 '--top-n', str(top_n),
-                                '--buy-universe', str(buy_universe)
+                                '--buy-universe', str(buy_universe),
+                                '--fee', str(transaction_fee)
                             ]
                             
                             process = subprocess.Popen(

@@ -12,6 +12,9 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import io
 
+# 증권거래세율 (0.15%)
+SECURITIES_TRANSACTION_TAX_RATE = 0.15
+
 # stdout/stderr를 UTF-8로 설정
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
@@ -32,7 +35,7 @@ MODEL_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
 REPORT_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'backtest_report.html')
 TOP_N_STOCKS = 5
 
-def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, buy_universe_rank):
+def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, buy_universe_rank, transaction_fee_rate):
     final_df_list = []
     data_reset = data.reset_index()
     for date, daily_data in tqdm(data_reset.groupby('date'), desc="일별 최종 점수 계산"):
@@ -66,15 +69,20 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                                        (current_price <= stock_info['buy_price'] * stop_loss_multiplier)
 
                 if sell_condition_price or is_holding_period_expired:
-                    buy_amount = stock_info['buy_price'] * stock_info['shares']
-                    sell_value = current_price * stock_info['shares']
+                    buy_amount = stock_info['actual_buy_price'] * stock_info['shares']
+                    
+                    # 매도 시 수수료 및 세금 적용
+                    actual_sell_price = current_price * (1 - (transaction_fee_rate + SECURITIES_TRANSACTION_TAX_RATE) / 100)
+                    sell_value = actual_sell_price * stock_info['shares']
+                    
                     profit = sell_value - buy_amount
                     cash += sell_value
                     
                     log_entry = {
                         'type': 'sell', 'sell_date': date, 'ticker': ticker, 
-                        'sell_price': current_price, 'return': (current_price / stock_info['buy_price']) - 1,
-                        'buy_date': stock_info['buy_date'], 'buy_price': stock_info['buy_price'],
+                        'sell_price': current_price, 'actual_sell_price': actual_sell_price, 'return': (actual_sell_price / stock_info['actual_buy_price']) - 1,
+                        'buy_date': stock_info['buy_date'], 'buy_price': stock_info['buy_price'], # 수수료 적용 전 가격
+                        'actual_buy_price': stock_info['actual_buy_price'], # 수수료 적용 후 가격
                         'buy_market_cap': stock_info.get('buy_market_cap'),
                         'buy_amount': buy_amount,
                         'profit': profit
@@ -98,14 +106,20 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             for ticker, row in buy_candidates.iterrows():
                 if cash >= investment_per_stock and investment_per_stock > 0:
                     buy_price = row['종가']
-                    shares = investment_per_stock // buy_price
+                    
+                    # 매수 시 수수료 적용
+                    actual_buy_price = buy_price * (1 + transaction_fee_rate / 100)
+                    shares = investment_per_stock // actual_buy_price
+                    
                     if shares > 0:
-                        cash -= buy_price * shares
+                        buy_amount_with_fee = actual_buy_price * shares
+                        cash -= buy_amount_with_fee
                         
                         buy_scores = {col: row.get(col) for col in score_cols_to_log if col in row}
                         portfolio[ticker] = {
                             'buy_date': date, 
-                            'buy_price': buy_price, 
+                            'buy_price': buy_price, # 수수료 적용 전 가격
+                            'actual_buy_price': actual_buy_price, # 수수료 적용 후 가격
                             'shares': shares, 
                             'buy_scores': buy_scores,
                             'buy_market_cap': row.get('시가총액')
@@ -204,8 +218,13 @@ def create_html_report(results, output_path=REPORT_FILE):
     fig.add_trace(go.Scatter(x=portfolio_cumulative.index, y=portfolio_cumulative, name='포트폴리오', line=dict(color='royalblue', width=2)), row=1, col=1)
     fig.add_trace(go.Scatter(x=kospi_cumulative.index, y=kospi_cumulative, name='KOSPI', line=dict(color='grey', width=1, dash='dash')), row=1, col=1)
 
-    metrics_df = pd.DataFrame({
-        '지표': ['초기 자본', '최종 자산', '총수익률', '연환산 수익률', '최대 낙폭 (MDD)', '샤프 지수', '승률'],
+    metrics_data = {
+        '지표': [
+            '초기 자본', '최종 자산', '총수익률', '연환산 수익률',
+            '최대 낙폭 (MDD)', '샤프 지수', '승률', '거래 수수료율',
+            '증권거래세율', '최대 보유 기간', '익절 목표 (%)', '손절 라인 (%)',
+            '매수 종목 수 (N)', '매수 대상 범위'
+        ],
         '값': [
             f"{results.get('initial_capital', 0):,.0f}원",
             f"{results.get('final_asset', 0):,.0f}원",
@@ -213,12 +232,29 @@ def create_html_report(results, output_path=REPORT_FILE):
             f"{results['annual_return']:.2%}", 
             f"{results['mdd']:.2%}", 
             f"{results['sharpe_ratio']:.2f}", 
-            f"{results.get('win_rate', 0.0):.2%}"
+            f"{results.get('win_rate', 0.0):.2%}",
+            f"{results.get('transaction_fee_rate', 0.0):.3f}%",
+            f"{results.get('securities_transaction_tax_rate', 0.0):.2f}%",
+            f"{results.get('max_hold_period', 0)}일",
+            f"{results.get('take_profit_pct', 0.0):.2f}%",
+            f"{results.get('stop_loss_pct', 0.0):.2f}%",
+            f"{results.get('top_n', 0)}개",
+            f"{results.get('buy_universe_rank', 0)}위"
         ]
+    }
+    metrics_df_temp = pd.DataFrame(metrics_data)
+
+    # 2열씩 묶어서 4열 DataFrame 생성
+    metrics_df = pd.DataFrame({
+        '지표': metrics_df_temp['지표'].iloc[::2].reset_index(drop=True),
+        '값': metrics_df_temp['값'].iloc[::2].reset_index(drop=True),
+        '지표 ': metrics_df_temp['지표'].iloc[1::2].reset_index(drop=True),
+        '값 ': metrics_df_temp['값'].iloc[1::2].reset_index(drop=True)
     })
+
     fig.add_trace(go.Table(
         header=dict(values=list(metrics_df.columns), fill_color='paleturquoise', align='left', font=dict(size=14)),
-        cells=dict(values=[metrics_df.지표, metrics_df.값], fill_color='lavender', align=['left', 'right'], font=dict(size=14))
+        cells=dict(values=[metrics_df['지표'], metrics_df['값'], metrics_df['지표 '], metrics_df['값 ']], fill_color='lavender', align=['left', 'right', 'left', 'right'], font=dict(size=14))
     ), row=2, col=1)
     
     if not sell_log.empty:
@@ -263,7 +299,7 @@ def create_html_report(results, output_path=REPORT_FILE):
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(html_content)
 
-def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank):
+def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate):
     print("1. 최종 백테스트 시작...")
     if not os.path.exists(WEIGHTS_FILE):
         raise FileNotFoundError(f"{WEIGHTS_FILE}을 찾을 수 없습니다. weight_optimizer.py를 먼저 실행해주세요.")
@@ -308,8 +344,17 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         max_hold_period=max_hold_period,
         take_profit_pct=take_profit_pct,
         stop_loss_pct=stop_loss_pct,
-        buy_universe_rank=buy_universe_rank
+        buy_universe_rank=buy_universe_rank,
+        transaction_fee_rate=transaction_fee_rate
     )
+    backtest_results['transaction_fee_rate'] = transaction_fee_rate # 결과에 수수료율 추가
+    backtest_results['initial_capital'] = initial_capital
+    backtest_results['max_hold_period'] = max_hold_period
+    backtest_results['take_profit_pct'] = take_profit_pct
+    backtest_results['stop_loss_pct'] = stop_loss_pct
+    backtest_results['top_n'] = top_n
+    backtest_results['buy_universe_rank'] = buy_universe_rank
+    backtest_results['securities_transaction_tax_rate'] = SECURITIES_TRANSACTION_TAX_RATE # 증권거래세율 추가
     
     print("\n4. HTML 리포트 생성 중...")
     create_html_report(backtest_results, output_path=REPORT_FILE)
@@ -323,6 +368,7 @@ if __name__ == '__main__':
     parser.add_argument('--stop-loss', type=float, default=3.0, help='Stop loss percentage')
     parser.add_argument('--top-n', type=int, default=5, help='Number of stocks to buy')
     parser.add_argument('--buy-universe', type=int, default=20, help='Rank universe to consider for buying')
+    parser.add_argument('--fee', type=float, default=0.015, help='Transaction fee rate (e.g., 0.015 for 0.015%)')
     args = parser.parse_args()
 
     if args.capital <= 0:
@@ -334,6 +380,7 @@ if __name__ == '__main__':
             take_profit_pct=args.take_profit, 
             stop_loss_pct=args.stop_loss, 
             top_n=args.top_n, 
-            buy_universe_rank=args.buy_universe
+            buy_universe_rank=args.buy_universe,
+            transaction_fee_rate=args.fee
         )
 
