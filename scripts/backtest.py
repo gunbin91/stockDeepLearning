@@ -97,11 +97,13 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             daily_data = data.loc[date]
             daily_data_tradable = daily_data[daily_data['거래량'] > 0]
             
-            # 매수 대상 유니버스 필터링
-            buy_universe = daily_data_tradable[~daily_data_tradable.index.get_level_values('종목코드').isin(portfolio.keys())].nlargest(buy_universe_rank, 'final_score')
+            # 1. 전체 거래 가능 종목 중에서 '최종 점수' 기준으로 상위 buy_universe_rank에 드는 종목들만 매수 고려 대상이 됩니다.
+            overall_top_universe = daily_data_tradable.nlargest(buy_universe_rank, 'final_score')
             
-            # 실제 매수 후보는 유니버스 내에서 다시 선정
-            buy_candidates = buy_universe.nlargest(top_n, 'final_score')
+            # 2. 이렇게 1차로 걸러진 종목들 중에서 현재 보유하고 있는 종목들을 제외합니다.
+            # 3. 남은 종목들 중에서 '최종 점수'가 높은 순서대로 top_n (매수 종목 수)개만큼 매수합니다.
+            #    만약 남은 종목 수가 top_n보다 적다면, 그만큼만 매수하고 나머지는 현금으로 보유합니다.
+            buy_candidates = overall_top_universe[~overall_top_universe.index.get_level_values('종목코드').isin(portfolio.keys())].nlargest(top_n, 'final_score')
 
             for ticker, row in buy_candidates.iterrows():
                 if cash >= investment_per_stock and investment_per_stock > 0:
