@@ -22,6 +22,20 @@ import ensemble
 # 페이지 레이아웃 설정
 st.set_page_config(layout="wide")
 
+# [FIX] 백테스팅 리포트 너비 문제 해결을 위한 CSS 주입
+st.markdown("""
+<style>
+.stElementContainer.element-container {
+    width: 100% !important;
+    max-width: 100% !important;
+}
+iframe {
+    width: 100% !important;
+    max-width: 100% !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # --- 설정 ---
 MODEL_PATH = os.path.join(os.path.dirname(__file__), 'data', 'stock_prediction_model_rf_upgraded.joblib')
 
@@ -575,7 +589,7 @@ def display_backtest_report():
         with open(report_path, 'r', encoding='utf-8') as f:
             html_content = f.read()
         st.success(f"'{report_path}' 파일을 성공적으로 불러왔습니다.")
-        components.html(html_content, height=1600, scrolling=True)
+        components.html(html_content, height=1600, scrolling=True, width=None)
     else:
         st.error(f"리포트 파일('{report_path}')을 찾을 수 없습니다. `backtest.py`를 먼저 실행하여 리포트를 생성해주세요.")
 
