@@ -1,3 +1,5 @@
+# data_cacher.py
+
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
@@ -77,7 +79,10 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
             ticker_fs = pit_fs_df[pit_fs_df['종목코드'] == ticker]
             if not ticker_fs.empty:
                 df = pd.merge_asof(left=df, right=ticker_fs[['공시일', '당기순이익', '자본총계']], left_index=True, right_on='공시일', direction='backward')
-        if '당기순이익' not in df.columns or df[['당기순이익', '자본총계']].isnull().values.any(): return None
+
+        # '당기순이익', '자본총계'가 없으면 애초에 데이터를 생성하지 않음
+        if '당기순이익' not in df.columns or df[['당기순이익', '자본총계']].isnull().values.any():
+            return None
 
         df['거래대금'] = df['종가'] * df['거래량']
         df['PER'] = df['시가총액'] / df['당기순이익']; df['PBR'] = df['시가총액'] / df['자본총계']
@@ -134,6 +139,15 @@ def _fetch_and_prepare_data(start_date, end_date):
     raw_feature_df = pd.concat(all_data).reset_index()
     raw_feature_df.rename(columns={'Date': 'date'}, inplace=True)
     raw_feature_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    
+    # <<< ✨ 핵심 수정: data_fetcher.py와 일관성을 위해 필터링 로직 추가 ✨ >>>
+    # process_single_ticker_data에서 이미 1차 필터링되었지만, 여기서 한 번 더 확인합니다.
+    before_count = len(raw_feature_df)
+    raw_feature_df.dropna(subset=['PER', 'PBR', 'ROE'], inplace=True)
+    after_count = len(raw_feature_df)
+    if before_count > after_count:
+        print(f"✅ 필수 재무 피처가 없는 {before_count - after_count}개 레코드를 필터링했습니다.")
+    
     raw_feature_df.dropna(subset=['date', '종목코드'], inplace=True)
     raw_feature_df['date'] = pd.to_datetime(raw_feature_df['date'])
     macro_df = _fetch_macro_data(start_date, end_date)

@@ -43,7 +43,6 @@ def get_latest_annual_fs_http(stock_list):
     fs_df = pd.DataFrame(all_fs_data)
     required_accounts = ['당기순이익', '자본총계', '유동자산', '유동부채']
     fs_df = fs_df[fs_df['account_nm'].isin(required_accounts)]
-    # <<< 핵심 수정 2: 여기서 미리 숫자형으로 변환 >>>
     fs_df['thstrm_amount'] = pd.to_numeric(fs_df['thstrm_amount'].str.replace(',', ''), errors='coerce')
     fs_pivot = fs_df.pivot_table(index='stock_code', columns='account_nm', values='thstrm_amount').reset_index()
     fs_pivot.rename(columns={'stock_code':'종목코드'}, inplace=True)
@@ -119,15 +118,12 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         latest_data['종목코드'] = stock_info['종목코드']; latest_data['종목명'] = stock_info['종목명']
         latest_data['현재가'] = latest_current_price; latest_data['기준일가'] = reference_date_price
         
-        # <<< 핵심 수정: 과거 분석 시, 기준일의 시가총액을 직접 사용하도록 수정 >>>
         if '시가총액_기준일' in stock_info and pd.notna(stock_info['시가총액_기준일']) and stock_info['시가총액_기준일'] > 0:
             market_cap = stock_info['시가총액_기준일']
         else:
-            # 실시간 분석(오늘) 또는 과거 데이터 수집 실패 시의 Fallback 로직
             market_cap = reference_date_price * shares
         latest_data['시가총액'] = market_cap / 1_0000_0000
         
-        # .values[0]을 사용하여 안정적으로 스칼라 값 추출 (기존 코드의 잠재적 버그 수정)
         net_income = fs_data['당기순이익'].values[0] if '당기순이익' in fs_data.columns and not fs_data['당기순이익'].isnull().all() else 0
         total_equity = fs_data['자본총계'].values[0] if '자본총계' in fs_data.columns and not fs_data['자본총계'].isnull().all() else 0
         latest_data['PER'] = market_cap / net_income if net_income > 0 else np.nan
@@ -148,14 +144,12 @@ def fetch_all_data(stock_list, selected_analysis_date):
     if latest_fs_df.empty:
         print("재무 데이터 수집에 실패하여 분석을 중단합니다."); return pd.DataFrame(), None
 
-    # <<< 핵심 수정: 과거 분석 시, 기준일의 시가총액/상장주식수 정보를 가져와 stock_list를 교체 >>>
     if selected_analysis_date.date() < today.date():
         print(f"과거 분석(기준일={selected_analysis_date.strftime('%Y-%m-%d')}): 기준일의 시가총액 데이터를 수집합니다.")
         try:
             df_marcap_past = fdr.StockListing('KRX-MARCAP', selected_analysis_date.strftime('%Y%m%d'))
             df_marcap_past.rename(columns={'Code': '종목코드'}, inplace=True)
             
-            # 기준일에 존재했던 종목만 분석 대상으로 하기 위해 inner join
             stock_list = pd.merge(
                 stock_list[['종목코드', '종목명']],
                 df_marcap_past[['종목코드', 'Marcap', 'Stocks']],
@@ -189,7 +183,13 @@ def fetch_all_data(stock_list, selected_analysis_date):
     final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     final_df.dropna(subset=['종목코드', '종목명', '현재가'], inplace=True)
     
-    # <<< 핵심 수정 1: .mode()의 결과에서 첫 번째 값([0])을 선택하여 Series가 아닌 Timestamp를 반환 >>>
+    # <<< ✨ 핵심 수정: 필수 재무 피처가 없는 종목을 분석에서 최종 제외 ✨ >>>
+    before_count = len(final_df)
+    final_df.dropna(subset=['PER', 'PBR', 'ROE'], inplace=True)
+    after_count = len(final_df)
+    if before_count > after_count:
+        print(f"✅ 필수 재무 피처(PER, PBR, ROE)가 없는 {before_count - after_count}개 종목을 분석에서 제외했습니다. (최종 {after_count}개)")
+
     actual_analysis_date_final = pd.to_datetime(final_df['date'].mode()[0]) if not final_df.empty else None
     
     print("모든 피처 데이터 생성 완료!")
