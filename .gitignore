@@ -10,3 +10,6 @@ __pycache__/
 
 # Cache directory
 cache/
+
+# Data files
+data/financial_data_pykrx_pit.parquet

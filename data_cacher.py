@@ -17,21 +17,25 @@ from scoring import calculate_factor_scores
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(PROJECT_ROOT, "cache")
-PIT_FS_PATH = os.path.join(PROJECT_ROOT, 'data', 'financial_data_pit.parquet')
+
+# <<< ✨ 핵심 수정 1: 사용할 데이터베이스 파일 경로 변경 ✨ >>>
+# DART 원본 DB 대신 새로 생성한 pykrx 재무지표 DB를 사용합니다.
+FINANCIAL_DB_PATH = os.path.join(PROJECT_ROOT, 'data', 'financial_data_pykrx_pit.parquet')
 
 CACHE_END_DATE = datetime(datetime.now().year - 1, 12, 31).strftime('%Y-%m-%d')
 CACHE_FILENAME = f"historical_data_up_to_{CACHE_END_DATE.replace('-', '')}.parquet"
 CACHE_FILE_PATH = os.path.join(CACHE_DIR, CACHE_FILENAME)
 
 try:
-    pit_fs_df = pd.read_parquet(PIT_FS_PATH)
-    pit_fs_df['공시일'] = pd.to_datetime(pit_fs_df['공시일'])
-    pit_fs_df.sort_values('공시일', inplace=True)
-    print(f"✅ 시점(Point-in-Time) 재무 데이터베이스 로드 완료: {PIT_FS_PATH}")
+    # <<< ✨ 핵심 수정 2: 새로운 DB 로딩 및 컬럼명 통일 ✨ >>>
+    funda_df = pd.read_parquet(FINANCIAL_DB_PATH)
+    funda_df['date'] = pd.to_datetime(funda_df['date'])
+    funda_df.sort_values('date', inplace=True)
+    print(f"✅ pykrx 시점(Point-in-Time) 재무 지표 데이터베이스 로드 완료: {FINANCIAL_DB_PATH}")
 except FileNotFoundError:
-    print(f"!!!!!!!! [치명적 오류] 재무 데이터베이스 파일({PIT_FS_PATH})을 찾을 수 없습니다. !!!!!!!!")
-    print("먼저 `scripts/build_financial_db.py`를 실행하여 데이터베이스를 생성해주세요.")
-    pit_fs_df = pd.DataFrame()
+    print(f"!!!!!!!! [치명적 오류] 재무 지표 데이터베이스 파일({FINANCIAL_DB_PATH})을 찾을 수 없습니다. !!!!!!!!")
+    print("먼저 `scripts/build_db_pykrx.py`를 실행하여 데이터베이스를 생성해주세요.")
+    funda_df = pd.DataFrame()
 
 def fetch_stock_list():
     try:
@@ -75,18 +79,25 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         df.rename(columns={'Marcap': '시가총액'}, inplace=True); df.dropna(subset=['시가총액'], inplace=True)
         if df.empty: return None
         
-        if not pit_fs_df.empty:
-            ticker_fs = pit_fs_df[pit_fs_df['종목코드'] == ticker]
-            if not ticker_fs.empty:
-                df = pd.merge_asof(left=df, right=ticker_fs[['공시일', '당기순이익', '자본총계']], left_index=True, right_on='공시일', direction='backward')
-
-        # '당기순이익', '자본총계'가 없으면 애초에 데이터를 생성하지 않음
-        if '당기순이익' not in df.columns or df[['당기순이익', '자본총계']].isnull().values.any():
+        # <<< ✨ 핵심 수정 3: pykrx 재무 지표 데이터 병합 ✨ >>>
+        if not funda_df.empty:
+            ticker_funda = funda_df[funda_df['종목코드'] == ticker]
+            if not ticker_funda.empty:
+                # 주가 데이터(df)의 인덱스(날짜)를 기준으로, pykrx 데이터(ticker_funda)를 날짜에 맞게 붙입니다.
+                # direction='backward'는 특정 날짜에 데이터가 없으면 가장 가까운 과거의 데이터를 가져오라는 의미입니다.
+                df = pd.merge_asof(left=df, right=ticker_funda[['date', 'PER', 'PBR', 'ROE']], 
+                                   left_index=True, right_on='date', direction='backward')
+        
+        # PER, PBR, ROE 중 하나라도 없으면 분석에서 제외
+        if 'PER' not in df.columns or df[['PER', 'PBR', 'ROE']].isnull().values.any():
             return None
 
         df['거래대금'] = df['종가'] * df['거래량']
-        df['PER'] = df['시가총액'] / df['당기순이익']; df['PBR'] = df['시가총액'] / df['자본총계']
-        df['ROE'] = df['당기순이익'] / df['자본총계']; df['log_mktcap'] = np.log(df['시가총액'])
+        # <<< ✨ 핵심 수정 4: 재무 지표를 직접 계산하는 대신, 병합된 값을 그대로 사용 ✨ >>>
+        # df['PER'] = df['시가총액'] / df['당기순이익']; df['PBR'] = df['시가총액'] / df['자본총계']
+        # df['ROE'] = df['당기순이익'] / df['자본총계']; 
+        df['log_mktcap'] = np.log(df['시가총액'])
+
         df['수익률(1W)'] = df['종가'].pct_change(5); df['수익률(2W)'] = df['종가'].pct_change(10)
         df['수익률(1M)'] = df['종가'].pct_change(20); df['수익률(3M)'] = df['종가'].pct_change(60)
         df['변동성(1M)'] = df['종가'].rolling(20).std() / df['종가'].rolling(20).mean()
@@ -99,7 +110,7 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         df.ta.macd(close='종가', fast=12, slow=26, signal=9, append=True)
         df['target'] = (df['종가'].shift(-15) / df['종가'] > 1.05).astype(int)
         df['종목코드'] = ticker; df.set_index('Date', inplace=True)
-        df.drop(columns=['공시일'], inplace=True, errors='ignore')
+        df.drop(columns=['date'], inplace=True, errors='ignore')
         return df
     except Exception as e:
         with pbar_lock: tqdm.write(f"⚠️ {stock_info['종목명']}({ticker}) 데이터 처리 중 오류: {e} (건너뜀)"); return None
@@ -139,15 +150,6 @@ def _fetch_and_prepare_data(start_date, end_date):
     raw_feature_df = pd.concat(all_data).reset_index()
     raw_feature_df.rename(columns={'Date': 'date'}, inplace=True)
     raw_feature_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    
-    # <<< ✨ 핵심 수정: data_fetcher.py와 일관성을 위해 필터링 로직 추가 ✨ >>>
-    # process_single_ticker_data에서 이미 1차 필터링되었지만, 여기서 한 번 더 확인합니다.
-    before_count = len(raw_feature_df)
-    raw_feature_df.dropna(subset=['PER', 'PBR', 'ROE'], inplace=True)
-    after_count = len(raw_feature_df)
-    if before_count > after_count:
-        print(f"✅ 필수 재무 피처가 없는 {before_count - after_count}개 레코드를 필터링했습니다.")
-    
     raw_feature_df.dropna(subset=['date', '종목코드'], inplace=True)
     raw_feature_df['date'] = pd.to_datetime(raw_feature_df['date'])
     macro_df = _fetch_macro_data(start_date, end_date)
