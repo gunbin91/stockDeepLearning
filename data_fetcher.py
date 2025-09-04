@@ -1,3 +1,5 @@
+# data_fetcher.py
+
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
@@ -117,10 +119,17 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         latest_data['종목코드'] = stock_info['종목코드']; latest_data['종목명'] = stock_info['종목명']
         latest_data['현재가'] = latest_current_price; latest_data['기준일가'] = reference_date_price
         
-        market_cap = reference_date_price * shares; latest_data['시가총액'] = market_cap / 1_0000_0000
-        # <<< 핵심 수정 2: .iloc[0] 대신 .values[0]을 사용하여 더 안정적으로 값 추출 >>>
-        net_income = fs_data['당기순이익'].values if '당기순이익' in fs_data.columns and not fs_data['당기순이익'].isnull().all() else 0
-        total_equity = fs_data['자본총계'].values if '자본총계' in fs_data.columns and not fs_data['자본총계'].isnull().all() else 0
+        # <<< 핵심 수정: 과거 분석 시, 기준일의 시가총액을 직접 사용하도록 수정 >>>
+        if '시가총액_기준일' in stock_info and pd.notna(stock_info['시가총액_기준일']) and stock_info['시가총액_기준일'] > 0:
+            market_cap = stock_info['시가총액_기준일']
+        else:
+            # 실시간 분석(오늘) 또는 과거 데이터 수집 실패 시의 Fallback 로직
+            market_cap = reference_date_price * shares
+        latest_data['시가총액'] = market_cap / 1_0000_0000
+        
+        # .values[0]을 사용하여 안정적으로 스칼라 값 추출 (기존 코드의 잠재적 버그 수정)
+        net_income = fs_data['당기순이익'].values[0] if '당기순이익' in fs_data.columns and not fs_data['당기순이익'].isnull().all() else 0
+        total_equity = fs_data['자본총계'].values[0] if '자본총계' in fs_data.columns and not fs_data['자본총계'].isnull().all() else 0
         latest_data['PER'] = market_cap / net_income if net_income > 0 else np.nan
         latest_data['PBR'] = market_cap / total_equity if total_equity > 0 else np.nan
         latest_data['ROE'] = net_income / total_equity if total_equity > 0 else np.nan
@@ -138,6 +147,27 @@ def fetch_all_data(stock_list, selected_analysis_date):
         latest_fs_df = get_fs_data_from_pit(stock_list, selected_analysis_date)
     if latest_fs_df.empty:
         print("재무 데이터 수집에 실패하여 분석을 중단합니다."); return pd.DataFrame(), None
+
+    # <<< 핵심 수정: 과거 분석 시, 기준일의 시가총액/상장주식수 정보를 가져와 stock_list를 교체 >>>
+    if selected_analysis_date.date() < today.date():
+        print(f"과거 분석(기준일={selected_analysis_date.strftime('%Y-%m-%d')}): 기준일의 시가총액 데이터를 수집합니다.")
+        try:
+            df_marcap_past = fdr.StockListing('KRX-MARCAP', selected_analysis_date.strftime('%Y%m%d'))
+            df_marcap_past.rename(columns={'Code': '종목코드'}, inplace=True)
+            
+            # 기준일에 존재했던 종목만 분석 대상으로 하기 위해 inner join
+            stock_list = pd.merge(
+                stock_list[['종목코드', '종목명']],
+                df_marcap_past[['종목코드', 'Marcap', 'Stocks']],
+                on='종목코드',
+                how='inner'
+            )
+            stock_list.rename(columns={'Stocks': '상장주식수', 'Marcap': '시가총액_기준일'}, inplace=True)
+            print(f"✅ 기준일({selected_analysis_date.strftime('%Y-%m-%d')})에 존재했던 {len(stock_list)}개 종목으로 필터링되었습니다.")
+        except Exception as e:
+            print(f"경고: 기준일({selected_analysis_date.strftime('%Y-%m-%d')})의 시가총액 데이터를 가져오는 데 실패했습니다: {e}")
+            print("최신 상장주식수 정보를 사용하여 분석을 계속합니다.")
+            
     macro_df = _fetch_macro_data(start_date_for_fetch, end_date_for_fetch)
     if macro_df.empty:
         print("거시 경제 데이터 수집에 실패하여 분석을 중단합니다."); return pd.DataFrame(), None
