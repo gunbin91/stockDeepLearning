@@ -3,25 +3,19 @@
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
+from pykrx import stock
 import pandas_ta as ta
 import concurrent.futures
 from tqdm import tqdm
 import os
 from datetime import datetime, timedelta
+import time
 import config
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-# <<< ✨ 핵심 수정 1: 사용할 최종 데이터베이스 경로 지정 ✨ >>>
 FINANCIAL_DB_PATH = os.path.join(PROJECT_ROOT, 'data', 'financial_data_pykrx_pit.parquet')
 
-# <<< ✨ 핵심 수정 2: DART API 호출 함수 전체 삭제 ✨ >>>
-# get_latest_annual_fs_http 함수가 더 이상 필요 없으므로 삭제합니다.
-
 def get_fs_data_from_pit(stock_list, selected_analysis_date):
-    """ 
-    분석 기준일 시점에서 사용 가능한 최신 재무 지표를 pykrx DB에서 조회합니다.
-    (오늘/과거 날짜 분석 모두 이 함수를 사용하도록 통일)
-    """
     try:
         funda_df = pd.read_parquet(FINANCIAL_DB_PATH)
     except FileNotFoundError:
@@ -68,45 +62,87 @@ def _fetch_macro_data(start_date, end_date):
 def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for_fetch, selected_analysis_date, latest_fs_df):
     ticker = stock_info['종목코드']; shares = stock_info['상장주식수']
     try:
-        df_price_full = fdr.DataReader(ticker, start_date_for_fetch, end_date_for_fetch)
-        if df_price_full.empty or len(df_price_full) < 251: return None, None
-        df_price_full.rename(columns={'Close':'종가', 'Volume':'거래량'}, inplace=True)
+        # data_cacher.py와 동일한 기간의 주가 데이터가 필요
+        fetch_start = (pd.to_datetime(start_date_for_fetch) - timedelta(days=60)).strftime('%Y-%m-%d')
+        df_price_full = fdr.DataReader(ticker, fetch_start, end_date_for_fetch)
+        if df_price_full.empty or len(df_price_full) < 251 + 60: return None, None
+        df_price_full.rename(columns={'Close':'종가', 'High':'고가', 'Low':'저가', 'Volume':'거래량'}, inplace=True)
+
         selected_analysis_date_ts = pd.Timestamp(selected_analysis_date)
         df_temp = df_price_full[df_price_full.index <= selected_analysis_date_ts]
         if df_temp.empty: return None, None
-        actual_analysis_date = df_temp.index.max(); reference_date_price = df_temp.loc[actual_analysis_date]['종가']
+        actual_analysis_date = df_temp.index.max()
+        reference_date_price = df_temp.loc[actual_analysis_date]['종가']
         latest_current_price = df_price_full.iloc[-1]['종가']
-        df_for_indicators = df_price_full[df_price_full.index <= actual_analysis_date].copy()
         
-        df_for_indicators['수익률(1W)'] = df_for_indicators['종가'].pct_change(5); df_for_indicators['수익률(2W)'] = df_for_indicators['종가'].pct_change(10)
-        df_for_indicators['수익률(1M)'] = df_for_indicators['종가'].pct_change(20); df_for_indicators['수익률(3M)'] = df_for_indicators['종가'].pct_change(60)
-        df_for_indicators['변동성(1M)'] = df_for_indicators['종가'].rolling(20).std() / df_for_indicators['종가'].rolling(20).mean()
-        df_for_indicators['거래대금'] = df_for_indicators['종가'] * df_for_indicators['거래량']; df_for_indicators['거래대금_MA20'] = df_for_indicators['거래대금'].rolling(20).mean()
-        df_for_indicators['MA5'] = df_for_indicators['종가'].rolling(5).mean(); df_for_indicators['MA20'] = df_for_indicators['종가'].rolling(20).mean()
-        df_for_indicators['단기 정배열'] = (df_for_indicators['MA5'] > df_for_indicators['MA20']).astype(int)
-        df_for_indicators['52주_최고가'] = df_for_indicators['종가'].rolling(250).max(); df_for_indicators['52주_신고가_비율'] = df_for_indicators['종가'] / df_for_indicators['52주_최고가']
-        df_for_indicators.ta.rsi(close='종가', length=14, append=True); df_for_indicators.ta.macd(close='종가', fast=12, slow=26, signal=9, append=True)
+        # 피처 계산에 필요한 충분한 데이터 확보
+        df_for_indicators = df_price_full[df_price_full.index <= actual_analysis_date].copy()
         
         fs_data = latest_fs_df[latest_fs_df['종목코드'] == ticker]
         if fs_data.empty or fs_data[['PER', 'PBR']].isnull().values.any(): return None, None
         
-        latest_data = df_for_indicators.loc[actual_analysis_date].to_dict()
-        latest_data['종목코드'] = stock_info['종목코드']; latest_data['종목명'] = stock_info['종목명']
-        latest_data['현재가'] = latest_current_price; latest_data['기준일가'] = reference_date_price
+        latest_data = {} # 최종 결과 딕셔너리 초기화
+
+        # --- 신규 피처 추가 (data_cacher.py와 동일한 로직) ---
+        df_for_indicators['거래대금'] = df_for_indicators['종가'] * df_for_indicators['거래량']
+        latest_data['log_mktcap'] = np.log(reference_date_price * shares) if (reference_date_price * shares) > 0 else np.nan
+        latest_data['이익수익률'] = 1 / fs_data['PER'].values[0] if fs_data['PER'].values[0] != 0 else np.nan
+
+        latest_data['수익률(1W)'] = df_for_indicators['종가'].pct_change(5).iloc[-1]
+        latest_data['수익률(2W)'] = df_for_indicators['종가'].pct_change(10).iloc[-1]
+        latest_data['수익률(1M)'] = df_for_indicators['종가'].pct_change(20).iloc[-1]
+        latest_data['수익률(3M)'] = df_for_indicators['종가'].pct_change(60).iloc[-1]
+        latest_data['변동성(1M)'] = (df_for_indicators['종가'].rolling(20).std() / df_for_indicators['종가'].rolling(20).mean()).iloc[-1]
+        latest_data['거래대금_MA20'] = df_for_indicators['거래대금'].rolling(20).mean().iloc[-1]
         
-        if '시가총액_기준일' in stock_info and pd.notna(stock_info['시가총액_기준일']) and stock_info['시가총액_기준일'] > 0:
-            market_cap = stock_info['시가총액_기준일']
+        df_for_indicators.ta.stoch(high='고가', low='저가', close='종가', k=14, d=3, smooth_k=3, append=True)
+        df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
+        df_for_indicators.ta.obv(close='종가', volume='거래량', append=True)
+        df_for_indicators.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
+        bbands = df_for_indicators.ta.bbands(close='종가', length=20, std=2)
+        if bbands is not None and all(col in bbands.columns for col in ['BBL_20_2.0', 'BBU_20_2.0']):
+             latest_data['BBW_20_2'] = ((bbands['BBU_20_2.0'] - bbands['BBL_20_2.0']) / bbands['BBM_20_2.0']).iloc[-1]
         else:
-            market_cap = reference_date_price * shares
-        latest_data['시가총액'] = market_cap / 1_0000_0000
+             latest_data['BBW_20_2'] = np.nan
+
+        for p in [20, 120, 240]:
+            ma = df_for_indicators['종가'].rolling(window=p).mean()
+            latest_data[f'disparity_{p}'] = ((df_for_indicators['종가'] / ma) * 100).iloc[-1]
+
+        latest_data['52주_신고가_비율'] = (df_for_indicators['종가'] / df_for_indicators['종가'].rolling(250).max()).iloc[-1]
+        df_for_indicators.ta.rsi(close='종가', length=14, append=True)
+        df_for_indicators.ta.macd(close='종가', fast=12, slow=26, signal=9, append=True)
+
+        # 수급 피처 계산
+        try:
+            end_d = actual_analysis_date.strftime("%Y%m%d")
+            start_d = (actual_analysis_date - timedelta(days=40)).strftime("%Y%m%d") # 20일 누적 계산을 위해 넉넉히 조회
+            df_trading = stock.get_market_trading_value_by_date(start_d, end_d, ticker)
+            df_trading.rename(columns={'외국인합계': '외국인', '기관합계': '기관'}, inplace=True)
+            latest_data['inst_net_buy_5d'] = df_trading['기관'].rolling(window=5).sum().iloc[-1]
+            latest_data['inst_net_buy_20d'] = df_trading['기관'].rolling(window=20).sum().iloc[-1]
+            latest_data['for_net_buy_5d'] = df_trading['외국인'].rolling(window=5).sum().iloc[-1]
+            latest_data['for_net_buy_20d'] = df_trading['외국인'].rolling(window=20).sum().iloc[-1]
+        except Exception:
+            latest_data['inst_net_buy_5d'], latest_data['inst_net_buy_20d'] = np.nan, np.nan
+            latest_data['for_net_buy_5d'], latest_data['for_net_buy_20d'] = np.nan, np.nan
         
-        # <<< ✨ 핵심 수정 3: pykrx 데이터 처리 로직으로 단일화 ✨ >>>
-        # 이미 계산된 PER, PBR, ROE 값을 DB에서 바로 가져와 사용합니다.
-        latest_data['PER'] = fs_data['PER'].values[0]
-        latest_data['PBR'] = fs_data['PBR'].values[0]
-        latest_data['ROE'] = fs_data['ROE'].values[0] if 'ROE' in fs_data.columns else np.nan
-            
-        latest_data['log_mktcap'] = np.log(market_cap) if market_cap > 0 else np.nan
+        # 나머지 필요한 피처들 추가
+        technical_features_to_add = ['STOCHk_14_3_3', 'STOCHd_14_3_3', 'ATRr_14', 'OBV', 'ADX_14', 
+                                     'RSI_14', 'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9']
+        for feature in technical_features_to_add:
+            if feature in df_for_indicators.columns:
+                 latest_data[feature] = df_for_indicators[feature].iloc[-1]
+
+        latest_data.update(fs_data.iloc[0].to_dict())
+        latest_data['종목명'] = stock_info['종목명']
+        latest_data['현재가'] = latest_current_price
+        latest_data['기준일가'] = reference_date_price
+        if '시가총액_기준일' in stock_info and pd.notna(stock_info['시가총액_기준일']):
+            latest_data['시가총액'] = stock_info['시가총액_기준일'] / 1_0000_0000
+        else:
+            latest_data['시가총액'] = (reference_date_price * shares) / 1_0000_0000
+
         return latest_data, actual_analysis_date
     except Exception: return None, None
 
@@ -115,8 +151,6 @@ def fetch_all_data(stock_list, selected_analysis_date):
     end_date_for_fetch = today.strftime('%Y-%m-%d')
     start_date_for_fetch = (today - timedelta(days=400)).strftime('%Y-%m-%d')
 
-    # <<< ✨ 핵심 수정 4: 데이터 조회 로직 단일화 ✨ >>>
-    # 오늘/과거 구분 없이 모든 재무 데이터 조회를 get_fs_data_from_pit으로 통일합니다.
     latest_fs_df = get_fs_data_from_pit(stock_list, selected_analysis_date)
     
     if latest_fs_df.empty or latest_fs_df.dropna().empty:
@@ -161,14 +195,8 @@ def fetch_all_data(stock_list, selected_analysis_date):
     final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     final_df.dropna(subset=['종목코드', '종목명', '현재가'], inplace=True)
     
-    before_count = len(final_df)
-    final_df.dropna(subset=['PER', 'PBR', 'ROE'], inplace=True)
-    after_count = len(final_df)
-    if before_count > after_count:
-        print(f"✅ 필수 재무 피처(PER, PBR, ROE)가 없는 {before_count - after_count}개 종목을 분석에서 제외했습니다. (최종 {after_count}개)")
-
     if final_df.empty:
-        print("필수 재무 피처를 가진 종목이 없어 분석을 중단합니다."); return pd.DataFrame(), None
+        print("피처 생성 후 유효한 데이터가 없습니다."); return pd.DataFrame(), None
         
     actual_analysis_date_final = pd.to_datetime(final_df['date'].mode()[0])
     

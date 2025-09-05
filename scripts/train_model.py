@@ -1,3 +1,5 @@
+# train_model.py
+
 import pandas as pd
 import numpy as np
 import joblib
@@ -8,72 +10,85 @@ from sklearn.preprocessing import StandardScaler
 from scipy.stats import randint
 import warnings
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 import sys
 import io
 
-# stdout/stderr를 UTF-8로 설정
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
-
-
-# 프로젝트 루트 경로를 sys.path에 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import data_cacher 
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 
-def create_training_data(period_days=365*4):
+def create_training_data():
     print("캐시 관리 모듈을 통해 학습 데이터 생성을 시작합니다...")
-    today = datetime.now()
-    end_date = today.strftime('%Y-%m-%d')
-    start_date = (today - timedelta(days=period_days)).strftime('%Y-%m-%d')
+    # --- ✨ 핵심 수정: 데이터 요청 기간과 실제 학습 기간을 명확히 분리 ✨ ---
+    # data_cacher에 2015년부터 현재까지의 전체 기간 데이터를 요청
+    start_date_for_cacher = '2015-01-01'
+    end_date_for_cacher = datetime.now().strftime('%Y-%m-%d')
     
-    final_df = data_cacher.get_preprocessed_data(start_date, end_date)
+    final_df = data_cacher.get_preprocessed_data(start_date_for_cacher, end_date_for_cacher)
     
     if final_df is None or final_df.empty:
         print("데이터를 가져오는 데 실패했습니다.")
-        return None, None, None
+        return None, None, None, None
 
     print(f"\n--- 생성된 학습 데이터 요약 ---")
     print(f"1. 전체 수집 데이터 (Raw): {len(final_df):,} 행")
     
-    training_start_date = (today - timedelta(days=365*3)).strftime('%Y-%m-%d')
+    # 2015년 데이터는 피처 계산을 위한 워밍업 기간으로 사용하고, 실제 학습은 2016년부터 시작
+    training_start_date = '2016-01-01'
     final_df = final_df[final_df['date'] >= pd.to_datetime(training_start_date)]
-    print(f"2. 워밍업 기간 제외 후: {len(final_df):,} 행")
+    print(f"2. 워밍업 기간(2015년) 제외 후 실제 학습 데이터: {len(final_df):,} 행")
 
-    # <<< 핵심 수정: features 리스트에 거시 경제 지표 추가 >>>
     features = [
-        # 기존 피처
-        '수익률(1W)', '수익률(2W)', '수익률(1M)', '수익률(3M)', '변동성(1M)', 'PER', 'PBR', 'ROE', 'log_mktcap', 'RSI_14',
-        'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9', '거래대금_MA20', '단기 정배열', '52주_신고가_비율',
-        # 새로 추가된 거시 경제 피처
-        'KOSPI_pct_1d', 'KOSPI_pct_5d', 
-        'USDKRW_pct_1d', 'USDKRW_pct_5d', 
+        'PBR', 'ROE', 'log_mktcap', '이익수익률', 'EPS', 'BPS',
+        '수익률(1W)', '수익률(2W)', '수익률(1M)', '수익률(3M)', '52주_신고가_비율',
+        'RSI_14', 'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9',
+        'STOCHk_14_3_3', 'STOCHd_14_3_3', 'ADX_14',
+        '변동성(1M)', 'ATRr_14', 'BBW_20_2',
+        'disparity_20', 'disparity_120', 'disparity_240',
+        '거래대금_MA20', 'OBV', 'inst_net_buy_5d', 'inst_net_buy_20d',
+        'for_net_buy_5d', 'for_net_buy_20d',
+        'KOSPI_pct_1d', 'KOSPI_pct_5d', 'USDKRW_pct_1d', 'USDKRW_pct_5d',
         'VIX_pct_1d', 'VIX_pct_5d'
     ]
     target = 'target'
     
-    final_df.dropna(subset=[target] + features, inplace=True)
-    print(f"3. 결측치(NaN) 제거 후: {len(final_df):,} 행")
+    for col in features + [target]:
+        if col not in final_df.columns:
+            print(f"오류: 필요한 컬럼 '{col}'이 데이터프레임에 없습니다.")
+            return None, None, None, None
+            
+    final_df.dropna(subset=[target], inplace=True)
+    print(f"3. 타겟 변수 결측치 제거 후: {len(final_df):,} 행")
 
     if final_df.empty:
         print("오류: 최종 학습 데이터가 비어있습니다.")
-        return None, None, None
+        return None, None, None, None
 
     X = final_df[features].astype(np.float32)
     y = final_df[target]
+    
+    imputation_values = X.median()
+    print("\n--- 피처별 대표 중앙값 (결측치 대체용) ---")
+    print(imputation_values)
+    print("-----------------------------------------")
+    
+    X.fillna(imputation_values, inplace=True)
     
     print(f"4. 최종 학습 데이터셋 (X): {X.shape}")
     print(f"   - 타겟 분포 (y):\n{y.value_counts(normalize=True).to_string()}")
     print("---------------------------------")
 
     print("학습 데이터 생성 완료!")
-    return X, y, features
+    return X, y, features, imputation_values
 
-def train_evaluate_and_save_model(X, y, features, n_jobs, n_iter, max_depth_list, model_path=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'stock_prediction_model_rf_upgraded.joblib')):
+def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_iter, max_depth_list, model_path=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'stock_prediction_model_rf_upgraded.joblib')):
+    # (이하 함수 내용은 변경 없음)
     if X is None or y is None or X.empty or y.empty:
         print("학습 데이터가 없어 모델링을 건너뜁니다.")
         return
@@ -123,8 +138,13 @@ def train_evaluate_and_save_model(X, y, features, n_jobs, n_iter, max_depth_list
     print("\n분류 보고서 (Classification Report):")
     print(classification_report(y_test, y_pred, target_names=['하락(0)', '상승(1)']))
 
-    joblib.dump({'model': best_model, 'features': features, 'scaler': scaler}, model_path)
-    print(f"\n✅ 새로운 데이터로 학습된 최적 모델과 스케일러를 '{model_path}' 경로에 저장했습니다.")
+    joblib.dump({
+        'model': best_model, 
+        'features': features, 
+        'scaler': scaler,
+        'imputation_values': imputation_values 
+    }, model_path)
+    print(f"\n✅ 새로운 데이터로 학습된 최적 모델, 스케일러, 중앙값을 '{model_path}' 경로에 저장했습니다.")
 
 def main():
     parser = argparse.ArgumentParser(description="RandomForest 모델 학습 및 하이퍼파라미터 튜닝")
@@ -133,9 +153,9 @@ def main():
     parser.add_argument('--max_depth', type=int, nargs='+', default=[10, 20, 30], help='max_depth 후보 리스트')
     args = parser.parse_args()
     
-    X, y, features = create_training_data()
+    X, y, features, imputation_values = create_training_data()
     if X is not None:
-        train_evaluate_and_save_model(X, y, features, args.n_jobs, args.n_iter, args.max_depth)
+        train_evaluate_and_save_model(X, y, features, imputation_values, args.n_jobs, args.n_iter, args.max_depth)
 
 if __name__ == '__main__':
     main()

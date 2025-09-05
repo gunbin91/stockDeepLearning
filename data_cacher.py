@@ -1,33 +1,25 @@
-# data_cacher.py
-
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
-import requests
+from pykrx import stock
 import time
 from datetime import datetime, timedelta
 import pandas_ta as ta
 import concurrent.futures
 from tqdm import tqdm
 import os
-import json
 import config
 
 from scoring import calculate_factor_scores
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(PROJECT_ROOT, "cache")
-
-# <<< ✨ 핵심 수정 1: 사용할 데이터베이스 파일 경로 변경 ✨ >>>
-# DART 원본 DB 대신 새로 생성한 pykrx 재무지표 DB를 사용합니다.
 FINANCIAL_DB_PATH = os.path.join(PROJECT_ROOT, 'data', 'financial_data_pykrx_pit.parquet')
-
 CACHE_END_DATE = datetime(datetime.now().year - 1, 12, 31).strftime('%Y-%m-%d')
 CACHE_FILENAME = f"historical_data_up_to_{CACHE_END_DATE.replace('-', '')}.parquet"
 CACHE_FILE_PATH = os.path.join(CACHE_DIR, CACHE_FILENAME)
 
 try:
-    # <<< ✨ 핵심 수정 2: 새로운 DB 로딩 및 컬럼명 통일 ✨ >>>
     funda_df = pd.read_parquet(FINANCIAL_DB_PATH)
     funda_df['date'] = pd.to_datetime(funda_df['date'])
     funda_df.sort_values('date', inplace=True)
@@ -59,19 +51,50 @@ def _fetch_macro_data(start_date, end_date):
             macro_df[f'{col}_pct_1d'] = macro_df[col].pct_change(1)
             macro_df[f'{col}_pct_5d'] = macro_df[col].pct_change(5)
         macro_df.reset_index(inplace=True); macro_df.rename(columns={'index': 'date'}, inplace=True)
-        print("✅ 거시 경제 지표 수집 및 처리 완료.")
+        print("✅ 거시 경제 지표 수집 완료.")
         return macro_df
     except Exception as e:
         print(f"!!!!!!!! [치명적 오류] 거시 경제 지표 수집 실패: {e} !!!!!!!!")
         raise e
+
+def _fetch_trading_value_data(start_date, end_date):
+    print(f"수급 데이터 수집 중 ({start_date} ~ {end_date})...")
+    s_date_str = start_date.replace('-', '')
+    e_date_str = end_date.replace('-', '')
+    try:
+        trading_days = pd.to_datetime(stock.get_market_ohlcv(s_date_str, e_date_str, "005930").index)
+        all_trading_data = []
+        with tqdm(total=len(trading_days), desc="일별 수급 데이터 수집") as pbar:
+            for day in trading_days:
+                try:
+                    df_trading = stock.get_market_trading_value_by_date(day.strftime("%Y%m%d"), day.strftime("%Y%m%d"), "ALL")
+                    df_trading.reset_index(inplace=True)
+                    df_trading.rename(columns={'티커': '종목코드', '외국인합계': 'for_net_buy', '기관합계': 'inst_net_buy'}, inplace=True)
+                    df_trading['date'] = day
+                    all_trading_data.append(df_trading[['date', '종목코드', 'inst_net_buy', 'for_net_buy']])
+                except Exception:
+                    all_trading_data.append(pd.DataFrame(columns=['date', '종목코드', 'inst_net_buy', 'for_net_buy']))
+                finally:
+                    time.sleep(0.1)
+                    pbar.update(1)
+        if not all_trading_data:
+            print("경고: 수급 데이터를 수집하지 못했습니다.")
+            return pd.DataFrame()
+        final_trading_df = pd.concat(all_trading_data, ignore_index=True)
+        print("✅ 수급 데이터 수집 완료.")
+        return final_trading_df
+    except Exception as e:
+        print(f"수급 데이터 수집 중 오류 발생: {e}")
+        return pd.DataFrame()
 
 def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long, pbar_lock):
     ticker = stock_info['종목코드']
     try:
         df_price = fdr.DataReader(ticker, start_date, end_date)
         if df_price is None or df_price.empty or len(df_price) < 251 + 60: return None
-        df_price.rename(columns={'Close':'종가', 'Volume':'거래량'}, inplace=True)
-        df = df_price[['종가', '거래량']].copy(); df.sort_index(inplace=True)
+        df_price.rename(columns={'Close':'종가', 'High': '고가', 'Low': '저가', 'Volume':'거래량'}, inplace=True)
+        df = df_price[['종가', '고가', '저가', '거래량']].copy(); df.sort_index(inplace=True)
+        
         df_marcap_ticker = df_marcap_long[df_marcap_long['Code'] == ticker].copy()
         if df_marcap_ticker.empty: return None
         df_marcap_ticker.sort_values(by='Date', inplace=True)
@@ -79,37 +102,45 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         df.rename(columns={'Marcap': '시가총액'}, inplace=True); df.dropna(subset=['시가총액'], inplace=True)
         if df.empty: return None
         
-        # <<< ✨ 핵심 수정 3: pykrx 재무 지표 데이터 병합 ✨ >>>
         if not funda_df.empty:
             ticker_funda = funda_df[funda_df['종목코드'] == ticker]
             if not ticker_funda.empty:
-                # 주가 데이터(df)의 인덱스(날짜)를 기준으로, pykrx 데이터(ticker_funda)를 날짜에 맞게 붙입니다.
-                # direction='backward'는 특정 날짜에 데이터가 없으면 가장 가까운 과거의 데이터를 가져오라는 의미입니다.
-                df = pd.merge_asof(left=df, right=ticker_funda[['date', 'PER', 'PBR', 'ROE']], 
+                df = pd.merge_asof(left=df, right=ticker_funda[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], 
                                    left_index=True, right_on='date', direction='backward')
-        
-        # PER, PBR, ROE 중 하나라도 없으면 분석에서 제외
-        if 'PER' not in df.columns or df[['PER', 'PBR', 'ROE']].isnull().values.any():
+
+        if 'PER' not in df.columns or df['PER'].isnull().all() or df['PBR'].isnull().all():
             return None
 
         df['거래대금'] = df['종가'] * df['거래량']
-        # <<< ✨ 핵심 수정 4: 재무 지표를 직접 계산하는 대신, 병합된 값을 그대로 사용 ✨ >>>
-        # df['PER'] = df['시가총액'] / df['당기순이익']; df['PBR'] = df['시가총액'] / df['자본총계']
-        # df['ROE'] = df['당기순이익'] / df['자본총계']; 
         df['log_mktcap'] = np.log(df['시가총액'])
-
+        df['이익수익률'] = 1 / df['PER']
         df['수익률(1W)'] = df['종가'].pct_change(5); df['수익률(2W)'] = df['종가'].pct_change(10)
         df['수익률(1M)'] = df['종가'].pct_change(20); df['수익률(3M)'] = df['종가'].pct_change(60)
         df['변동성(1M)'] = df['종가'].rolling(20).std() / df['종가'].rolling(20).mean()
         df['거래대금_MA20'] = df['거래대금'].rolling(20).mean()
-        df['MA5'] = df['종가'].rolling(5).mean(); df['MA20'] = df['종가'].rolling(20).mean()
-        df['단기 정배열'] = (df['MA5'] > df['MA20']).astype(int)
+        
+        df.ta.stoch(high='고가', low='저가', close='종가', k=14, d=3, smooth_k=3, append=True)
+        df.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
+        df.ta.obv(close='종가', volume='거래량', append=True)
+        df.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
+        bbands = df.ta.bbands(close='종가', length=20, std=2)
+        if bbands is not None and all(col in bbands.columns for col in ['BBL_20_2.0', 'BBU_20_2.0', 'BBM_20_2.0']):
+             df['BBW_20_2'] = (bbands['BBU_20_2.0'] - bbands['BBL_20_2.0']) / bbands['BBM_20_2.0']
+        else:
+             df['BBW_20_2'] = np.nan
+
+        for p in [20, 120, 240]:
+            ma = df['종가'].rolling(window=p).mean()
+            df[f'disparity_{p}'] = (df['종가'] / ma) * 100
+
         df['52주_최고가'] = df['종가'].rolling(250).max()
         df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
         df.ta.rsi(close='종가', length=14, append=True)
         df.ta.macd(close='종가', fast=12, slow=26, signal=9, append=True)
+
         df['target'] = (df['종가'].shift(-15) / df['종가'] > 1.05).astype(int)
-        df['종목코드'] = ticker; df.set_index('Date', inplace=True)
+        df['종목코드'] = ticker
+        df.set_index('Date', inplace=True)
         df.drop(columns=['date'], inplace=True, errors='ignore')
         return df
     except Exception as e:
@@ -134,7 +165,7 @@ def _fetch_and_prepare_data(start_date, end_date):
         df_marcap_long.sort_values(by=['Code', 'Date'], inplace=True)
     except Exception as e:
         raise ConnectionError(f"과거 시가총액 데이터 수집 실패: {e}")
-        
+    
     all_data = []; stock_records = stock_list.to_dict('records')
     with tqdm(total=len(stock_records), desc="개별 종목 피처 데이터 생성") as pbar:
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
@@ -147,24 +178,39 @@ def _fetch_and_prepare_data(start_date, end_date):
                 pbar.update(1)
 
     if not all_data: raise ValueError("처리된 데이터가 없습니다.")
+    
     raw_feature_df = pd.concat(all_data).reset_index()
     raw_feature_df.rename(columns={'Date': 'date'}, inplace=True)
     raw_feature_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     raw_feature_df.dropna(subset=['date', '종목코드'], inplace=True)
     raw_feature_df['date'] = pd.to_datetime(raw_feature_df['date'])
+    raw_feature_df.drop_duplicates(subset=['date', '종목코드'], keep='first', inplace=True)
+    
+    df_trading_all = _fetch_trading_value_data(start_date, end_date)
+    if not df_trading_all.empty:
+        raw_feature_df = pd.merge(raw_feature_df, df_trading_all, on=['date', '종목코드'], how='left')
+        raw_feature_df.sort_values(by=['종목코드', 'date'], inplace=True)
+        
+        def calculate_rolling_sums(group, columns, window_sizes):
+            for col in columns:
+                for w in window_sizes:
+                    group[f'{col}_{w}d'] = group[col].rolling(window=w, min_periods=1).sum()
+            return group
+
+        supply_cols = ['inst_net_buy', 'for_net_buy']
+        windows = [5, 20]
+        
+        raw_feature_df = raw_feature_df.groupby('종목코드', group_keys=False).apply(calculate_rolling_sums, supply_cols, windows)
+    
     macro_df = _fetch_macro_data(start_date, end_date)
-    raw_feature_df = pd.merge(raw_feature_df, macro_df, on='date', how='left')
+    if not macro_df.empty:
+        raw_feature_df = pd.merge(raw_feature_df, macro_df, on='date', how='left')
+    
     raw_feature_df.sort_values(by=['date', '종목코드'], inplace=True)
-    print("일별 팩터 점수 계산 중..."); num_groups = len(raw_feature_df.groupby('date'))
-    scored_data_list = []
-    for date, daily_data in tqdm(raw_feature_df.groupby('date'), total=num_groups):
-        daily_scored_data = calculate_factor_scores(daily_data.copy()); daily_scored_data['date'] = date
-        scored_data_list.append(daily_scored_data)
-    if not scored_data_list: return raw_feature_df
-    all_scored_df = pd.concat(scored_data_list)
-    score_cols_to_merge = ['종목코드', 'date'] + [col for col in all_scored_df.columns if '_score' in col]
-    final_df = pd.merge(raw_feature_df, all_scored_df[score_cols_to_merge], on=['date', '종목코드'], how='left')
-    final_df.drop_duplicates(subset=['date', '종목코드'], keep='first', inplace=True)
+
+    print("일별 팩터 점수 계산 중...")
+    final_df = raw_feature_df.groupby('date', group_keys=False).apply(calculate_factor_scores).reset_index(drop=True)
+    
     return final_df
 
 def get_preprocessed_data(start_date, end_date):
@@ -173,8 +219,7 @@ def get_preprocessed_data(start_date, end_date):
         print(f"✅ 캐시된 과거 데이터 로딩: {CACHE_FILE_PATH}"); historical_df = pd.read_parquet(CACHE_FILE_PATH)
     else:
         print(f"⚠️ 캐시 파일 없음. {CACHE_END_DATE}까지의 과거 데이터를 생성합니다 (시간이 소요됩니다)...")
-        cache_start_date = (datetime.strptime(CACHE_END_DATE, '%Y-%m-%d') - timedelta(days=365*5)).strftime('%Y-%m-%d')
-        historical_df = _fetch_and_prepare_data(cache_start_date, CACHE_END_DATE)
+        historical_df = _fetch_and_prepare_data(start_date, CACHE_END_DATE)
         historical_df.to_parquet(CACHE_FILE_PATH)
         print(f"✅ 과거 데이터 캐시 저장 완료: {CACHE_FILE_PATH}")
 

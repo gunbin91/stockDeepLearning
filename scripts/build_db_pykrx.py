@@ -10,22 +10,19 @@ from datetime import datetime
 import sys
 import io
 
-# --- 기본 설정 ---
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
 
-# --- 데이터 수집 기간 및 경로 설정 ---
-START_DATE = "20180101"
+# --- ✨ 핵심 수정: 데이터 수집 시작 기간 변경 ✨ ---
+START_DATE = "20150101"
 END_DATE = datetime.now().strftime("%Y%m%d")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
 OUTPUT_PATH = os.path.join(DATA_DIR, 'financial_data_pykrx_pit.parquet')
 
-
 def build_point_in_time_db_pykrx():
     """
     pykrx를 사용하여 시점(Point-in-Time) 재무 지표 데이터베이스를 구축합니다.
-    - 공식 문서에 명시된 정확한 함수를 사용하여 데이터 수집 문제를 해결했습니다.
     - 자본잠식 기업(PBR <= 0)은 리스크 관리를 위해 제외합니다.
     - 적자 기업(PER < 0)은 분석을 위해 데이터에 포함시킵니다.
     """
@@ -47,8 +44,6 @@ def build_point_in_time_db_pykrx():
     print("\n2. 일별 재무 지표(PER, PBR 등)를 순차적으로 수집합니다...")
     for day in tqdm(trading_days, desc="일별 데이터 수집 진행률"):
         try:
-            # <<< ✨ 핵심 수정: 공식 문서에 명시된 정확한 함수 사용 ✨ >>>
-            # 리드미 2.1.1.5 항목의 get_market_fundamental 함수를 사용합니다.
             df_fundamental = stock.get_market_fundamental(day, market="ALL")
 
             if df_fundamental.empty:
@@ -56,12 +51,7 @@ def build_point_in_time_db_pykrx():
                 time.sleep(0.1)
                 continue
             
-            # [DEBUG] 수신된 컬럼 목록을 확인하여 데이터 무결성 검사
-            # tqdm.write(f"  - [{day}] [DEBUG] 수신된 컬럼: {df_fundamental.columns.tolist()}")
-
-            # 'PBR' 컬럼이 존재하는지 명시적으로 확인하여 KeyError 방지
             if 'PBR' in df_fundamental.columns:
-                # PBR이 0보다 큰, 즉 자본잠식이 아닌 기업만 필터링
                 valid_count_before = len(df_fundamental)
                 df_fundamental = df_fundamental[df_fundamental['PBR'] > 0]
                 
