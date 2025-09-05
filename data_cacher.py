@@ -191,16 +191,13 @@ def _fetch_and_prepare_data(start_date, end_date):
         raw_feature_df = pd.merge(raw_feature_df, df_trading_all, on=['date', '종목코드'], how='left')
         raw_feature_df.sort_values(by=['종목코드', 'date'], inplace=True)
         
-        def calculate_rolling_sums(group, columns, window_sizes):
-            for col in columns:
-                for w in window_sizes:
-                    group[f'{col}_{w}d'] = group[col].rolling(window=w, min_periods=1).sum()
-            return group
-
         supply_cols = ['inst_net_buy', 'for_net_buy']
         windows = [5, 20]
-        
-        raw_feature_df = raw_feature_df.groupby('종목코드', group_keys=False).apply(calculate_rolling_sums, supply_cols, windows)
+
+        for col in supply_cols:
+            for w in windows:
+                rolling_sum = raw_feature_df.groupby('종목코드')[col].rolling(window=w, min_periods=1).sum()
+                raw_feature_df[f'{col}_{w}d'] = rolling_sum.reset_index(level=0, drop=True)
     
     macro_df = _fetch_macro_data(start_date, end_date)
     if not macro_df.empty:
