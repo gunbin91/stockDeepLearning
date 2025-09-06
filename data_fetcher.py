@@ -62,7 +62,6 @@ def _fetch_macro_data(start_date, end_date):
 def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for_fetch, selected_analysis_date, latest_fs_df):
     ticker = stock_info['종목코드']; shares = stock_info['상장주식수']
     try:
-        # data_cacher.py와 동일한 기간의 주가 데이터가 필요
         fetch_start = (pd.to_datetime(start_date_for_fetch) - timedelta(days=60)).strftime('%Y-%m-%d')
         df_price_full = fdr.DataReader(ticker, fetch_start, end_date_for_fetch)
         if df_price_full.empty or len(df_price_full) < 251 + 60: return None, None
@@ -75,15 +74,13 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         reference_date_price = df_temp.loc[actual_analysis_date]['종가']
         latest_current_price = df_price_full.iloc[-1]['종가']
         
-        # 피처 계산에 필요한 충분한 데이터 확보
         df_for_indicators = df_price_full[df_price_full.index <= actual_analysis_date].copy()
         
         fs_data = latest_fs_df[latest_fs_df['종목코드'] == ticker]
         if fs_data.empty or fs_data[['PER', 'PBR']].isnull().values.any(): return None, None
         
-        latest_data = {} # 최종 결과 딕셔너리 초기화
+        latest_data = {} 
 
-        # --- 신규 피처 추가 (data_cacher.py와 동일한 로직) ---
         df_for_indicators['거래대금'] = df_for_indicators['종가'] * df_for_indicators['거래량']
         latest_data['log_mktcap'] = np.log(reference_date_price * shares) if (reference_date_price * shares) > 0 else np.nan
         latest_data['이익수익률'] = 1 / fs_data['PER'].values[0] if fs_data['PER'].values[0] != 0 else np.nan
@@ -93,6 +90,7 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         latest_data['수익률(1M)'] = df_for_indicators['종가'].pct_change(20).iloc[-1]
         latest_data['수익률(3M)'] = df_for_indicators['종가'].pct_change(60).iloc[-1]
         latest_data['변동성(1M)'] = (df_for_indicators['종가'].rolling(20).std() / df_for_indicators['종가'].rolling(20).mean()).iloc[-1]
+        latest_data['거래대금_MA5'] = df_for_indicators['거래대금'].rolling(5).mean().iloc[-1]
         latest_data['거래대금_MA20'] = df_for_indicators['거래대금'].rolling(20).mean().iloc[-1]
         
         df_for_indicators.ta.stoch(high='고가', low='저가', close='종가', k=14, d=3, smooth_k=3, append=True)
@@ -113,21 +111,6 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         df_for_indicators.ta.rsi(close='종가', length=14, append=True)
         df_for_indicators.ta.macd(close='종가', fast=12, slow=26, signal=9, append=True)
 
-        # 수급 피처 계산
-        try:
-            end_d = actual_analysis_date.strftime("%Y%m%d")
-            start_d = (actual_analysis_date - timedelta(days=40)).strftime("%Y%m%d") # 20일 누적 계산을 위해 넉넉히 조회
-            df_trading = stock.get_market_trading_value_by_date(start_d, end_d, ticker)
-            df_trading.rename(columns={'외국인합계': '외국인', '기관합계': '기관'}, inplace=True)
-            latest_data['inst_net_buy_5d'] = df_trading['기관'].rolling(window=5).sum().iloc[-1]
-            latest_data['inst_net_buy_20d'] = df_trading['기관'].rolling(window=20).sum().iloc[-1]
-            latest_data['for_net_buy_5d'] = df_trading['외국인'].rolling(window=5).sum().iloc[-1]
-            latest_data['for_net_buy_20d'] = df_trading['외국인'].rolling(window=20).sum().iloc[-1]
-        except Exception:
-            latest_data['inst_net_buy_5d'], latest_data['inst_net_buy_20d'] = np.nan, np.nan
-            latest_data['for_net_buy_5d'], latest_data['for_net_buy_20d'] = np.nan, np.nan
-        
-        # 나머지 필요한 피처들 추가
         technical_features_to_add = ['STOCHk_14_3_3', 'STOCHd_14_3_3', 'ATRr_14', 'OBV', 'ADX_14', 
                                      'RSI_14', 'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9']
         for feature in technical_features_to_add:
@@ -144,12 +127,13 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             latest_data['시가총액'] = (reference_date_price * shares) / 1_0000_0000
 
         return latest_data, actual_analysis_date
-    except Exception: return None, None
+    except Exception as e:
+        return None, None
 
 def fetch_all_data(stock_list, selected_analysis_date):
     today = datetime.now()
     end_date_for_fetch = today.strftime('%Y-%m-%d')
-    start_date_for_fetch = (today - timedelta(days=400)).strftime('%Y-%m-%d')
+    start_date_for_fetch = (today - timedelta(days=450)).strftime('%Y-%m-%d')
 
     latest_fs_df = get_fs_data_from_pit(stock_list, selected_analysis_date)
     
@@ -186,8 +170,10 @@ def fetch_all_data(stock_list, selected_analysis_date):
                 result, analysis_date = future.result()
                 if result and analysis_date: all_feature_data.append(result); all_actual_dates.append(analysis_date)
             except Exception: continue
+    
     if not all_feature_data: return pd.DataFrame(), None
     final_df = pd.DataFrame(all_feature_data)
+
     final_df['date'] = pd.to_datetime(all_actual_dates)
     final_df = final_df.sort_values('date')
     macro_df = macro_df.sort_index()

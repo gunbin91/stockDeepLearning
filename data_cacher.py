@@ -57,35 +57,7 @@ def _fetch_macro_data(start_date, end_date):
         print(f"!!!!!!!! [치명적 오류] 거시 경제 지표 수집 실패: {e} !!!!!!!!")
         raise e
 
-def _fetch_trading_value_data(start_date, end_date):
-    print(f"수급 데이터 수집 중 ({start_date} ~ {end_date})...")
-    s_date_str = start_date.replace('-', '')
-    e_date_str = end_date.replace('-', '')
-    try:
-        trading_days = pd.to_datetime(stock.get_market_ohlcv(s_date_str, e_date_str, "005930").index)
-        all_trading_data = []
-        with tqdm(total=len(trading_days), desc="일별 수급 데이터 수집") as pbar:
-            for day in trading_days:
-                try:
-                    df_trading = stock.get_market_trading_value_by_date(day.strftime("%Y%m%d"), day.strftime("%Y%m%d"), "ALL")
-                    df_trading.reset_index(inplace=True)
-                    df_trading.rename(columns={'티커': '종목코드', '외국인합계': 'for_net_buy', '기관합계': 'inst_net_buy'}, inplace=True)
-                    df_trading['date'] = day
-                    all_trading_data.append(df_trading[['date', '종목코드', 'inst_net_buy', 'for_net_buy']])
-                except Exception:
-                    all_trading_data.append(pd.DataFrame(columns=['date', '종목코드', 'inst_net_buy', 'for_net_buy']))
-                finally:
-                    time.sleep(0.1)
-                    pbar.update(1)
-        if not all_trading_data:
-            print("경고: 수급 데이터를 수집하지 못했습니다.")
-            return pd.DataFrame()
-        final_trading_df = pd.concat(all_trading_data, ignore_index=True)
-        print("✅ 수급 데이터 수집 완료.")
-        return final_trading_df
-    except Exception as e:
-        print(f"수급 데이터 수집 중 오류 발생: {e}")
-        return pd.DataFrame()
+
 
 def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long, pbar_lock):
     ticker = stock_info['종목코드']
@@ -117,6 +89,7 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         df['수익률(1W)'] = df['종가'].pct_change(5); df['수익률(2W)'] = df['종가'].pct_change(10)
         df['수익률(1M)'] = df['종가'].pct_change(20); df['수익률(3M)'] = df['종가'].pct_change(60)
         df['변동성(1M)'] = df['종가'].rolling(20).std() / df['종가'].rolling(20).mean()
+        df['거래대금_MA5'] = df['거래대금'].rolling(5).mean()
         df['거래대금_MA20'] = df['거래대금'].rolling(20).mean()
         
         df.ta.stoch(high='고가', low='저가', close='종가', k=14, d=3, smooth_k=3, append=True)
@@ -186,18 +159,7 @@ def _fetch_and_prepare_data(start_date, end_date):
     raw_feature_df['date'] = pd.to_datetime(raw_feature_df['date'])
     raw_feature_df.drop_duplicates(subset=['date', '종목코드'], keep='first', inplace=True)
     
-    df_trading_all = _fetch_trading_value_data(start_date, end_date)
-    if not df_trading_all.empty:
-        raw_feature_df = pd.merge(raw_feature_df, df_trading_all, on=['date', '종목코드'], how='left')
-        raw_feature_df.sort_values(by=['종목코드', 'date'], inplace=True)
-        
-        supply_cols = ['inst_net_buy', 'for_net_buy']
-        windows = [5, 20]
-
-        for col in supply_cols:
-            for w in windows:
-                rolling_sum = raw_feature_df.groupby('종목코드')[col].rolling(window=w, min_periods=1).sum()
-                raw_feature_df[f'{col}_{w}d'] = rolling_sum.reset_index(level=0, drop=True)
+    
     
     macro_df = _fetch_macro_data(start_date, end_date)
     if not macro_df.empty:

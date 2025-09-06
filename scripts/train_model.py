@@ -51,8 +51,7 @@ def create_training_data():
         'STOCHk_14_3_3', 'STOCHd_14_3_3', 'ADX_14',
         '변동성(1M)', 'ATRr_14', 'BBW_20_2',
         'disparity_20', 'disparity_120', 'disparity_240',
-        '거래대금_MA20', 'OBV', 'inst_net_buy_5d', 'inst_net_buy_20d',
-        'for_net_buy_5d', 'for_net_buy_20d',
+        '거래대금_MA5', '거래대금_MA20', 'OBV',
         'KOSPI_pct_1d', 'KOSPI_pct_5d', 'USDKRW_pct_1d', 'USDKRW_pct_5d',
         'VIX_pct_1d', 'VIX_pct_5d'
     ]
