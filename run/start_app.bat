@@ -13,9 +13,19 @@ IF NOT EXIST "%ROOT_DIR%\venv" (
     )
 )
 
-REM 가상 환경 활성화 및 패키지 설치
-echo "가상 환경을 활성화하고 패키지를 설치합니다..."
+REM 가상 환경 활성화
+echo "가상 환경을 활성화합니다..."
 CALL "%ROOT_DIR%\venv\Scripts\activate.bat"
+
+REM ==========================================================
+REM 수정된 부분: pip 및 빌드 도구 업그레이드
+REM ==========================================================
+echo "pip, setuptools, wheel을 최신 버전으로 업그레이드합니다..."
+python -m pip install --upgrade pip setuptools wheel
+REM ==========================================================
+
+REM 패키지 설치
+echo "requirements.txt 파일의 패키지를 설치합니다..."
 pip install -r "%ROOT_DIR%\requirements.txt"
 
 REM Streamlit 앱 실행
