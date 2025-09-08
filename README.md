@@ -23,12 +23,32 @@
 - **언어**: Python
 - **데이터 분석**: Pandas, Numpy, Scipy
 - **데이터 수집**: FinanceDataReader, Requests
-- **머신러닝**: Scikit-learn (RandomForest, RandomizedSearchCV)
+- **머신러닝**: Scikit-learn (RandomForest, RandomizedSearchCV), TensorFlow, Keras
 - **시각화**: Plotly
 - **웹 애플리케이션**: Streamlit
 - **기타**: Joblib, Tqdm, Pandas-TA
 
 *(전체 라이브러리는 `requirements.txt` 파일 참조)*
+
+## 3.1. 개발 환경
+
+본 프로젝트는 Python 3.12 버전에서 개발 및 테스트되었습니다. 원활한 실행을 위해 가상 환경(Virtual Environment) 설정을 권장합니다.
+
+1.  **가상 환경 생성 (최초 1회)**:
+    프로젝트 루트 디렉토리에서 다음 명령어를 실행하여 `venv`라는 이름의 가상 환경을 생성합니다.
+    ```bash
+    python3.12 -m venv venv
+    ```
+
+2.  **가상 환경 활성화**:
+    -   **Windows**:
+        ```bash
+        .\venv\Scripts\activate
+        ```
+    -   **macOS/Linux**:
+        ```bash
+        source venv/bin/activate
+        ```
 
 ## 4. 설치 및 실행 방법
 
@@ -36,10 +56,7 @@
 
 1.  **DART API 키 발급**
     - **[DART 인증키 신청 페이지](https://opendart.fss.or.kr/uss/umt/EgovStplat.do)**에 접속하여 **무료 인증키를 발급**받습니다.
-    - 발급받은 키(약 40자)를 복사하여 아래 3개 파일의 최상단에 있는 `DART_API_KEY` 변수에 붙여넣습니다.
-      - `data_fetcher.py`
-      - `train_model.py`
-      - `weight_optimizer.py`
+    - 발급받은 키(약 40자)를 복사하여 `config.py` 파일의 `DART_API_KEY` 변수에 붙여넣습니다.
 
 2.  **종목-고유번호 매핑 파일 생성 (최초 1회 필수)**
     - DART API는 종목코드가 아닌 고유번호를 사용하므로, 이를 변환해주는 매핑 파일이 필요합니다.
@@ -48,7 +65,14 @@
       python make_corp_map.py
       ```
 
-3.  **필요 라이브러리 설치**
+    3.  **pykrx 재무 데이터베이스 구축 (최초 1회 필수)**
+        - 모델 학습 및 분석에 필요한 과거 재무 지표 데이터를 구축합니다. 이 과정은 시간이 다소 소요될 수 있습니다.
+        - 터미널에서 아래 명령어를 실행하거나, `run/build_db_pykrx.bat` (Windows) 또는 `run/build_db_pykrx.command` (macOS/Linux) 파일을 실행합니다.
+          ```bash
+          python scripts/build_db_pykrx.py
+          ```
+
+4.  **필요 라이브러리 설치**
     - 프로젝트 가상 환경을 활성화한 후, 터미널에서 아래 명령어를 실행합니다.
       ```bash
       pip install -r requirements.txt
@@ -124,6 +148,10 @@
 -   **모델 종류**: `RandomForestClassifier`
 -   **예측 목표 (Target)**: "**15 거래일 내에 주가가 5% 이상 상승할 것인가?**" (True/False)
 -   **최적화**: `RandomizedSearchCV`를 사용하여 최적의 하이퍼파라미터 조합을 탐색하고, 이를 통해 모델 성능을 극대화합니다.
+
+### 5.4.1. 딥러닝 모델 (`dl_model.py` 및 `train_dl_model.py`)
+
+본 프로젝트에는 딥러닝 모델(`dl_model.py`)을 위한 구조가 포함되어 있으며, `scripts/train_dl_model.py`를 통해 LSTM 기반의 딥러닝 모델을 학습할 수 있습니다. 현재 `dl_model.py`는 더미 예측을 제공하며, 최종 점수(`final_score`) 계산에는 직접적으로 활용되지 않습니다 (가중치 0%). 이는 향후 딥러닝 모델의 통합 및 활용을 위한 확장 지점입니다.
 
 ### 5.5. 최종 점수 계산 방식 (`ensemble.py`)
 

@@ -10,20 +10,17 @@ VENV_DIR="venv"
 if [ ! -d "$VENV_DIR" ]; then
   echo "가상 환경을 찾을 수 없습니다. 새로 생성하고 패키지를 설치합니다."
   # Python3로 가상 환경 생성
-  python3 -m venv "$VENV_DIR"
+  /opt/homebrew/bin/python3.12 -m venv "$VENV_DIR"
   
   # 가상 환경 활성화
   source "$VENV_DIR/bin/activate"
   
+  pip install --upgrade pip
   # 기본 요구사항 설치
   pip install -r requirements.txt
-  pip install pandas-ta
 
   # NLP 관련 패키지 추가 설치
   pip install 'transformers[torch]' sentencepiece
-
-  # numpy 버전을 1.26.4로 고정
-  pip install --no-cache-dir --force-reinstall numpy==1.26.4
 
   # 비활성화
   deactivate
@@ -35,13 +32,9 @@ source "$VENV_DIR/bin/activate"
 
 # 최신 패키지 설치
 echo "최신 패키지를 설치합니다..."
+pip install --upgrade pip
 pip install -r requirements.txt
-pip install pandas-ta
 pip install 'transformers[torch]' sentencepiece
-
-# numpy 버전을 1.26.4로 최종 고정
-echo "Numpy 버전을 호환되는 1.26.4로 고정합니다..."
-pip install --no-cache-dir --force-reinstall numpy==1.26.4
 
 # Streamlit 앱 실행
 echo "AI 주식 추천 플랫폼을 시작합니다..."
