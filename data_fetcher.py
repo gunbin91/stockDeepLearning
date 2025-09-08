@@ -125,6 +125,7 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             latest_data['시가총액'] = stock_info['시가총액_기준일'] / 1_0000_0000
         else:
             latest_data['시가총액'] = (reference_date_price * shares) / 1_0000_0000
+        latest_data['종목코드'] = ticker # Add ticker code to the features
 
         return latest_data, actual_analysis_date
     except Exception as e:

@@ -58,6 +58,7 @@ def create_stock_chart(ticker_code, stock_name):
 
         # 이동평균선(MA) 계산
         df.ta.bbands(length=20, std=2, append=True)
+        
         df['MA10'] = df['Close'].rolling(window=10).mean()
         df['MA20'] = df['Close'].rolling(window=20).mean()
         df['MA122'] = df['Close'].rolling(window=122).mean()
@@ -74,8 +75,8 @@ def create_stock_chart(ticker_code, stock_name):
         fig.add_trace(go.Scatter(x=df.index, y=df['MA244'], name='MA 244', line=dict(color='purple', width=1.5)), row=1, col=1)
         
         # 볼린저 밴드
-        fig.add_trace(go.Scatter(x=df.index, y=df['BBU_20_2.0'], name='BB 상단', line=dict(color='gray', width=1, dash='dash')), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['BBL_20_2.0'], name='BB 하단', line=dict(color='gray', width=1, dash='dash'), fill='tonexty', fillcolor='rgba(128,128,128,0.1)'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['BBU_20_2.0_2.0'], name='BB 상단', line=dict(color='gray', width=1, dash='dash')), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['BBL_20_2.0_2.0'], name='BB 하단', line=dict(color='gray', width=1, dash='dash'), fill='tonexty', fillcolor='rgba(128,128,128,0.1)'), row=1, col=1)
         
         # 등락에 따른 거래량 막대 색상
         colors = ['red' if row['Close'] > row['Open'] else 'blue' for index, row in df.iterrows()]
@@ -106,60 +107,7 @@ def create_stock_chart(ticker_code, stock_name):
         st.error(f"차트 생성 중 오류 발생: {e}")
         return None
 
-        # 데이터는 2년치를 불러와서 장기 이동평균선 계산에 사용
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=2*365)
-        df = fdr.DataReader(yfinance_ticker, start_date, end_date) # Use yfinance_ticker here
-        if df.empty:
-            st.warning("차트 데이터를 불러오는 데 실패했습니다.")
-            return None
-
-        # 이동평균선(MA) 계산
-        df.ta.bbands(length=20, std=2, append=True)
-        df['MA10'] = df['Close'].rolling(window=10).mean()
-        df['MA20'] = df['Close'].rolling(window=20).mean()
-        df['MA122'] = df['Close'].rolling(window=122).mean()
-        df['MA244'] = df['Close'].rolling(window=244).mean()
-
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                            vertical_spacing=0.03, row_heights=[0.7, 0.3])
-
-        # 캔들스틱 및 이동평균선 추가
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='캔들스틱'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA10'], name='MA 10', line=dict(color='limegreen', width=1.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], name='MA 20', line=dict(color='red', width=1.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA122'], name='MA 122', line=dict(color='orange', width=1.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA244'], name='MA 244', line=dict(color='purple', width=1.5)), row=1, col=1)
         
-        # 볼린저 밴드
-        fig.add_trace(go.Scatter(x=df.index, y=df['BBU_20_2.0'], name='BB 상단', line=dict(color='gray', width=1, dash='dash')), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['BBL_20_2.0'], name='BB 하단', line=dict(color='gray', width=1, dash='dash'), fill='tonexty', fillcolor='rgba(128,128,128,0.1)'), row=1, col=1)
-        
-        # 등락에 따른 거래량 막대 색상
-        colors = ['red' if row['Close'] > row['Open'] else 'blue' for index, row in df.iterrows()]
-        fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='거래량', marker_color=colors), row=2, col=1)
-        
-        # --- 요청사항 반영: 초기 차트 기간 6개월 및 모든 휴장일 공백 제거 ---
-        # 전체 날짜 범위를 생성
-        full_date_range = pd.date_range(start=df.index.min(), end=df.index.max())
-        # 원본 데이터에 없는 날짜(휴장일)를 찾음
-        missing_dates = full_date_range.difference(df.index)
-
-        six_months_ago = df.index.max() - timedelta(days=183) # 약 6개월
-        fig.update_xaxes(
-            range=[six_months_ago, df.index.max()],
-            rangebreaks=[
-                dict(values=missing_dates)  # 주말 및 공휴일을 모두 제외
-            ]
-        )
-
-        fig.update_layout(
-            title=f'<b>{stock_name} ({ticker_code}) 기술적 분석</b>', yaxis_title='가격 (원)',
-            xaxis_rangeslider_visible=False,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-        fig.update_yaxes(title_text="거래량", row=2, col=1)
-        return fig
     except Exception as e:
         st.error(f"차트 생성 중 오류 발생: {e}")
         return None
@@ -226,7 +174,7 @@ def run_stock_recommendation():
     st.title("주식 추천 시스템")
 
     # tqdm 진행률 표시줄을 식별하기 위한 정규표현식 (백테스팅에서 복사)
-    TQDM_REGEX = re.compile(r'\s*\d{1,3}%\|.*')
+    TQDM_REGEX = re.compile(r'\s*\d{1,3}%|.*')
 
     if 'analysis_result' not in st.session_state:
         st.session_state.analysis_result = None
@@ -234,6 +182,15 @@ def run_stock_recommendation():
         st.session_state.market_condition = None
     if 'analysis_date' not in st.session_state:
         st.session_state.analysis_date = None
+    if 'cached_features_df' not in st.session_state:
+        cached_features_path = os.path.join(os.path.dirname(__file__), 'cache', 'cached_features.json')
+        if os.path.exists(cached_features_path):
+            try:
+                st.session_state.cached_features_df = pd.read_json(cached_features_path, orient='records', dtype={'종목코드': str})
+            except Exception as e:
+                st.warning(f"캐시된 피처 데이터를 불러오는 데 실패했습니다: {e}")
+        else:
+            st.session_state.cached_features_df = pd.DataFrame() # Empty DataFrame if file not found
 
     st.write("### 1. 종목 데이터 수집")
     
@@ -458,6 +415,25 @@ def run_stock_recommendation():
                     
                     if fig:
                         st.plotly_chart(fig, use_container_width=True)
+
+                        # Display feature data for the selected stock
+                        if not st.session_state.cached_features_df.empty:
+                            
+                            selected_stock_features = st.session_state.cached_features_df[st.session_state.cached_features_df['종목코드'] == str(ticker_code).zfill(6)]
+                            
+                            if not selected_stock_features.empty:
+                                st.subheader(f"📊 {stock_name} ({ticker_code}) 분석 피처 데이터")
+                                # Drop '종목코드' and 'date' for display if they exist
+                                display_features = selected_stock_features.drop(columns=['종목코드', 'date'], errors='ignore')
+                                # Convert all object columns to string type to prevent pyarrow conversion errors
+                                for col in display_features.columns:
+                                    if display_features[col].dtype == 'object':
+                                        display_features[col] = display_features[col].astype(str)
+                                st.dataframe(display_features.transpose()) # Transpose for better readability if many features
+                            else:
+                                st.info(f"{stock_name} ({ticker_code})에 대한 피처 데이터를 찾을 수 없습니다.")
+                        else:
+                            st.info("캐시된 피처 데이터가 없습니다. 분석을 먼저 실행해주세요.")
                     else:
                         st.warning("차트를 표시할 수 없습니다.")
             except (KeyError, IndexError, ValueError) as e: # Catch ValueError from parsing

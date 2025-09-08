@@ -42,6 +42,15 @@ def run_analysis(analysis_date_str):
         print("  - 재무/가격 데이터 수집 및 기술적 지표 계산 중... (시간이 다소 소요될 수 있습니다)")
         feature_df, actual_analysis_date = data_fetcher.fetch_all_data(stock_list_df, analysis_date)
         
+        # Save feature_df to a cache file for inspection in app.py
+        # Ensure '종목코드' is string type for consistent JSON saving
+        if '종목코드' in feature_df.columns:
+            feature_df['종목코드'] = feature_df['종목코드'].astype(str)
+        feature_df_path = os.path.join(CACHE_DIR, 'cached_features.json')
+        
+        feature_df.to_json(feature_df_path, orient='records', force_ascii=False, indent=4)
+        print(f"  - 피처 데이터를 '{feature_df_path}'에 저장했습니다.")
+        
         if feature_df.empty:
             print("오류: 데이터 수집에 실패했습니다.")
             return
