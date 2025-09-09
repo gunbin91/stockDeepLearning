@@ -1,4 +1,3 @@
-
 import pandas as pd
 from datetime import datetime
 import argparse
@@ -6,6 +5,7 @@ import json
 import os
 import sys
 import io
+import numpy as np # numpy 임포트 추가
 
 # stdout/stderr를 UTF-8로 설정
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
@@ -42,13 +42,16 @@ def run_analysis(analysis_date_str):
         print("  - 재무/가격 데이터 수집 및 기술적 지표 계산 중... (시간이 다소 소요될 수 있습니다)")
         feature_df, actual_analysis_date = data_fetcher.fetch_all_data(stock_list_df, analysis_date)
         
-        # Save feature_df to a cache file for inspection in app.py
-        # Ensure '종목코드' is string type for consistent JSON saving
-        if '종목코드' in feature_df.columns:
-            feature_df['종목코드'] = feature_df['종목코드'].astype(str)
-        feature_df_path = os.path.join(CACHE_DIR, 'cached_features.json')
+        # <<< ✨ 핵심 수정: JSON 저장 전 NaN 값을 None으로 명시적 변환하여 데이터 유실 방지 ✨ >>>
+        feature_df_for_json = feature_df.copy()
+        # pandas 2.0 이상에서는 replace(np.nan, None)이 권장되지 않으므로, where/mask를 사용
+        feature_df_for_json = feature_df_for_json.where(pd.notna(feature_df_for_json), None)
         
-        feature_df.to_json(feature_df_path, orient='records', force_ascii=False, indent=4)
+        if '종목코드' in feature_df_for_json.columns:
+            feature_df_for_json['종목코드'] = feature_df_for_json['종목코드'].astype(str)
+            
+        feature_df_path = os.path.join(CACHE_DIR, 'cached_features.json')
+        feature_df_for_json.to_json(feature_df_path, orient='records', force_ascii=False, indent=4)
         print(f"  - 피처 데이터를 '{feature_df_path}'에 저장했습니다.")
         
         if feature_df.empty:

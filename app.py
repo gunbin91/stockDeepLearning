@@ -83,8 +83,7 @@ def create_stock_chart(ticker_code, stock_name):
         fig.add_trace(go.Scatter(x=df.index, y=df['MA122'], name='MA 122', line=dict(color='orange', width=1.5)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['MA244'], name='MA 244', line=dict(color='purple', width=1.5)), row=1, col=1)
         
-        # <<< ✨ [오류 수정] ✨ >>>
-        # 볼린저 밴드 컬럼명을 원상 복구
+        # 볼린저 밴드
         fig.add_trace(go.Scatter(x=df.index, y=df['BBU_20_2.0_2.0'], name='BB 상단', line=dict(color='gray', width=1, dash='dash')), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['BBL_20_2.0_2.0'], name='BB 하단', line=dict(color='gray', width=1, dash='dash'), fill='tonexty', fillcolor='rgba(128,128,128,0.1)'), row=1, col=1)
         
@@ -190,11 +189,12 @@ def run_stock_recommendation():
         cached_features_path = os.path.join(os.path.dirname(__file__), 'cache', 'cached_features.json')
         if os.path.exists(cached_features_path):
             try:
+                # JSON 로드 시 종목코드를 문자열로 유지
                 st.session_state.cached_features_df = pd.read_json(cached_features_path, orient='records', dtype={'종목코드': str})
             except Exception as e:
                 st.warning(f"캐시된 피처 데이터를 불러오는 데 실패했습니다: {e}")
         else:
-            st.session_state.cached_features_df = pd.DataFrame() # Empty DataFrame if file not found
+            st.session_state.cached_features_df = pd.DataFrame()
 
     st.write("### 1. 종목 데이터 수집")
     
@@ -371,13 +371,13 @@ def run_stock_recommendation():
         # '현재가(원)' 컬럼에만 스타일 적용
         styled_df = results_df[display_cols_in_table].style.apply(highlight_change, axis=1)
 
+        # <<< ✨ 핵심 수정: 로깅 오류를 유발하는 use_container_width 파라미터 제거 ✨ >>>
         st.dataframe(
             styled_df,
             on_select="rerun",
             selection_mode="single-row",
             key="selected_stock",
-            hide_index=True,
-            use_container_width=True
+            hide_index=True
         )
         
         # --- 선택된 종목의 상세 차트 표시 (차트 미표시 오류 수정) ---
@@ -397,19 +397,24 @@ def run_stock_recommendation():
                     if fig:
                         st.plotly_chart(fig, use_container_width=True)
 
-                        # Display feature data for the selected stock
+                        # <<< ✨ 핵심 수정: 피처 데이터 표시 로직 안정화 ✨ >>>
                         if not st.session_state.cached_features_df.empty:
+                            # 종목코드는 항상 6자리 문자열로 비교
                             selected_stock_features = st.session_state.cached_features_df[st.session_state.cached_features_df['종목코드'] == str(ticker_code).zfill(6)]
                             
                             if not selected_stock_features.empty:
                                 st.subheader(f"📊 {stock_name} ({ticker_code}) 분석 피처 데이터")
                                 
-                                # 표시할 필요 없는 컬럼 제외
                                 display_features = selected_stock_features.drop(columns=['종목코드', 'date'], errors='ignore')
                                 
-                                # 행/열을 전환하고, 모든 값을 문자열로 변환하여 Streamlit의 데이터프레임 표시 오류 방지
-                                transposed_df = display_features.transpose().astype(str)
-                                transposed_df.columns = ['피처 값'] # 열 이름 변경
+                                # 1. 행/열 전환
+                                transposed_df = display_features.transpose()
+                                # 2. 열 이름 설정
+                                transposed_df.columns = ['피처 값']
+                                # 3. Null 값을 'N/A' 문자열로 채우기
+                                transposed_df.fillna("N/A", inplace=True)
+                                # 4. 모든 값을 문자열로 변환하여 타입 일관성 확보 (오류 방지)
+                                transposed_df = transposed_df.astype(str)
                                 
                                 st.dataframe(transposed_df)
                             else:

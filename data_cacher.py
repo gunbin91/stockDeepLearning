@@ -96,9 +96,11 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         df.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
         df.ta.obv(close='종가', volume='거래량', append=True)
         df.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
+        
         bbands = df.ta.bbands(close='종가', length=20, std=2)
-        if bbands is not None and all(col in bbands.columns for col in ['BBL_20_2.0', 'BBU_20_2.0', 'BBM_20_2.0']):
-             df['BBW_20_2'] = (bbands['BBU_20_2.0'] - bbands['BBL_20_2.0']) / bbands['BBM_20_2.0']
+        # <<< ✨ 핵심 수정: pandas-ta 버전업에 따른 볼린저밴드 컬럼명 변경 대응 ✨ >>>
+        if bbands is not None and all(col in bbands.columns for col in ['BBL_20_2.0_2.0', 'BBU_20_2.0_2.0', 'BBM_20_2.0_2.0']):
+             df['BBW_20_2'] = (bbands['BBU_20_2.0_2.0'] - bbands['BBL_20_2.0_2.0']) / bbands['BBM_20_2.0_2.0']
         else:
              df['BBW_20_2'] = np.nan
 
