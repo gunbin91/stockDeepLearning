@@ -11,6 +11,15 @@ import FinanceDataReader as fdr
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas_ta as ta
+import subprocess
+import re
+import sys
+import json
+import io
+
+# stdout/stderr를 UTF-8로 설정
+sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
 
 # --- 사용자 정의 모듈 임포트 ---
 import data_fetcher
@@ -74,7 +83,8 @@ def create_stock_chart(ticker_code, stock_name):
         fig.add_trace(go.Scatter(x=df.index, y=df['MA122'], name='MA 122', line=dict(color='orange', width=1.5)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['MA244'], name='MA 244', line=dict(color='purple', width=1.5)), row=1, col=1)
         
-        # 볼린저 밴드
+        # <<< ✨ [오류 수정] ✨ >>>
+        # 볼린저 밴드 컬럼명을 원상 복구
         fig.add_trace(go.Scatter(x=df.index, y=df['BBU_20_2.0_2.0'], name='BB 상단', line=dict(color='gray', width=1, dash='dash')), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['BBL_20_2.0_2.0'], name='BB 하단', line=dict(color='gray', width=1, dash='dash'), fill='tonexty', fillcolor='rgba(128,128,128,0.1)'), row=1, col=1)
         
@@ -107,11 +117,6 @@ def create_stock_chart(ticker_code, stock_name):
         st.error(f"차트 생성 중 오류 발생: {e}")
         return None
 
-        
-    except Exception as e:
-        st.error(f"차트 생성 중 오류 발생: {e}")
-        return None
-
 
 # --- 모델 분석 페이지 (이전과 동일) ---
 @st.cache_data
@@ -123,7 +128,6 @@ def load_model_data(model_path):
         return None
 
 def display_model_analysis_page():
-    # ... (이전과 동일한 내용이므로 생략) ...
     st.header("학습 모델 분석 리포트")
     model_data = load_model_data(MODEL_PATH)
     if model_data is None:
@@ -349,20 +353,19 @@ def run_stock_recommendation():
         
         st.info("테이블의 행을 클릭하면 아래에 상세 차트가 나타납니다.")
         
-        display_cols_in_table = [col for col in results_df.columns if col != '종목코드']
+        display_cols_in_table = [col for col in results_df.columns if col != '종목코드' and col != '등락율']
 
         # --- 스타일링 함수 정의 ---
         def highlight_change(row):
-            # '현재가(원)' 컬럼에만 스타일을 적용하기 위해 Series의 인덱스를 확인
-            # Streamlit의 apply 함수는 DataFrame의 각 행(Series)을 인자로 받음
             styles = ['' for _ in row.index] # 모든 컬럼에 대한 기본 스타일
             
             if '등락율' in row.index:
                 change_percent = row['등락율']
-                if change_percent > 0:
-                    styles[row.index.get_loc('현재가(원)')] = 'color: red;'
-                elif change_percent < 0:
-                    styles[row.index.get_loc('현재가(원)')] = 'color: blue;'
+                if pd.notna(change_percent):
+                    if change_percent > 0:
+                        styles[row.index.get_loc('현재가(원)')] = 'color: red;'
+                    elif change_percent < 0:
+                        styles[row.index.get_loc('현재가(원)')] = 'color: blue;'
             return styles
 
         # '현재가(원)' 컬럼에만 스타일 적용
@@ -374,38 +377,16 @@ def run_stock_recommendation():
             selection_mode="single-row",
             key="selected_stock",
             hide_index=True,
-            use_container_width=True,
-            #width='stretch' # 경고 수정: use_container_width -> width
+            use_container_width=True
         )
-        
         
         # --- 선택된 종목의 상세 차트 표시 (차트 미표시 오류 수정) ---
         if st.session_state.selected_stock and st.session_state.selected_stock.get("selection", {}).get("rows"):
-             # This should now appear if condition is met
             try:
-                raw_selected_rows = st.session_state.selected_stock["selection"]["rows"]
-                
-                # Attempt to parse the selected index from the "start:end" string format
-                if isinstance(raw_selected_rows, list) and len(raw_selected_rows) > 0:
-                    first_element = raw_selected_rows[0]
-                    if isinstance(first_element, str) and ':' in first_element:
-                        parts = first_element.split(':')
-                        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-                            selected_index = int(parts[0]) # Take the start of the slice as the index
-                        else:
-                            raise ValueError(f"Unexpected row string format: {first_element}")
-                    elif isinstance(first_element, int): # Handle standard integer index
-                        selected_index = first_element
-                    else:
-                        raise ValueError(f"Unexpected row element type: {type(first_element)}")
-                else:
-                    raise ValueError("No valid row selected or rows list is empty.")
-
+                selected_index = st.session_state.selected_stock["selection"]["rows"][0]
                 selected_row = results_df.iloc[selected_index]
                 ticker_code = str(selected_row['종목코드']) # 종목코드를 문자열로 명시적 변환
                 stock_name = selected_row['종목명']
-                
-                
                 
                 st.markdown("---")
                 st.subheader(f"📈 [{stock_name}] 상세 차트")
@@ -418,34 +399,31 @@ def run_stock_recommendation():
 
                         # Display feature data for the selected stock
                         if not st.session_state.cached_features_df.empty:
-                            
                             selected_stock_features = st.session_state.cached_features_df[st.session_state.cached_features_df['종목코드'] == str(ticker_code).zfill(6)]
                             
                             if not selected_stock_features.empty:
                                 st.subheader(f"📊 {stock_name} ({ticker_code}) 분석 피처 데이터")
-                                # Drop '종목코드' and 'date' for display if they exist
+                                
+                                # 표시할 필요 없는 컬럼 제외
                                 display_features = selected_stock_features.drop(columns=['종목코드', 'date'], errors='ignore')
-                                # Convert all object columns to string type to prevent pyarrow conversion errors
-                                for col in display_features.columns:
-                                    if display_features[col].dtype == 'object':
-                                        display_features[col] = display_features[col].astype(str)
-                                st.dataframe(display_features.transpose()) # Transpose for better readability if many features
+                                
+                                # 행/열을 전환하고, 모든 값을 문자열로 변환하여 Streamlit의 데이터프레임 표시 오류 방지
+                                transposed_df = display_features.transpose().astype(str)
+                                transposed_df.columns = ['피처 값'] # 열 이름 변경
+                                
+                                st.dataframe(transposed_df)
                             else:
                                 st.info(f"{stock_name} ({ticker_code})에 대한 피처 데이터를 찾을 수 없습니다.")
                         else:
                             st.info("캐시된 피처 데이터가 없습니다. 분석을 먼저 실행해주세요.")
                     else:
                         st.warning("차트를 표시할 수 없습니다.")
-            except (KeyError, IndexError, ValueError) as e: # Catch ValueError from parsing
+            except (KeyError, IndexError, ValueError) as e: 
                 st.error(f"선택된 행의 인덱스를 처리하는 중 오류가 발생했습니다: {e}. 다시 시도해주세요.")
                 pass
             except Exception as e:
                 st.error(f"차트 표시 중 오류 발생: {e}")
         
-import subprocess
-import re
-import sys
-import json
 
 # --- 백테스팅 리포트 페이지 ---
 def display_backtest_report():
