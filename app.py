@@ -353,8 +353,8 @@ def run_stock_recommendation():
         
         st.info("테이블의 행을 클릭하면 아래에 상세 차트가 나타납니다.")
         
-        display_cols_in_table = [col for col in results_df.columns if col != '종목코드' and col != '등락율']
-
+        # <<< ✨ 핵심 수정: 스타일링 기능 복구 및 안정화 ✨ >>>
+        
         # --- 스타일링 함수 정의 ---
         def highlight_change(row):
             styles = ['' for _ in row.index] # 모든 컬럼에 대한 기본 스타일
@@ -362,22 +362,29 @@ def run_stock_recommendation():
             if '등락율' in row.index:
                 change_percent = row['등락율']
                 if pd.notna(change_percent):
+                    # get_loc으로 '현재가(원)' 컬럼의 정확한 위치를 찾아 스타일 적용
+                    price_col_index = row.index.get_loc('현재가(원)')
                     if change_percent > 0:
-                        styles[row.index.get_loc('현재가(원)')] = 'color: red;'
+                        styles[price_col_index] = 'color: red;'
                     elif change_percent < 0:
-                        styles[row.index.get_loc('현재가(원)')] = 'color: blue;'
+                        styles[price_col_index] = 'color: blue;'
             return styles
 
-        # '현재가(원)' 컬럼에만 스타일 적용
-        styled_df = results_df[display_cols_in_table].style.apply(highlight_change, axis=1)
+        # 1. '등락율'이 포함된 전체 데이터프레임에 스타일 적용
+        styled_df = results_df.style.apply(highlight_change, axis=1)
 
-        # <<< ✨ 핵심 수정: 로깅 오류를 유발하는 use_container_width 파라미터 제거 ✨ >>>
         st.dataframe(
             styled_df,
             on_select="rerun",
             selection_mode="single-row",
             key="selected_stock",
-            hide_index=True
+            hide_index=True,
+            # 2. Streamlit의 column_config를 사용하여 UI에서만 특정 컬럼 숨기기
+            column_config={
+                "종목코드": None,
+                "등락율": None,
+            },
+            use_container_width=True
         )
         
         # --- 선택된 종목의 상세 차트 표시 (차트 미표시 오류 수정) ---
@@ -397,7 +404,7 @@ def run_stock_recommendation():
                     if fig:
                         st.plotly_chart(fig, use_container_width=True)
 
-                        # <<< ✨ 핵심 수정: 피처 데이터 표시 로직 안정화 ✨ >>>
+                        # 피처 데이터 표시 로직 안정화
                         if not st.session_state.cached_features_df.empty:
                             # 종목코드는 항상 6자리 문자열로 비교
                             selected_stock_features = st.session_state.cached_features_df[st.session_state.cached_features_df['종목코드'] == str(ticker_code).zfill(6)]
@@ -416,7 +423,7 @@ def run_stock_recommendation():
                                 # 4. 모든 값을 문자열로 변환하여 타입 일관성 확보 (오류 방지)
                                 transposed_df = transposed_df.astype(str)
                                 
-                                st.dataframe(transposed_df)
+                                st.dataframe(transposed_df, use_container_width=True)
                             else:
                                 st.info(f"{stock_name} ({ticker_code})에 대한 피처 데이터를 찾을 수 없습니다.")
                         else:

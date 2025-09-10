@@ -14,6 +14,7 @@ from datetime import datetime
 import os
 import sys
 import io
+import shutil # 폴더 삭제를 위해 shutil 라이브러리 임포트
 
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
@@ -25,8 +26,6 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 
 def create_training_data():
     print("캐시 관리 모듈을 통해 학습 데이터 생성을 시작합니다...")
-    # --- ✨ 핵심 수정: 데이터 요청 기간과 실제 학습 기간을 명확히 분리 ✨ ---
-    # data_cacher에 2015년부터 현재까지의 전체 기간 데이터를 요청
     start_date_for_cacher = '2015-01-01'
     end_date_for_cacher = datetime.now().strftime('%Y-%m-%d')
     
@@ -39,7 +38,6 @@ def create_training_data():
     print(f"\n--- 생성된 학습 데이터 요약 ---")
     print(f"1. 전체 수집 데이터 (Raw): {len(final_df):,} 행")
     
-    # 2015년 데이터는 피처 계산을 위한 워밍업 기간으로 사용하고, 실제 학습은 2016년부터 시작
     training_start_date = '2016-01-01'
     final_df = final_df[final_df['date'] >= pd.to_datetime(training_start_date)]
     print(f"2. 워밍업 기간(2015년) 제외 후 실제 학습 데이터: {len(final_df):,} 행")
@@ -87,7 +85,6 @@ def create_training_data():
     return X, y, features, imputation_values
 
 def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_iter, max_depth_list, model_path=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'stock_prediction_model_rf_upgraded.joblib')):
-    # (이하 함수 내용은 변경 없음)
     if X is None or y is None or X.empty or y.empty:
         print("학습 데이터가 없어 모델링을 건너뜁니다.")
         return
@@ -152,9 +149,34 @@ def main():
     parser.add_argument('--max_depth', type=int, nargs='+', default=[10, 20, 30], help='max_depth 후보 리스트')
     args = parser.parse_args()
     
-    X, y, features, imputation_values = create_training_data()
-    if X is not None:
-        train_evaluate_and_save_model(X, y, features, imputation_values, args.n_jobs, args.n_iter, args.max_depth)
+    # ==============================================================================
+    # ✨ 핵심 수정: 임시 폴더 생성 및 자동 삭제 로직 추가 ✨
+    # ==============================================================================
+    # 1. 프로젝트 루트 경로를 기준으로 임시 폴더 경로 설정
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    temp_folder_path = os.path.join(project_root, '.joblib_temp')
+
+    try:
+        # 2. 임시 폴더 생성 및 환경 변수 설정
+        os.makedirs(temp_folder_path, exist_ok=True)
+        os.environ['JOBLIB_TEMP_FOLDER'] = temp_folder_path
+        print(f"joblib 임시 폴더가 '{temp_folder_path}'로 설정되었습니다.")
+
+        # 3. 메인 학습 로직 실행
+        X, y, features, imputation_values = create_training_data()
+        if X is not None:
+            train_evaluate_and_save_model(X, y, features, imputation_values, args.n_jobs, args.n_iter, args.max_depth)
+
+    finally:
+        # 4. 학습 성공/실패 여부와 관계없이 항상 임시 폴더 삭제
+        if os.path.exists(temp_folder_path):
+            print(f"\n학습 완료 후 임시 폴더 삭제 중: {temp_folder_path}")
+            try:
+                shutil.rmtree(temp_folder_path)
+                print("임시 폴더가 성공적으로 삭제되었습니다.")
+            except Exception as e:
+                print(f"경고: 임시 폴더를 삭제하는 중 오류가 발생했습니다: {e}")
+    # ==============================================================================
 
 if __name__ == '__main__':
     main()
