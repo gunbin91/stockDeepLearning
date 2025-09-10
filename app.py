@@ -13,7 +13,7 @@ from plotly.subplots import make_subplots
 import pandas_ta as ta
 import subprocess
 import re
-import sys
+import sys  # sys 모듈이 이미 임포트되어 있습니다.
 import json
 import io
 
@@ -235,10 +235,14 @@ def run_stock_recommendation():
 
         with st.spinner('분석 스크립트를 실행하고 실시간 로그를 수신 중입니다...'):
             try:
+                # ==========================================================
+                # ✨ 핵심 수정 1: 'python'을 sys.executable로 변경
+                # ==========================================================
                 command = [
-                    'python', '-u', os.path.join(os.path.dirname(__file__), 'scripts', 'run_analysis.py'),
+                    sys.executable, '-u', os.path.join(os.path.dirname(__file__), 'scripts', 'run_analysis.py'),
                     '--date', selected_analysis_date.strftime('%Y-%m-%d')
                 ]
+                # ==========================================================
                 
                 process = subprocess.Popen(
                     command, 
@@ -484,8 +488,11 @@ def display_backtest_report():
 
                     with st.spinner('백테스팅 스크립트를 실행하고 실시간 로그를 수신 중입니다...'):
                         try:
+                            # ==========================================================
+                            # ✨ 핵심 수정 2: 'python'을 sys.executable로 변경
+                            # ==========================================================
                             command = [
-                                'python', '-u', os.path.join(os.path.dirname(__file__), 'scripts', 'backtest.py'),
+                                sys.executable, '-u', os.path.join(os.path.dirname(__file__), 'scripts', 'backtest.py'),
                                 '--capital', str(capital),
                                 '--max-hold', str(max_hold),
                                 '--take-profit', str(take_profit),
@@ -494,6 +501,7 @@ def display_backtest_report():
                                 '--buy-universe', str(buy_universe),
                                 '--fee', str(transaction_fee)
                             ]
+                            # ==========================================================
                             
                             process = subprocess.Popen(
                                 command, 
