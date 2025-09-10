@@ -32,7 +32,8 @@ REM ==========================================================
 REM pandas_ta posix module import fix for Windows
 REM ==========================================================
 echo "Fixing pandas_ta posix import issue..."
-SET "ALLIGATOR_FILE=C:\Users\82102\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas_ta\overlap\alligator.py"
+SET "VENV_SITE_PACKAGES=%ROOT_DIR%\venv\Lib\site-packages"
+SET "ALLIGATOR_FILE=%VENV_SITE_PACKAGES%\pandas_ta\overlap\alligator.py"
 IF EXIST "%ALLIGATOR_FILE%" (
     powershell -Command "(Get-Content \"%ALLIGATOR_FILE%\") | Where-Object {$_ -notmatch \"from posix import pread\"} | Set-Content \"%ALLIGATOR_FILE%\""
     IF %ERRORLEVEL% NEQ 0 (
