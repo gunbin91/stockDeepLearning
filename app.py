@@ -27,6 +27,8 @@ import scoring
 import ml_model
 import dl_model
 import ensemble
+from logger import log_info, log_warning, log_error, log_critical
+from exceptions import DataFetchError, ModelPredictionError, AnalysisError
 
 # 페이지 레이아웃 설정
 st.set_page_config(layout="wide")
@@ -207,11 +209,20 @@ def run_stock_recommendation():
     )
     
     with st.spinner("전체 종목 목록을 API로부터 수신하는 중..."):
-        stock_list_df = data_fetcher.fetch_stock_list()
-    if stock_list_df.empty:
-        st.error("API 통신 오류: 종목 목록을 가져오는 데 실패했습니다. 잠시 후 페이지를 새로고침해주세요.")
-        st.stop()
-    st.success("종목 목록 수신 완료!")
+        try:
+            stock_list_df = data_fetcher.fetch_stock_list()
+            if stock_list_df.empty:
+                st.error("API 통신 오류: 종목 목록을 가져오는 데 실패했습니다. 잠시 후 페이지를 새로고침해주세요.")
+                st.stop()
+            st.success("종목 목록 수신 완료!")
+        except DataFetchError as e:
+            log_error(f"종목 목록 수신 실패: {e}")
+            st.error(f"종목 목록 수신 중 오류가 발생했습니다: {e.message}")
+            st.stop()
+        except Exception as e:
+            log_error(f"예상치 못한 오류 발생: {e}")
+            st.error("예상치 못한 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+            st.stop()
 
     col1, col2, _ = st.columns([1, 1, 5])
     with col1:
@@ -550,9 +561,13 @@ def display_backtest_report():
                                 st.error("백테스팅 실행 중 오류가 발생했습니다. 위 로그를 확인해주세요.")
 
                         except FileNotFoundError:
-                            st.error("'python' 명령을 찾을 수 없습니다. 가상환경이 올바르게 설정되었는지 확인하세요.")
+                            error_msg = "'python' 명령을 찾을 수 없습니다. 가상환경이 올바르게 설정되었는지 확인하세요."
+                            log_error(error_msg)
+                            st.error(error_msg)
                         except Exception as e:
-                            st.error(f"스크립트 실행 중 예상치 못한 오류가 발생했습니다: {e}")
+                            error_msg = f"스크립트 실행 중 예상치 못한 오류가 발생했습니다: {e}"
+                            log_error(error_msg)
+                            st.error(error_msg)
                     
                     time.sleep(2)
                     st.rerun()

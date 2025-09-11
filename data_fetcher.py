@@ -11,53 +11,74 @@ import os
 from datetime import datetime, timedelta
 import time
 import config
+from logger import log_info, log_warning, log_error, log_critical
+from exceptions import DataFetchError, DataValidationError
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 FINANCIAL_DB_PATH = os.path.join(PROJECT_ROOT, 'data', 'financial_data_pykrx_pit.parquet')
 
 def get_fs_data_from_pit(stock_list, selected_analysis_date):
     try:
+        log_info(f"재무 지표 데이터베이스 로딩 시작: {FINANCIAL_DB_PATH}")
         funda_df = pd.read_parquet(FINANCIAL_DB_PATH)
+        log_info("재무 지표 데이터베이스 로딩 완료")
     except FileNotFoundError:
-        print(f"[오류] 재무 지표 데이터베이스 파일({FINANCIAL_DB_PATH})을 찾을 수 없습니다.")
-        print("먼저 `scripts/build_db_pykrx.py`를 실행하여 데이터베이스를 생성해주세요."); return pd.DataFrame()
+        error_msg = f"재무 지표 데이터베이스 파일({FINANCIAL_DB_PATH})을 찾을 수 없습니다."
+        log_critical(error_msg)
+        log_info("먼저 `scripts/build_db_pykrx.py`를 실행하여 데이터베이스를 생성해주세요.")
+        raise DataFetchError(error_msg, source="pykrx_database")
+    except Exception as e:
+        error_msg = f"재무 지표 데이터베이스 로딩 중 오류 발생: {e}"
+        log_error(error_msg)
+        raise DataFetchError(error_msg, source="pykrx_database")
     
-    print(f"분석 기준일({selected_analysis_date.strftime('%Y-%m-%d')}): pykrx DB에서 최신 재무 지표 조회.")
+    log_info(f"분석 기준일({selected_analysis_date.strftime('%Y-%m-%d')}): pykrx DB에서 최신 재무 지표 조회.")
     analysis_date_ts = pd.to_datetime(selected_analysis_date)
     
     available_funda = funda_df[funda_df['date'] <= analysis_date_ts].copy()
     if available_funda.empty:
-        print(f"경고: {analysis_date_ts.strftime('%Y-%m-%d')} 이전에 집계된 재무 지표 데이터가 없습니다."); return pd.DataFrame()
+        warning_msg = f"{analysis_date_ts.strftime('%Y-%m-%d')} 이전에 집계된 재무 지표 데이터가 없습니다."
+        log_warning(warning_msg)
+        return pd.DataFrame()
     
     latest_funda = available_funda.sort_values('date').drop_duplicates(subset=['종목코드'], keep='last')
     
     result_df = pd.merge(stock_list[['종목코드']], latest_funda, on='종목코드', how='left')
-    print(f"✅ 사용 가능한 재무 지표 처리 완료: {len(result_df.dropna())}개 기업")
+    log_info(f"✅ 사용 가능한 재무 지표 처리 완료: {len(result_df.dropna())}개 기업")
     return result_df
 
 def fetch_stock_list():
-    print("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보 수집 (KRX-MARCAP)...")
+    log_info("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보 수집 (KRX-MARCAP)...")
     try:
         df_marcap = fdr.StockListing('KRX-MARCAP')
         df_marcap = df_marcap[~df_marcap['Name'].str.contains('스팩|리츠', na=False)].copy()
         stock_list = df_marcap[['Code', 'Name', 'Stocks']].copy()
         stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명', 'Stocks': '상장주식수'}, inplace=True)
         stock_list = stock_list[stock_list['상장주식수'] > 0]
-        print(f"총 {len(stock_list)}개 종목을 찾았습니다.")
+        log_info(f"총 {len(stock_list)}개 종목을 찾았습니다.")
         return stock_list
     except Exception as e:
-        print(f"FinanceDataReader API 통신 실패 (KRX-MARCAP): {e}"); return pd.DataFrame()
+        error_msg = f"FinanceDataReader API 통신 실패 (KRX-MARCAP): {e}"
+        log_error(error_msg)
+        raise DataFetchError(error_msg, source="FinanceDataReader")
 
 def _fetch_macro_data(start_date, end_date):
-    print(f"거시 경제 지표 데이터 수집 중 ({start_date} ~ {end_date})...")
+    log_info(f"거시 경제 지표 데이터 수집 중 ({start_date} ~ {end_date})...")
     try:
-        kospi = fdr.DataReader('KS11', start_date, end_date); usdkrw = fdr.DataReader('USD/KRW', start_date, end_date); vix = fdr.DataReader('^VIX', start_date, end_date)
+        kospi = fdr.DataReader('KS11', start_date, end_date)
+        usdkrw = fdr.DataReader('USD/KRW', start_date, end_date)
+        vix = fdr.DataReader('^VIX', start_date, end_date)
         macro_df = pd.concat([kospi['Close'].rename('KOSPI'), usdkrw['Close'].rename('USDKRW'), vix['Close'].rename('VIX')], axis=1).ffill()
         for col in ['KOSPI', 'USDKRW', 'VIX']:
-            if col in macro_df.columns: macro_df[f'{col}_pct_1d'] = macro_df[col].pct_change(1); macro_df[f'{col}_pct_5d'] = macro_df[col].pct_change(5)
-        print("✅ 거시 경제 지표 수집 완료."); return macro_df
+            if col in macro_df.columns: 
+                macro_df[f'{col}_pct_1d'] = macro_df[col].pct_change(1)
+                macro_df[f'{col}_pct_5d'] = macro_df[col].pct_change(5)
+        log_info("✅ 거시 경제 지표 수집 완료.")
+        return macro_df
     except Exception as e:
-        print(f"거시 경제 지표 수집 실패: {e}"); return pd.DataFrame()
+        error_msg = f"거시 경제 지표 수집 실패: {e}"
+        log_error(error_msg)
+        raise DataFetchError(error_msg, source="macro_economic_data")
 
 def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for_fetch, selected_analysis_date, latest_fs_df):
     ticker = stock_info['종목코드']; shares = stock_info['상장주식수']

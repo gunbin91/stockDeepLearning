@@ -21,6 +21,8 @@ import scoring
 import ml_model
 import dl_model
 import ensemble
+from logger import log_info, log_warning, log_error, log_critical
+from exceptions import DataFetchError, ModelPredictionError, AnalysisError
 
 # 결과물을 저장할 캐시 디렉토리 생성
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'cache')
@@ -29,18 +31,27 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 def run_analysis(analysis_date_str):
     """주어진 날짜를 기준으로 주식 데이터를 분석하고 결과를 파일에 저장합니다."""
     try:
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 1. 분석 시작 (기준일: {analysis_date_str})")
+        log_info(f"분석 시작 (기준일: {analysis_date_str})")
         analysis_date = datetime.strptime(analysis_date_str, '%Y-%m-%d')
 
-        print("  - 전체 종목 목록 수신 중...")
-        stock_list_df = data_fetcher.fetch_stock_list()
-        if stock_list_df.empty:
-            print("오류: 종목 목록을 가져오는 데 실패했습니다.")
-            return
-        print(f"  - {len(stock_list_df)}개 종목 목록 수신 완료.")
+        log_info("전체 종목 목록 수신 중...")
+        try:
+            stock_list_df = data_fetcher.fetch_stock_list()
+            if stock_list_df.empty:
+                error_msg = "종목 목록을 가져오는 데 실패했습니다."
+                log_error(error_msg)
+                raise AnalysisError(error_msg, step="stock_list_fetch")
+            log_info(f"{len(stock_list_df)}개 종목 목록 수신 완료.")
+        except DataFetchError as e:
+            log_error(f"종목 목록 수신 실패: {e}")
+            raise AnalysisError(f"종목 목록 수신 실패: {e.message}", step="stock_list_fetch")
 
-        print("  - 재무/가격 데이터 수집 및 기술적 지표 계산 중... (시간이 다소 소요될 수 있습니다)")
-        feature_df, actual_analysis_date = data_fetcher.fetch_all_data(stock_list_df, analysis_date)
+        log_info("재무/가격 데이터 수집 및 기술적 지표 계산 중... (시간이 다소 소요될 수 있습니다)")
+        try:
+            feature_df, actual_analysis_date = data_fetcher.fetch_all_data(stock_list_df, analysis_date)
+        except DataFetchError as e:
+            log_error(f"데이터 수집 실패: {e}")
+            raise AnalysisError(f"데이터 수집 실패: {e.message}", step="data_fetch")
         
         # <<< ✨ 핵심 수정: JSON 저장 전 NaN 값을 None으로 명시적 변환하여 데이터 유실 방지 ✨ >>>
         feature_df_for_json = feature_df.copy()
@@ -52,11 +63,12 @@ def run_analysis(analysis_date_str):
             
         feature_df_path = os.path.join(CACHE_DIR, 'cached_features.json')
         feature_df_for_json.to_json(feature_df_path, orient='records', force_ascii=False, indent=4)
-        print(f"  - 피처 데이터를 '{feature_df_path}'에 저장했습니다.")
+        log_info(f"피처 데이터를 '{feature_df_path}'에 저장했습니다.")
         
         if feature_df.empty:
-            print("오류: 데이터 수집에 실패했습니다.")
-            return
+            error_msg = "데이터 수집에 실패했습니다."
+            log_error(error_msg)
+            raise AnalysisError(error_msg, step="data_processing")
 
         actual_date_str = actual_analysis_date.strftime('%Y-%m-%d')
         print(f"  - 실제 분석 기준일: {actual_date_str}")
@@ -76,11 +88,16 @@ def run_analysis(analysis_date_str):
         print("  - 팩터 점수 계산 중...")
         scored_df = scoring.calculate_factor_scores(feature_df)
 
-        print("  - 머신러닝 모델 예측 중...")
-        ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
-        if ml_predicted_df is None:
-            print("오류: 머신러닝 모델 예측에 실패했습니다.")
-            return
+        log_info("머신러닝 모델 예측 중...")
+        try:
+            ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
+            if ml_predicted_df is None:
+                error_msg = "머신러닝 모델 예측에 실패했습니다."
+                log_error(error_msg)
+                raise AnalysisError(error_msg, step="ml_prediction")
+        except ModelPredictionError as e:
+            log_error(f"머신러닝 모델 예측 실패: {e}")
+            raise AnalysisError(f"머신러닝 모델 예측 실패: {e.message}", step="ml_prediction")
 
         print("  - 앙상블 최종 점수 계산 중...")
         merged_df = pd.merge(scored_df, ml_predicted_df, on='종목코드', how='left')
@@ -114,9 +131,15 @@ def run_analysis(analysis_date_str):
         final_df_with_names.to_json(result_path, orient='records', force_ascii=False, indent=4)
         print(f"  - 최종 분석 결과를 '{result_path}'에 저장했습니다.")
 
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 2. 분석 성공적으로 완료.")
+        log_info("분석 성공적으로 완료.")
 
+    except AnalysisError as e:
+        log_error(f"분석 프로세스 중 오류 발생: {e}")
+        print(f"오류: {e.message}")
+        import traceback
+        traceback.print_exc()
     except Exception as e:
+        log_critical(f"분석 프로세스 중 예상치 못한 예외 발생: {e}")
         print(f"오류: 분석 프로세스 중 예외 발생 - {e}")
         import traceback
         traceback.print_exc()
