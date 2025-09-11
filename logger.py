@@ -69,8 +69,13 @@ class StockAnalysisLogger:
         # Streamlit 환경에서는 콘솔 핸들러를 사용하지 않음
         # 파일 로깅만 사용하여 버퍼 분리 문제 방지
         
-        # 중복 로그 방지
+        # 중복 로그 방지 및 Streamlit 환경에서의 안정성 향상
         self.logger.propagate = False
+        
+        # Streamlit 환경에서 로깅 안정성을 위한 추가 설정
+        if self._is_streamlit_environment():
+            # Streamlit 환경에서는 더 안전한 로깅 설정
+            self.logger.disabled = False
     
     def info(self, message):
         """정보 로그"""

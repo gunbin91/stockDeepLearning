@@ -17,9 +17,16 @@ import sys  # sys 모듈이 이미 임포트되어 있습니다.
 import json
 import io
 
-# stdout/stderr를 UTF-8로 설정
-sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
+# stdout/stderr를 UTF-8로 설정 (로깅 시스템과의 충돌 방지)
+# Streamlit 환경에서는 로깅 시스템이 이미 UTF-8을 사용하므로 재설정하지 않음
+try:
+    import streamlit as st
+    # Streamlit 환경에서는 stdout/stderr 재설정을 건너뜀
+    pass
+except ImportError:
+    # Streamlit이 아닌 환경에서만 재설정
+    sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
 
 # --- 사용자 정의 모듈 임포트 ---
 import data_fetcher
@@ -399,7 +406,7 @@ def run_stock_recommendation():
                 "종목코드": None,
                 "등락율": None,
             },
-            use_container_width=True
+            width='stretch'
         )
         
         # --- 선택된 종목의 상세 차트 표시 (차트 미표시 오류 수정) ---
@@ -417,7 +424,7 @@ def run_stock_recommendation():
                     fig = create_stock_chart(ticker_code, stock_name)
                     
                     if fig:
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width='stretch')
 
                         # 피처 데이터 표시 로직 안정화
                         if not st.session_state.cached_features_df.empty:
@@ -438,7 +445,7 @@ def run_stock_recommendation():
                                 # 4. 모든 값을 문자열로 변환하여 타입 일관성 확보 (오류 방지)
                                 transposed_df = transposed_df.astype(str)
                                 
-                                st.dataframe(transposed_df, use_container_width=True)
+                                st.dataframe(transposed_df, width='stretch')
                             else:
                                 st.info(f"{stock_name} ({ticker_code})에 대한 피처 데이터를 찾을 수 없습니다.")
                         else:
