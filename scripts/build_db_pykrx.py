@@ -9,6 +9,7 @@ import os
 from datetime import datetime
 import sys
 import io
+from logger import log_info, log_warning, log_error
 
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
@@ -26,28 +27,44 @@ def build_point_in_time_db_pykrx():
     - 자본잠식 기업(PBR <= 0)은 리스크 관리를 위해 제외합니다.
     - 적자 기업(PER < 0)은 분석을 위해 데이터에 포함시킵니다.
     """
-    print("=" * 60)
-    print("pykrx를 이용한 시점(Point-in-Time) 재무 지표 데이터베이스 구축 시작")
-    print(f"대상 기간: {START_DATE} ~ {END_DATE}")
-    print("=" * 60)
+    log_info("=" * 60)
+    log_info("🏗️ pykrx를 이용한 시점(Point-in-Time) 재무 지표 데이터베이스 구축 시작")
+    log_info(f"📅 대상 기간: {START_DATE} ~ {END_DATE}")
+    log_info("=" * 60)
 
     try:
-        print("\n1. 전체 수집 대상 거래일 목록을 조회합니다...")
+        log_info("📋 1단계: 전체 수집 대상 거래일 목록을 조회합니다...")
         trading_days = pd.to_datetime(stock.get_market_ohlcv(START_DATE, END_DATE, "005930").index).strftime('%Y%m%d').tolist()
-        print(f"  - 총 {len(trading_days)} 거래일에 대한 데이터 수집을 시작합니다.")
+        log_info(f"   ✅ 총 {len(trading_days):,}개 거래일에 대한 데이터 수집을 시작합니다.")
     except Exception as e:
-        print(f"  [오류] 거래일 목록을 가져오는 데 실패했습니다: {e}")
+        log_error(f"거래일 목록을 가져오는 데 실패했습니다: {e}")
         return
 
     all_daily_data = []
 
-    print("\n2. 일별 재무 지표(PER, PBR 등)를 순차적으로 수집합니다...")
-    for day in tqdm(trading_days, desc="일별 데이터 수집 진행률"):
+    log_info("💰 2단계: 주식 재무 정보를 수집합니다...")
+    log_info(f"   📅 총 {len(trading_days):,}개 거래일의 재무 데이터를 수집합니다")
+    log_info(f"   📊 수집 기간: {trading_days[0]} ~ {trading_days[-1]}")
+    log_info(f"   💰 각 종목의 PER, PBR, EPS, BPS 등 재무 지표를 가져옵니다")
+    log_info("   ⏱️ 예상 소요 시간: 약 30-60분 (API 응답 속도에 따라 달라질 수 있습니다)")
+    print()
+    
+    # 간단한 진행률 표시 (개행 문제 해결)
+    completed_days = 0
+    total_days = len(trading_days)
+    
+    print(f"재무 데이터 수집 진행률: 0% (0/{total_days:,})", end='', flush=True)
+    
+    for i, day in enumerate(trading_days, 1):
         try:
+            # 같은 줄에서 진행률 업데이트
+            progress_percent = (completed_days / total_days) * 100
+            print(f"\r재무 데이터 수집 진행률: {progress_percent:.1f}% ({completed_days:,}/{total_days:,})", end='', flush=True)
+            
             df_fundamental = stock.get_market_fundamental(day, market="ALL")
 
             if df_fundamental.empty:
-                tqdm.write(f"  - [{day}] 정보: 해당일에 조회된 펀더멘털 데이터가 없습니다. (건너뜀)")
+                completed_days += 1
                 time.sleep(0.1)
                 continue
             
@@ -60,41 +77,51 @@ def build_point_in_time_db_pykrx():
                     df_fundamental.rename(columns={'티커': '종목코드'}, inplace=True)
                     df_fundamental['date'] = pd.to_datetime(day, format='%Y%m%d')
                     all_daily_data.append(df_fundamental)
-                    
-                    tqdm.write(f"  - [{day}] 수집 완료: 유효 PBR 종목 {len(df_fundamental)}개 확보 (원본 {valid_count_before}개, 적자기업 포함)")
-            else:
-                tqdm.write(f"  - [{day}] 오류: 수신된 데이터에 'PBR' 컬럼이 없습니다. (해당일 건너뜀)")
 
+            completed_days += 1
             time.sleep(0.1)
         except Exception as e:
-            tqdm.write(f"  - [{day}] 처리 중 예상치 못한 오류 발생: {e} (해당일 건너뜀)")
+            completed_days += 1
             continue
+    
+    # 완료 후 개행
+    print()  # 개행 추가
             
     if not all_daily_data:
-        print("\n[오류] 수집된 데이터가 전혀 없습니다. 라이브러리 또는 KRX 서버 상태를 확인해주세요.")
+        print("\n❌ 수집된 데이터가 전혀 없습니다. 라이브러리 또는 KRX 서버 상태를 확인해주세요.")
         return
 
-    print("\n3. 전체 수집 데이터 병합 및 최종 후처리를 시작합니다...")
-    final_df = pd.concat(all_daily_data, ignore_index=True)
+    print(f"\n3. 수집된 재무 데이터를 정리하고 저장합니다...")
+    print(f"   📊 총 {len(all_daily_data):,}개 거래일의 데이터를 하나로 합치는 중...")
     
+    final_df = pd.concat(all_daily_data, ignore_index=True)
+    print(f"   ✅ 데이터 병합 완료! 총 {len(final_df):,}개의 재무 데이터 레코드")
+    
+    log_info("🔧 3단계: 재무 지표를 정리하고 추가 계산을 수행합니다...")
     required_cols = ['date', '종목코드', 'PBR', 'PER', 'EPS', 'BPS', 'DIV', 'DPS']
     final_df = final_df[[col for col in required_cols if col in final_df.columns]]
     
     if 'PBR' in final_df.columns and 'PER' in final_df.columns:
         final_df['ROE'] = np.where(final_df['PER'] != 0, final_df['PBR'] / final_df['PER'], np.nan)
+        log_info("   ✅ ROE(자기자본이익률) 계산 완료")
     
     final_df.sort_values(by=['date', '종목코드'], inplace=True)
+    log_info("   ✅ 데이터 정렬 완료")
     
+    log_info("💾 4단계: 주식 재무 데이터베이스를 파일로 저장하는 중...")
     os.makedirs(DATA_DIR, exist_ok=True)
     final_df.to_parquet(OUTPUT_PATH, index=False)
     
     unique_stocks_count = len(final_df['종목코드'].unique())
-    print("-" * 60)
-    print(f"✅ pykrx 재무 지표 데이터베이스 구축 완료!")
-    print(f"  - 총 {len(final_df):,}개의 레코드가 생성되었습니다.")
-    print(f"  - 총 {unique_stocks_count:,}개 종목의 데이터가 최소 1회 이상 수집되었습니다.")
-    print(f"  - 저장 경로: {OUTPUT_PATH}")
-    print("-" * 60)
+    log_info("\n" + "="*60)
+    log_info("🎉 주식 재무 데이터베이스 구축이 완료되었습니다!")
+    log_info("="*60)
+    log_info(f"📁 저장 위치: {OUTPUT_PATH}")
+    log_info(f"📊 총 데이터 개수: {len(final_df):,}개")
+    log_info(f"🏢 포함된 종목 수: {unique_stocks_count:,}개")
+    log_info(f"📅 데이터 기간: {final_df['date'].min().strftime('%Y-%m-%d')} ~ {final_df['date'].max().strftime('%Y-%m-%d')}")
+    log_info(f"⏱️  수집한 거래일: {len(trading_days):,}일")
+    log_info("="*60)
 
 if __name__ == "__main__":
     build_point_in_time_db_pykrx()

@@ -8,11 +8,14 @@ import pandas_ta as ta
 import concurrent.futures
 from tqdm import tqdm
 import os
+import sys
 from datetime import datetime, timedelta
 import time
 import config
+import gc
 from logger import log_info, log_warning, log_error, log_critical
 from exceptions import DataFetchError, DataValidationError
+from smart_cache import get_cache, cached
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 FINANCIAL_DB_PATH = os.path.join(PROJECT_ROOT, 'data', 'financial_data_pykrx_pit.parquet')
@@ -47,6 +50,7 @@ def get_fs_data_from_pit(stock_list, selected_analysis_date):
     log_info(f"✅ 사용 가능한 재무 지표 처리 완료: {len(result_df.dropna())}개 기업")
     return result_df
 
+@cached("stock_list", ttl_seconds=86400)  # 24시간 캐시
 def fetch_stock_list():
     log_info("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보 수집 (KRX-MARCAP)...")
     try:
@@ -62,6 +66,7 @@ def fetch_stock_list():
         log_error(error_msg)
         raise DataFetchError(error_msg, source="FinanceDataReader")
 
+@cached("macro_data", ttl_seconds=3600)  # 1시간 캐시
 def _fetch_macro_data(start_date, end_date):
     log_info(f"거시 경제 지표 데이터 수집 중 ({start_date} ~ {end_date})...")
     try:
@@ -187,13 +192,78 @@ def fetch_all_data(stock_list, selected_analysis_date):
         print("거시 경제 데이터 수집에 실패하여 분석을 중단합니다."); return pd.DataFrame(), None
     all_feature_data, all_actual_dates = [], []
     stock_records = stock_list.to_dict('records')
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        future_to_stock = {executor.submit(fetch_and_process_ticker_data, r, start_date_for_fetch, end_date_for_fetch, selected_analysis_date, latest_fs_df): r for r in stock_records}
-        for future in tqdm(concurrent.futures.as_completed(future_to_stock), total=len(stock_records), desc="전 종목 피처 생성"):
-            try:
-                result, analysis_date = future.result()
-                if result and analysis_date: all_feature_data.append(result); all_actual_dates.append(analysis_date)
-            except Exception: continue
+    
+    # 배치 단위로 처리하여 메모리 효율성 향상
+    batch_size = 100
+    total_batches = (len(stock_records) + batch_size - 1) // batch_size
+    total_stocks = len(stock_records)
+    
+    log_info("📈 주식 분석을 위한 종목 데이터 수집을 시작합니다...")
+    log_info(f"   📊 총 {total_stocks:,}개 종목의 거래 데이터를 수집합니다")
+    log_info(f"   🔄 {total_batches}개 그룹으로 나누어 안전하게 처리합니다")
+    log_info("   ⏱️ 예상 소요 시간: 약 5-10분 (API 응답 속도에 따라 달라질 수 있습니다)")
+    print()
+    
+    for i in range(0, len(stock_records), batch_size):
+        batch = stock_records[i:i + batch_size]
+        current_batch = i // batch_size + 1
+        batch_start = i + 1
+        batch_end = min(i + batch_size, total_stocks)
+        
+        log_info(f"📊 종목 그룹 {current_batch}/{total_batches} 처리 중... ({batch_start:,}~{batch_end:,}번째 종목)")
+        log_info(f"   🔍 각 종목의 가격, 거래량, 기술적 지표를 계산하고 있습니다...")
+        log_info(f"   📈 수집 데이터: 주가, 거래량, RSI, MACD, 볼린저밴드, 이동평균선 등")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:  # 워커 수 감소
+            future_to_stock = {executor.submit(fetch_and_process_ticker_data, r, start_date_for_fetch, end_date_for_fetch, selected_analysis_date, latest_fs_df): r for r in batch}
+            
+            # 전체 진행률을 포함한 진행률 표시
+            total_processed = (current_batch - 1) * batch_size
+            total_remaining = total_stocks - total_processed
+            
+            # 간단한 진행률 표시 (개행 문제 해결)
+            completed_count = 0
+            total_count = len(batch)
+            
+            print(f"   └─ 그룹 {current_batch}/{total_batches} - 종목 분석 진행률: 0% (0/{total_count})", end='', flush=True)
+            
+            for future in concurrent.futures.as_completed(future_to_stock):
+                try:
+                    result, analysis_date = future.result()
+                    if result and analysis_date: 
+                        all_feature_data.append(result)
+                        all_actual_dates.append(analysis_date)
+                    
+                    completed_count += 1
+                    progress_percent = (completed_count / total_count) * 100
+                    
+                    # 같은 줄에서 진행률 업데이트
+                    print(f"\r   └─ 그룹 {current_batch}/{total_batches} - 종목 분석 진행률: {progress_percent:.0f}% ({completed_count}/{total_count})", end='', flush=True)
+                    
+                except Exception: 
+                    completed_count += 1
+                    progress_percent = (completed_count / total_count) * 100
+                    print(f"\r   └─ 그룹 {current_batch}/{total_batches} - 종목 분석 진행률: {progress_percent:.0f}% ({completed_count}/{total_count})", end='', flush=True)
+                    continue
+            
+            # 완료 후 개행
+            print()  # 개행 추가
+        
+        # 배치 간 메모리 정리
+        gc.collect()
+        time.sleep(0.1)  # API 부하 방지
+        
+        success_count = len(all_feature_data)
+        progress_percent = (current_batch / total_batches) * 100
+        log_info(f"   ✅ 그룹 {current_batch}/{total_batches} 완료! ({progress_percent:.1f}% 진행)")
+        log_info(f"   📊 현재까지 {success_count:,}개 종목의 분석 데이터를 수집했습니다")
+        log_info(f"   💾 메모리 정리 및 API 부하 방지를 위해 잠시 대기 중...")
+        print()
+    
+    log_info("🎉 종목 데이터 수집이 모두 완료되었습니다!")
+    log_info(f"   📊 총 {len(all_feature_data):,}개 종목의 분석 데이터를 준비했습니다")
+    log_info("   🔄 데이터 정제 및 거시경제 지표 병합을 시작합니다...")
+    print()
     
     if not all_feature_data: return pd.DataFrame(), None
     final_df = pd.DataFrame(all_feature_data)
@@ -201,14 +271,33 @@ def fetch_all_data(stock_list, selected_analysis_date):
     final_df['date'] = pd.to_datetime(all_actual_dates)
     final_df = final_df.sort_values('date')
     macro_df = macro_df.sort_index()
-    final_df = pd.merge_asof(final_df, macro_df, left_on='date', right_index=True, direction='backward')
+    
+    # 인덱스를 datetime으로 확실히 변환
+    if not isinstance(macro_df.index, pd.DatetimeIndex):
+        macro_df.index = pd.to_datetime(macro_df.index)
+    
+    log_info("   🔗 거시경제 지표(KOSPI, USD/KRW, VIX)를 종목 데이터와 병합 중...")
+    
+    # merge_asof 대신 더 안전한 방법 사용
+    try:
+        final_df = pd.merge_asof(final_df, macro_df, left_on='date', right_index=True, direction='backward')
+    except Exception as e:
+        log_warning(f"   ⚠️ merge_asof 실패, 일반 merge로 시도: {e}")
+        # 일반 merge로 대체
+        macro_df_reset = macro_df.reset_index()
+        macro_df_reset.rename(columns={'index': 'date'}, inplace=True)
+        final_df = pd.merge(final_df, macro_df_reset, on='date', how='left')
+    
+    log_info("   🧹 무한대 값 및 결측값 정제 중...")
     final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     final_df.dropna(subset=['종목코드', '종목명', '현재가'], inplace=True)
     
     if final_df.empty:
-        print("피처 생성 후 유효한 데이터가 없습니다."); return pd.DataFrame(), None
+        log_error("피처 생성 후 유효한 데이터가 없습니다.")
+        return pd.DataFrame(), None
         
     actual_analysis_date_final = pd.to_datetime(final_df['date'].mode()[0])
     
-    print("모든 피처 데이터 생성 완료!")
+    log_info("✅ 모든 피처 데이터 생성 완료!")
+    log_info(f"   📊 최종 데이터: {len(final_df):,}개 종목, {len(final_df.columns)}개 피처")
     return final_df, actual_analysis_date_final

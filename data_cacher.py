@@ -9,8 +9,10 @@ import concurrent.futures
 from tqdm import tqdm
 import os
 import config
+import gc
 
 from scoring import calculate_factor_scores
+from smart_cache import get_cache, cached
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(PROJECT_ROOT, "cache")
@@ -175,24 +177,151 @@ def _fetch_and_prepare_data(start_date, end_date):
     return final_df
 
 def get_preprocessed_data(start_date, end_date):
+    """메모리 최적화된 데이터 전처리 함수"""
     os.makedirs(CACHE_DIR, exist_ok=True)
-    if os.path.exists(CACHE_FILE_PATH):
-        print(f"✅ 캐시된 과거 데이터 로딩: {CACHE_FILE_PATH}"); historical_df = pd.read_parquet(CACHE_FILE_PATH)
+    cache = get_cache()
+    
+    # 캐시 키 생성
+    cache_params = {
+        'start_date': start_date,
+        'end_date': end_date,
+        'function': 'get_preprocessed_data'
+    }
+    
+    # 캐시에서 조회 시도
+    cached_data = cache.get('preprocessed_data', cache_params, ttl_seconds=3600)
+    if cached_data is not None:
+        print(f"✅ 캐시된 데이터 로딩: {start_date} ~ {end_date}")
+        return cached_data
+    
+    print(f"⚠️ 캐시 미스. 데이터를 새로 생성합니다: {start_date} ~ {end_date}")
+    
+    # 청크 기반으로 데이터 처리
+    historical_df = _get_historical_data_chunked(start_date, end_date)
+    fresh_df = _get_fresh_data_chunked(start_date, end_date)
+    
+    # 메모리 효율적인 병합
+    if not historical_df.empty and not fresh_df.empty:
+        combined_df = pd.concat([historical_df, fresh_df], ignore_index=True)
+        # 중복 제거
+        combined_df = combined_df.drop_duplicates(subset=['date', '종목코드'], keep='last')
+    elif not historical_df.empty:
+        combined_df = historical_df
+    elif not fresh_df.empty:
+        combined_df = fresh_df
     else:
-        print(f"⚠️ 캐시 파일 없음. {CACHE_END_DATE}까지의 과거 데이터를 생성합니다 (시간이 소요됩니다)...")
+        combined_df = pd.DataFrame()
+    
+    # 날짜 범위 필터링
+    if not combined_df.empty:
+        final_df = combined_df[
+            (combined_df['date'] >= pd.to_datetime(start_date)) & 
+            (combined_df['date'] <= pd.to_datetime(end_date))
+        ].copy()
+    else:
+        final_df = pd.DataFrame()
+    
+    # 결과 캐싱
+    if not final_df.empty:
+        cache.set('preprocessed_data', cache_params, final_df, ttl_seconds=3600)
+    
+    # 메모리 정리
+    del historical_df, fresh_df, combined_df
+    gc.collect()
+    
+    print('✅ 모든 데이터 준비 완료.')
+    return final_df
+
+def _get_historical_data_chunked(start_date, end_date):
+    """과거 데이터를 청크 단위로 처리"""
+    if os.path.exists(CACHE_FILE_PATH):
+        print(f"📂 과거 주식 데이터를 불러오는 중...")
+        print(f"   📅 분석 기간: {start_date} ~ {end_date}")
+        
+        # parquet 파일에서 청크 단위로 읽기 (메모리 최적화)
+        print(f"   🔍 데이터베이스에서 분석 기간({start_date} ~ {end_date}) 데이터를 확인하고 있습니다...")
+        
+        try:
+            import pyarrow.parquet as pq
+            
+            # parquet 파일의 메타데이터 확인
+            parquet_file = pq.ParquetFile(CACHE_FILE_PATH)
+            total_rows = parquet_file.metadata.num_rows
+            print(f"   📊 총 {total_rows:,}개 레코드를 확인했습니다")
+            
+            # 청크 단위로 읽기
+            chunk_size = 100000
+            chunks = []
+            chunk_count = 0
+            
+            for batch in parquet_file.iter_batches(batch_size=chunk_size):
+                chunk_count += 1
+                chunk = batch.to_pandas()
+                print(f"   🔍 데이터베이스에서 {chunk_count}번째 데이터 블록을 확인하고 있습니다... ({len(chunk):,}개 레코드)")
+                
+                # 날짜 필터링
+                chunk['date'] = pd.to_datetime(chunk['date'])
+                mask = (chunk['date'] >= pd.to_datetime(start_date)) & (chunk['date'] <= pd.to_datetime(end_date))
+                filtered_chunk = chunk[mask]
+                
+                if not filtered_chunk.empty:
+                    chunks.append(filtered_chunk)
+                    print(f"   ✅ 분석 기간에 해당하는 {len(filtered_chunk):,}개 데이터를 찾았습니다")
+            
+            if chunks:
+                result_df = pd.concat(chunks, ignore_index=True)
+                print(f"✅ 과거 데이터 로딩 완료! 총 {len(result_df):,}개의 주식 데이터를 준비했습니다")
+                return result_df
+            else:
+                print("⚠️ 해당 기간의 데이터가 없습니다.")
+                return pd.DataFrame()
+                
+        except ImportError:
+            # pyarrow가 없는 경우 전체 데이터를 읽어서 필터링
+            print("   ⚠️ pyarrow가 없어서 전체 데이터를 로드합니다...")
+            df = pd.read_parquet(CACHE_FILE_PATH)
+            print(f"   📊 총 {len(df):,}개 레코드를 로드했습니다")
+            
+            # 날짜 필터링
+            df['date'] = pd.to_datetime(df['date'])
+            mask = (df['date'] >= pd.to_datetime(start_date)) & (df['date'] <= pd.to_datetime(end_date))
+            filtered_df = df[mask]
+            
+            if not filtered_df.empty:
+                print(f"   ✅ 분석 기간에 해당하는 {len(filtered_df):,}개 데이터를 찾았습니다")
+                print(f"✅ 과거 데이터 로딩 완료! 총 {len(filtered_df):,}개의 주식 데이터를 준비했습니다")
+                return filtered_df
+            else:
+                print("⚠️ 해당 기간의 데이터가 없습니다.")
+                return pd.DataFrame()
+    else:
+        print(f"⚠️ 주식 데이터베이스가 없습니다. 처음부터 데이터를 수집합니다...")
+        print(f"   📅 수집 기간: {start_date} ~ {CACHE_END_DATE}")
+        print("   ⏳ 이 작업은 시간이 오래 걸릴 수 있습니다. 잠시만 기다려주세요...")
         historical_df = _fetch_and_prepare_data(start_date, CACHE_END_DATE)
         historical_df.to_parquet(CACHE_FILE_PATH)
-        print(f"✅ 과거 데이터 캐시 저장 완료: {CACHE_FILE_PATH}")
+        print(f"✅ 주식 데이터베이스 구축 완료! ({len(historical_df):,}개 데이터 저장)")
+        return historical_df
 
+def _get_fresh_data_chunked(start_date, end_date):
+    """최신 데이터를 청크 단위로 처리"""
     fresh_start_date = (datetime.strptime(CACHE_END_DATE, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+    
     if datetime.strptime(end_date, '%Y-%m-%d').date() > datetime.strptime(CACHE_END_DATE, '%Y-%m-%d').date():
-        print(f"\n올해 최신 데이터 수집 중 ({fresh_start_date} ~ {end_date})...")
+        print(f"\n🔄 최신 주식 데이터를 수집하는 중...")
+        print(f"   📅 수집 기간: {fresh_start_date} ~ {end_date}")
+        print("   🌐 인터넷에서 최신 거래 정보를 가져오고 있습니다...")
+        
         fresh_start_date_with_warmup = (pd.to_datetime(fresh_start_date) - timedelta(days=400)).strftime('%Y-%m-%d')
         fresh_df = _fetch_and_prepare_data(fresh_start_date_with_warmup, end_date)
-        if not fresh_df.empty: fresh_df = fresh_df[fresh_df['date'] >= pd.to_datetime(fresh_start_date)].copy()
+        
+        if not fresh_df.empty:
+            fresh_df = fresh_df[fresh_df['date'] >= pd.to_datetime(fresh_start_date)].copy()
+            print(f"✅ 최신 데이터 수집 완료! {len(fresh_df):,}개의 최신 주식 데이터를 가져왔습니다")
+            return fresh_df
+        else:
+            print("⚠️ 최신 데이터를 가져올 수 없습니다.")
     else:
-        fresh_df = pd.DataFrame()
-
-    combined_df = pd.concat([historical_df, fresh_df], ignore_index=True)
-    final_df = combined_df[(combined_df['date'] >= pd.to_datetime(start_date)) & (combined_df['date'] <= pd.to_datetime(end_date))].copy()
-    print('✅ 모든 데이터 준비 완료.'); return final_df
+        print("ℹ️ 최신 데이터 수집이 필요하지 않습니다. (기존 데이터로 충분)")
+    
+    return pd.DataFrame()

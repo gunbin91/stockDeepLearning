@@ -63,11 +63,14 @@ class StockAnalysisLogger:
         )
         file_handler.setFormatter(formatter)
         
-        # 핸들러 추가 (파일 핸들러만 사용)
+        # 핸들러 추가 (파일 핸들러)
         self.logger.addHandler(file_handler)
         
-        # Streamlit 환경에서는 콘솔 핸들러를 사용하지 않음
-        # 파일 로깅만 사용하여 버퍼 분리 문제 방지
+        # 콘솔 핸들러 추가 (실시간 로그 표시용) - stdout으로만 출력
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
+        self.logger.addHandler(console_handler)
         
         # 중복 로그 방지 및 Streamlit 환경에서의 안정성 향상
         self.logger.propagate = False

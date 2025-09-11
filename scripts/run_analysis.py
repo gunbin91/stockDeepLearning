@@ -7,9 +7,14 @@ import sys
 import io
 import numpy as np # numpy 임포트 추가
 
-# stdout/stderr를 UTF-8로 설정
-sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
+# stdout/stderr를 UTF-8로 설정 (Streamlit 환경이 아닌 경우에만)
+if not os.environ.get('STREAMLIT_SERVER_PORT'):
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
+        sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
+    except Exception:
+        # 이미 detach된 경우 무시
+        pass
 
 
 # 프로젝트 루트 경로를 sys.path에 추가
@@ -71,21 +76,24 @@ def run_analysis(analysis_date_str):
             raise AnalysisError(error_msg, step="data_processing")
 
         actual_date_str = actual_analysis_date.strftime('%Y-%m-%d')
-        print(f"  - 실제 분석 기준일: {actual_date_str}")
+        log_info(f"   📅 실제 분석 기준일: {actual_date_str}")
 
         # 시장 현황 데이터 저장
-        print("  - 시장 현황 데이터 처리 중...")
+        log_info("📊 시장 현황 데이터 처리 중...")
         macro_cols = ['KOSPI', 'KOSPI_pct_1d', 'USDKRW', 'USDKRW_pct_1d', 'VIX', 'VIX_pct_1d']
         market_condition = {}
         if all(col in feature_df.columns for col in macro_cols):
             market_condition = feature_df.iloc[0][macro_cols].to_dict()
+            log_info("   ✅ 거시경제 지표 데이터 추출 완료")
+        else:
+            log_warning("   ⚠️ 일부 거시경제 지표 데이터가 누락되었습니다.")
         
         market_condition_path = os.path.join(CACHE_DIR, 'market_condition.json')
         with open(market_condition_path, 'w', encoding='utf-8') as f:
             json.dump(market_condition, f, ensure_ascii=False, indent=4)
-        print(f"  - 시장 현황 데이터를 '{market_condition_path}'에 저장했습니다.")
+        log_info(f"   💾 시장 현황 데이터를 '{market_condition_path}'에 저장했습니다.")
 
-        print("  - 팩터 점수 계산 중...")
+        log_info("📊 팩터별 점수 계산을 시작합니다...")
         scored_df = scoring.calculate_factor_scores(feature_df)
 
         log_info("머신러닝 모델 예측 중...")
@@ -99,24 +107,32 @@ def run_analysis(analysis_date_str):
             log_error(f"머신러닝 모델 예측 실패: {e}")
             raise AnalysisError(f"머신러닝 모델 예측 실패: {e.message}", step="ml_prediction")
 
-        print("  - 앙상블 최종 점수 계산 중...")
+        log_info("🔄 딥러닝 모델 예측을 시작합니다...")
         merged_df = pd.merge(scored_df, ml_predicted_df, on='종목코드', how='left')
+        log_info(f"   📊 머신러닝 예측 결과 병합 완료: {len(merged_df):,}개 종목")
+        
         # dl_model 및 nlp 모듈은 현재 구현에서 제외됨 (app.py 로직 기반)
         dl_predicted_df = dl_model.predict_with_deep_learning(merged_df)
         nlp_analyzed_df = dl_predicted_df.copy()
         nlp_analyzed_df['sentiment_score'] = 0
+        log_info("   ✅ 딥러닝 모델 예측 완료 (감정 분석 점수는 기본값 적용)")
+        
+        log_info("🎯 앙상블 최종 점수 계산을 시작합니다...")
         final_ranked_df = ensemble.calculate_final_score(nlp_analyzed_df)
 
         # 최종 결과에 종목명, 현재가 등 추가 정보 병합
+        log_info("📋 최종 결과 데이터 정리 중...")
         if '종목코드' not in final_ranked_df.columns:
             final_ranked_df.reset_index(inplace=True)
         final_df_with_names = pd.merge(final_ranked_df, stock_list_df[['종목코드', '종목명']].drop_duplicates(), on='종목코드', how='left')
+        log_info(f"   📊 종목명 병합 완료: {len(final_df_with_names):,}개 종목")
         
         # [FIX] 병합 시 종목명 컬럼 충돌 해결 로직 추가
         if '종목명_x' in final_df_with_names.columns:
             final_df_with_names['종목명'] = final_df_with_names['종목명_y'].fillna(final_df_with_names['종목명_x'])
             final_df_with_names.drop(columns=['종목명_x', '종목명_y'], inplace=True)
 
+        log_info("   💰 가격 정보 병합 중...")
         price_map = feature_df.set_index('종목코드')[['현재가', '기준일가']].to_dict(orient='index')
         final_df_with_names['현재가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('현재가'))
         final_df_with_names['기준일가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('기준일가'))
@@ -125,13 +141,19 @@ def run_analysis(analysis_date_str):
         final_df_with_names['date'] = actual_analysis_date
 
         # 결과 파일로 저장
+        log_info("💾 최종 분석 결과 저장 중...")
         result_path = os.path.join(CACHE_DIR, 'analysis_result.json')
         # 날짜 필드를 문자열로 변환 (JSON 직렬화 위함)
         final_df_with_names['date'] = final_df_with_names['date'].dt.strftime('%Y-%m-%d')
         final_df_with_names.to_json(result_path, orient='records', force_ascii=False, indent=4)
-        print(f"  - 최종 분석 결과를 '{result_path}'에 저장했습니다.")
+        log_info(f"   ✅ 최종 분석 결과를 '{result_path}'에 저장했습니다.")
+        
+        # 최종 결과 통계
+        top_10_count = len(final_df_with_names[final_df_with_names['최종순위'] <= 10])
+        avg_score = final_df_with_names['final_score'].mean()
+        log_info(f"   📈 분석 결과: 상위 10위 종목 {top_10_count}개, 평균 점수 {avg_score:.2f}")
 
-        log_info("분석 성공적으로 완료.")
+        log_info("🎉 주식 분석이 성공적으로 완료되었습니다!")
 
     except AnalysisError as e:
         log_error(f"분석 프로세스 중 오류 발생: {e}")

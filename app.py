@@ -36,6 +36,7 @@ import dl_model
 import ensemble
 from logger import log_info, log_warning, log_error, log_critical
 from exceptions import DataFetchError, ModelPredictionError, AnalysisError
+from smart_cache import get_cache
 
 # 페이지 레이아웃 설정
 st.set_page_config(layout="wide")
@@ -207,6 +208,24 @@ def run_stock_recommendation():
 
     st.write("### 1. 종목 데이터 수집")
     
+    # 캐시 정보 표시
+    cache = get_cache()
+    cache_info = cache.get_cache_info()
+    
+    with st.expander("📊 캐시 상태 정보"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("캐시 크기", f"{cache_info['total_size_gb']:.2f} GB")
+        with col2:
+            st.metric("캐시 파일 수", f"{cache_info['total_files']}개")
+        with col3:
+            st.metric("캐시 디렉토리", cache_info['cache_dir'])
+        
+        if cache_info['type_stats']:
+            st.write("**데이터 타입별 통계:**")
+            for data_type, stats in cache_info['type_stats'].items():
+                st.write(f"- {data_type}: {stats['count']}개 파일, {stats['size_bytes']/1024/1024:.2f} MB")
+    
     # 분석 기준일 선택
     selected_analysis_date = st.date_input(
         "분석 기준일 선택",
@@ -247,9 +266,25 @@ def run_stock_recommendation():
     if start_analysis:
         # --- 분석 로직을 서브프로세스로 실행 ---
         st.subheader("실시간 분석 로그")
-        log_placeholder = st.empty()
-        log_lines = []
-        analysis_completed_successfully = False
+        
+        # 로그 표시 영역을 더 크게 만들고 스크롤 가능하게 설정
+        with st.container():
+            st.markdown("""
+            <style>
+            .log-container {
+                height: 400px;
+                overflow-y: auto;
+                border: 1px solid #ccc;
+                padding: 10px;
+                background-color: #f8f9fa;
+                border-radius: 5px;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            
+            log_placeholder = st.empty()
+            log_lines = []
+            analysis_completed_successfully = False
 
         with st.spinner('분석 스크립트를 실행하고 실시간 로그를 수신 중입니다...'):
             try:
@@ -262,18 +297,25 @@ def run_stock_recommendation():
                 ]
                 # ==========================================================
                 
+                # Streamlit 환경임을 알려주는 환경 변수 설정
+                env = os.environ.copy()
+                env['STREAMLIT_SERVER_PORT'] = '8501'
+                
                 process = subprocess.Popen(
                     command, 
                     stdout=subprocess.PIPE, 
-                    stderr=subprocess.STDOUT, 
+                    stderr=subprocess.STDOUT,  # stderr를 stdout으로 리다이렉트
                     text=True, 
                     encoding='utf-8',
-                    bufsize=1
+                    bufsize=1,
+                    env=env  # 환경 변수 전달
                 )
 
                 last_line_was_tqdm = False
+                
+                # stdout에서 모든 로그 처리 (stderr는 stdout으로 리다이렉트됨)
                 for line in iter(process.stdout.readline, ''):
-                    # 터미널 출력
+                    # 터미널 출력 (중복 방지)
                     if TQDM_REGEX.search(line):
                         sys.stdout.write(line.strip() + '\r')
                         last_line_was_tqdm = True
@@ -284,17 +326,49 @@ def run_stock_recommendation():
                         last_line_was_tqdm = False
                     sys.stdout.flush()
 
-                    # UI 출력
-                    if TQDM_REGEX.search(line):
-                        if log_lines and TQDM_REGEX.search(log_lines[-1]):
-                            log_lines[-1] = line
-                        else:
-                            log_lines.append(line)
-                    else:
-                        log_lines.append(line)
+                    # UI 출력 - 모든 로그를 동일하게 처리
+                    line_clean = line.strip()
+                    if not line_clean:  # 빈 줄은 무시
+                        continue
                     
-                    display_text = '\n'.join([l.strip() for l in log_lines])
-                    log_placeholder.code(display_text, language='bash')
+                    # 진행률 로그 패턴 확인
+                    progress_pattern = r'종목 분석 진행률|재무 데이터 수집 진행률'
+                    is_progress_log = re.search(progress_pattern, line_clean)
+                    is_tqdm_log = TQDM_REGEX.search(line_clean)
+                    
+                    if is_progress_log or is_tqdm_log:
+                        # 진행률 로그는 마지막 줄에서 업데이트
+                        if log_lines and (re.search(progress_pattern, log_lines[-1]) or TQDM_REGEX.search(log_lines[-1])):
+                            log_lines[-1] = line_clean
+                        else:
+                            log_lines.append(line_clean)
+                    else:
+                        # 일반 로그는 새 줄로 추가 (logger.py 로그 포함)
+                        log_lines.append(line_clean)
+                    
+                    # 최근 200줄만 표시 (더 많은 로그 표시)
+                    recent_logs = log_lines[-200:] if len(log_lines) > 200 else log_lines
+                    display_text = '\n'.join(recent_logs)
+                    
+                    # 로그를 더 보기 좋게 표시
+                    with log_placeholder.container():
+                        st.code(display_text, language='bash')
+                        
+                        # 로그 통계 정보 표시
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("총 로그 수", len(log_lines))
+                        with col2:
+                            st.metric("표시된 로그", len(recent_logs))
+                        with col3:
+                            if log_lines:
+                                last_log = log_lines[-1]
+                                if "완료" in last_log or "성공" in last_log:
+                                    st.metric("상태", "✅ 진행 중")
+                                elif "오류" in last_log or "실패" in last_log:
+                                    st.metric("상태", "❌ 오류")
+                                else:
+                                    st.metric("상태", "🔄 진행 중")
                 
                 process.stdout.close()
                 return_code = process.wait()
