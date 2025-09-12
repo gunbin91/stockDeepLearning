@@ -202,7 +202,12 @@ def run_stock_recommendation():
                 # JSON 로드 시 종목코드를 문자열로 유지
                 st.session_state.cached_features_df = pd.read_json(cached_features_path, orient='records', dtype={'종목코드': str})
             except Exception as e:
-                st.warning(f"캐시된 피처 데이터를 불러오는 데 실패했습니다: {e}")
+                import traceback
+                error_msg = f"캐시된 피처 데이터를 불러오는 데 실패했습니다: {e}"
+                print(f"⚠️ [WARNING] {error_msg}")
+                print(f"⚠️ [WARNING] 상세 오류 정보:")
+                print(traceback.format_exc())
+                st.warning(error_msg)
         else:
             st.session_state.cached_features_df = pd.DataFrame()
 
@@ -306,7 +311,8 @@ def run_stock_recommendation():
                     stdout=subprocess.PIPE, 
                     stderr=subprocess.STDOUT,  # stderr를 stdout으로 리다이렉트
                     text=True, 
-                    encoding='utf-8',
+                    encoding='cp949',  # Windows 기본 인코딩으로 변경
+                    errors='replace',  # 인코딩 오류 시 대체 문자로 처리
                     bufsize=1,
                     env=env  # 환경 변수 전달
                 )
@@ -380,9 +386,16 @@ def run_stock_recommendation():
                     st.error("분석 실행 중 오류가 발생했습니다. 위 로그를 확인해주세요.")
 
             except FileNotFoundError:
-                st.error("'python' 명령을 찾을 수 없습니다. 가상환경이 올바르게 설정되었는지 확인하세요.")
+                error_msg = "'python' 명령을 찾을 수 없습니다. 가상환경이 올바르게 설정되었는지 확인하세요."
+                print(f"❌ [ERROR] {error_msg}")
+                st.error(error_msg)
             except Exception as e:
-                st.error(f"스크립트 실행 중 예상치 못한 오류가 발생했습니다: {e}")
+                import traceback
+                error_msg = f"스크립트 실행 중 예상치 못한 오류가 발생했습니다: {e}"
+                print(f"❌ [ERROR] {error_msg}")
+                print(f"❌ [ERROR] 상세 오류 정보:")
+                print(traceback.format_exc())
+                st.error(error_msg)
 
         # --- 분석 결과 처리 ---
         if analysis_completed_successfully:
@@ -425,9 +438,16 @@ def run_stock_recommendation():
                 st.rerun()
 
             except FileNotFoundError:
-                st.error("분석 결과 파일을 찾을 수 없습니다. 스크립트가 정상적으로 실행되었는지 확인하세요.")
+                error_msg = "분석 결과 파일을 찾을 수 없습니다. 스크립트가 정상적으로 실행되었는지 확인하세요."
+                print(f"❌ [ERROR] {error_msg}")
+                st.error(error_msg)
             except Exception as e:
-                st.error(f"분석 결과 처리 중 오류가 발생했습니다: {e}")
+                import traceback
+                error_msg = f"분석 결과 처리 중 오류가 발생했습니다: {e}"
+                print(f"❌ [ERROR] {error_msg}")
+                print(f"❌ [ERROR] 상세 오류 정보:")
+                print(traceback.format_exc())
+                st.error(error_msg)
     
     if st.session_state.analysis_result is not None:
         analysis_date_str = st.session_state.get('analysis_date', "알 수 없는 날짜")
@@ -600,7 +620,8 @@ def display_backtest_report():
                                 stdout=subprocess.PIPE, 
                                 stderr=subprocess.STDOUT, 
                                 text=True, 
-                                encoding='utf-8',
+                                encoding='cp949',  # Windows 기본 인코딩으로 변경
+                                errors='replace',  # 인코딩 오류 시 대체 문자로 처리
                                 bufsize=1
                             )
 

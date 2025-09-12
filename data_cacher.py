@@ -30,6 +30,12 @@ except FileNotFoundError:
     print(f"!!!!!!!! [치명적 오류] 재무 지표 데이터베이스 파일({FINANCIAL_DB_PATH})을 찾을 수 없습니다. !!!!!!!!")
     print("먼저 `scripts/build_db_pykrx.py`를 실행하여 데이터베이스를 생성해주세요.")
     funda_df = pd.DataFrame()
+except Exception as e:
+    import traceback
+    print(f"❌ [ERROR] 재무 지표 데이터베이스 로딩 중 오류 발생: {e}")
+    print(f"❌ [ERROR] 상세 오류 정보:")
+    print(traceback.format_exc())
+    funda_df = pd.DataFrame()
 
 def fetch_stock_list():
     try:

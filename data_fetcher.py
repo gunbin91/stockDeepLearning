@@ -31,8 +31,12 @@ def get_fs_data_from_pit(stock_list, selected_analysis_date):
         log_info("먼저 `scripts/build_db_pykrx.py`를 실행하여 데이터베이스를 생성해주세요.")
         raise DataFetchError(error_msg, source="pykrx_database")
     except Exception as e:
+        import traceback
         error_msg = f"재무 지표 데이터베이스 로딩 중 오류 발생: {e}"
         log_error(error_msg)
+        print(f"❌ [ERROR] {error_msg}")
+        print(f"❌ [ERROR] 상세 오류 정보:")
+        print(traceback.format_exc())
         raise DataFetchError(error_msg, source="pykrx_database")
     
     log_info(f"분석 기준일({selected_analysis_date.strftime('%Y-%m-%d')}): pykrx DB에서 최신 재무 지표 조회.")
