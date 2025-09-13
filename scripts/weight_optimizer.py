@@ -49,7 +49,8 @@ def get_model_and_data():
     print(f"  - 훈련 데이터 {len(train_df)} 행, 검증 데이터 {len(validation_df)} 행 준비 완료.")
     
     features = [
-        '수익률(1M)', '수익률(3M)', '변동성(1M)', 'PER', 'PBR', 'ROE', '거래대금_MA20',
+        '수익률(1M)', '수익률(3M)', '변동성(1W)', '변동성(1M)', '변동성(3M)', 'PER', 'PBR', '거래대금_MA20',
+        'BB_Position',
         'KOSPI_pct_1d', 'KOSPI_pct_5d', 
         'USDKRW_pct_1d', 'USDKRW_pct_5d', 
         'VIX_pct_1d', 'VIX_pct_5d'

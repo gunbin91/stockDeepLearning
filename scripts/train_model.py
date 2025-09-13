@@ -90,12 +90,11 @@ def create_training_data():
     check_memory_and_cleanup()
 
     features = [
-        'PBR', 'ROE', 'log_mktcap', '이익수익률', 'EPS', 'BPS',
-        '수익률(1W)', '수익률(2W)', '수익률(1M)', '수익률(3M)', '52주_신고가_비율',
-        'RSI_14', 'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9',
-        'STOCHk_14_3_3', 'STOCHd_14_3_3', 'ADX_14',
-        '변동성(1M)', 'ATRr_14', 'BBW_20_2',
-        'disparity_20', 'disparity_120', 'disparity_240',
+        'PBR', 'log_mktcap', '이익수익률', 'BPS',
+        '수익률(1M)', '수익률(3M)', '52주_신고가_비율',
+        'ADX_14',
+        '변동성(1W)', '변동성(1M)', '변동성(3M)', 'ATRr_14', 'BBW_20_2', 'BB_Position',
+        'disparity_120', 'disparity_240',
         '거래대금_MA5', '거래대금_MA20', 'OBV',
         'KOSPI_pct_1d', 'KOSPI_pct_5d', 'USDKRW_pct_1d', 'USDKRW_pct_5d',
         'VIX_pct_1d', 'VIX_pct_5d'

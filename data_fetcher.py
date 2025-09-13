@@ -115,15 +115,14 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         latest_data['log_mktcap'] = np.log(reference_date_price * shares) if (reference_date_price * shares) > 0 else np.nan
         latest_data['이익수익률'] = 1 / fs_data['PER'].values[0] if fs_data['PER'].values[0] != 0 else np.nan
 
-        latest_data['수익률(1W)'] = df_for_indicators['종가'].pct_change(5).iloc[-1]
-        latest_data['수익률(2W)'] = df_for_indicators['종가'].pct_change(10).iloc[-1]
         latest_data['수익률(1M)'] = df_for_indicators['종가'].pct_change(20).iloc[-1]
         latest_data['수익률(3M)'] = df_for_indicators['종가'].pct_change(60).iloc[-1]
+        latest_data['변동성(1W)'] = (df_for_indicators['종가'].rolling(5).std() / df_for_indicators['종가'].rolling(5).mean()).iloc[-1]
         latest_data['변동성(1M)'] = (df_for_indicators['종가'].rolling(20).std() / df_for_indicators['종가'].rolling(20).mean()).iloc[-1]
+        latest_data['변동성(3M)'] = (df_for_indicators['종가'].rolling(60).std() / df_for_indicators['종가'].rolling(60).mean()).iloc[-1]
         latest_data['거래대금_MA5'] = df_for_indicators['거래대금'].rolling(5).mean().iloc[-1]
         latest_data['거래대금_MA20'] = df_for_indicators['거래대금'].rolling(20).mean().iloc[-1]
         
-        df_for_indicators.ta.stoch(high='고가', low='저가', close='종가', k=14, d=3, smooth_k=3, append=True)
         df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
         df_for_indicators.ta.obv(close='종가', volume='거래량', append=True)
         df_for_indicators.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
@@ -132,19 +131,25 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         # <<< ✨ 핵심 수정: pandas-ta 버전업에 따른 볼린저밴드 컬럼명 변경 대응 ✨ >>>
         if bbands is not None and all(col in bbands.columns for col in ['BBL_20_2.0_2.0', 'BBU_20_2.0_2.0', 'BBM_20_2.0_2.0']):
              latest_data['BBW_20_2'] = ((bbands['BBU_20_2.0_2.0'] - bbands['BBL_20_2.0_2.0']) / bbands['BBM_20_2.0_2.0']).iloc[-1]
+             # BB_Position 계산: (현재가 - 하단밴드) / (상단밴드 - 하단밴드)
+             current_price = df_for_indicators['종가'].iloc[-1]
+             bb_lower = bbands['BBL_20_2.0_2.0'].iloc[-1]
+             bb_upper = bbands['BBU_20_2.0_2.0'].iloc[-1]
+             if bb_upper != bb_lower:
+                 latest_data['BB_Position'] = (current_price - bb_lower) / (bb_upper - bb_lower)
+             else:
+                 latest_data['BB_Position'] = 0.5  # 중앙값
         else:
              latest_data['BBW_20_2'] = np.nan
+             latest_data['BB_Position'] = np.nan
 
-        for p in [20, 120, 240]:
+        for p in [120, 240]:
             ma = df_for_indicators['종가'].rolling(window=p).mean()
             latest_data[f'disparity_{p}'] = ((df_for_indicators['종가'] / ma) * 100).iloc[-1]
 
         latest_data['52주_신고가_비율'] = (df_for_indicators['종가'] / df_for_indicators['종가'].rolling(250).max()).iloc[-1]
-        df_for_indicators.ta.rsi(close='종가', length=14, append=True)
-        df_for_indicators.ta.macd(close='종가', fast=12, slow=26, signal=9, append=True)
 
-        technical_features_to_add = ['STOCHk_14_3_3', 'STOCHd_14_3_3', 'ATRr_14', 'OBV', 'ADX_14', 
-                                     'RSI_14', 'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9']
+        technical_features_to_add = ['ATRr_14', 'OBV', 'ADX_14']
         for feature in technical_features_to_add:
             if feature in df_for_indicators.columns:
                  latest_data[feature] = df_for_indicators[feature].iloc[-1]

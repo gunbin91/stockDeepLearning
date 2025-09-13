@@ -27,10 +27,11 @@ def calculate_factor_scores(df):
     else:
         log_warning("   ⚠️ 가치 점수 계산을 위한 데이터가 부족합니다.")
     
-    # 품질 점수 계산
-    if 'ROE' in df.columns:
-        log_info("   🏆 품질 점수 계산 중... (ROE 기준)")
-        scored_df['quality_score'] = df['ROE'].rank(method='min', pct=True, na_option='bottom') * 100
+    # 품질 점수 계산 (PBR 기반으로 변경)
+    if 'PBR' in df.columns:
+        log_info("   🏆 품질 점수 계산 중... (PBR 역순위 기준)")
+        pbr_inverse = np.where(df['PBR'] > 0, 1 / df['PBR'], -np.inf)
+        scored_df['quality_score'] = pd.Series(pbr_inverse, index=df.index).rank(method='min', pct=True, na_option='bottom') * 100
         log_info(f"      ✅ 품질 점수 완료: 평균 {scored_df['quality_score'].mean():.2f}")
     else:
         log_warning("   ⚠️ 품질 점수 계산을 위한 데이터가 부족합니다.")

@@ -94,13 +94,13 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         df['거래대금'] = df['종가'] * df['거래량']
         df['log_mktcap'] = np.log(df['시가총액'])
         df['이익수익률'] = 1 / df['PER']
-        df['수익률(1W)'] = df['종가'].pct_change(5); df['수익률(2W)'] = df['종가'].pct_change(10)
         df['수익률(1M)'] = df['종가'].pct_change(20); df['수익률(3M)'] = df['종가'].pct_change(60)
+        df['변동성(1W)'] = df['종가'].rolling(5).std() / df['종가'].rolling(5).mean()
         df['변동성(1M)'] = df['종가'].rolling(20).std() / df['종가'].rolling(20).mean()
+        df['변동성(3M)'] = df['종가'].rolling(60).std() / df['종가'].rolling(60).mean()
         df['거래대금_MA5'] = df['거래대금'].rolling(5).mean()
         df['거래대금_MA20'] = df['거래대금'].rolling(20).mean()
         
-        df.ta.stoch(high='고가', low='저가', close='종가', k=14, d=3, smooth_k=3, append=True)
         df.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
         df.ta.obv(close='종가', volume='거래량', append=True)
         df.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
@@ -109,17 +109,20 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         # <<< ✨ 핵심 수정: pandas-ta 버전업에 따른 볼린저밴드 컬럼명 변경 대응 ✨ >>>
         if bbands is not None and all(col in bbands.columns for col in ['BBL_20_2.0_2.0', 'BBU_20_2.0_2.0', 'BBM_20_2.0_2.0']):
              df['BBW_20_2'] = (bbands['BBU_20_2.0_2.0'] - bbands['BBL_20_2.0_2.0']) / bbands['BBM_20_2.0_2.0']
+             # BB_Position 계산: (현재가 - 하단밴드) / (상단밴드 - 하단밴드)
+             df['BB_Position'] = (df['종가'] - bbands['BBL_20_2.0_2.0']) / (bbands['BBU_20_2.0_2.0'] - bbands['BBL_20_2.0_2.0'])
+             # 0~1 범위로 제한
+             df['BB_Position'] = df['BB_Position'].clip(0, 1)
         else:
              df['BBW_20_2'] = np.nan
+             df['BB_Position'] = np.nan
 
-        for p in [20, 120, 240]:
+        for p in [120, 240]:
             ma = df['종가'].rolling(window=p).mean()
             df[f'disparity_{p}'] = (df['종가'] / ma) * 100
 
         df['52주_최고가'] = df['종가'].rolling(250).max()
         df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
-        df.ta.rsi(close='종가', length=14, append=True)
-        df.ta.macd(close='종가', fast=12, slow=26, signal=9, append=True)
 
         df['target'] = (df['종가'].shift(-15) / df['종가'] > 1.05).astype(int)
         df['종목코드'] = ticker
