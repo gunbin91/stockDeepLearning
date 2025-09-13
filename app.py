@@ -311,7 +311,7 @@ def run_stock_recommendation():
                     stdout=subprocess.PIPE, 
                     stderr=subprocess.STDOUT,  # stderr를 stdout으로 리다이렉트
                     text=True, 
-                    encoding='cp949',  # Windows 기본 인코딩으로 변경
+                    encoding='utf-8',  # UTF-8로 통일 (크로스 플랫폼 호환성)
                     errors='replace',  # 인코딩 오류 시 대체 문자로 처리
                     bufsize=1,
                     env=env  # 환경 변수 전달
@@ -620,7 +620,7 @@ def display_backtest_report():
                                 stdout=subprocess.PIPE, 
                                 stderr=subprocess.STDOUT, 
                                 text=True, 
-                                encoding='cp949',  # Windows 기본 인코딩으로 변경
+                                encoding='utf-8',  # UTF-8로 통일 (크로스 플랫폼 호환성)
                                 errors='replace',  # 인코딩 오류 시 대체 문자로 처리
                                 bufsize=1
                             )

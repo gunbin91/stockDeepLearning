@@ -7,18 +7,9 @@ import sys
 import io
 import numpy as np # numpy 임포트 추가
 
-# stdout/stderr를 UTF-8로 설정 (Streamlit 환경이 아닌 경우에만)
-if not os.environ.get('STREAMLIT_SERVER_PORT'):
-    try:
-        sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
-        sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
-    except Exception:
-        # 이미 detach된 경우 무시
-        pass
-
-
-# 프로젝트 루트 경로를 sys.path에 추가
+# 크로스 플랫폼 인코딩 설정
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import encoding_utils  # 인코딩 유틸리티 임포트
 
 # 내부 모듈 임포트
 import data_fetcher

@@ -18,9 +18,9 @@ import shutil # 폴더 삭제를 위해 shutil 라이브러리 임포트
 import gc
 import psutil
 
-sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
+# 크로스 플랫폼 인코딩 설정
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import encoding_utils  # 인코딩 유틸리티 임포트
 
 import data_cacher
 from logger import log_info, log_warning, log_error 

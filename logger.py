@@ -70,6 +70,12 @@ class StockAnalysisLogger:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(formatter)
+        # 인코딩 설정 추가 (크로스 플랫폼 호환성)
+        if hasattr(console_handler.stream, 'reconfigure'):
+            try:
+                console_handler.stream.reconfigure(encoding='utf-8')
+            except Exception:
+                pass  # 인코딩 설정 실패 시 무시
         self.logger.addHandler(console_handler)
         
         # 중복 로그 방지 및 Streamlit 환경에서의 안정성 향상
