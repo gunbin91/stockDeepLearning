@@ -16,7 +16,12 @@ import shutil
 class SmartCache:
     """스마트 캐싱 시스템 - 파일시스템 기반"""
     
-    def __init__(self, cache_dir: str = "cache", max_cache_size_gb: float = 5.0):
+    def __init__(self, cache_dir: str = None, max_cache_size_gb: float = 5.0):
+        if cache_dir is None:
+            # 프로젝트 루트의 cache 디렉토리를 기본값으로 사용
+            import os
+            project_root = os.path.dirname(os.path.abspath(__file__))
+            cache_dir = os.path.join(project_root, "cache")
         self.cache_dir = Path(cache_dir)
         self.max_cache_size_gb = max_cache_size_gb
         self.logger = logging.getLogger(__name__)
