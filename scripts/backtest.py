@@ -127,7 +127,27 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                             'buy_market_cap': row.get('시가총액')
                         }
                         
-        current_portfolio_value = sum(data.loc[(date, ticker), '종가'] * info['shares'] for ticker, info in portfolio.items() if (date, ticker) in data.index)
+        # 포트폴리오 가치 계산 - 데이터가 없는 종목은 이전 가격 사용
+        current_portfolio_value = 0
+        for ticker, info in portfolio.items():
+            if (date, ticker) in data.index:
+                # 현재 날짜에 데이터가 있으면 현재 가격 사용
+                current_price = data.loc[(date, ticker), '종가']
+            else:
+                # 데이터가 없으면 이전 가격 사용 (최대 5일 전까지)
+                current_price = None
+                for days_back in range(1, 6):
+                    prev_date = date - timedelta(days=days_back)
+                    if (prev_date, ticker) in data.index:
+                        current_price = data.loc[(prev_date, ticker), '종가']
+                        break
+                
+                # 5일 내에 데이터가 없으면 매수가로 대체 (최악의 경우)
+                if current_price is None:
+                    current_price = info['buy_price']
+                    print(f"⚠️ {ticker} 종목의 {date} 가격 데이터가 없어 매수가({current_price})로 대체합니다.")
+            
+            current_portfolio_value += current_price * info['shares']
         total_asset = cash + current_portfolio_value
         portfolio_history.append(total_asset)
         
