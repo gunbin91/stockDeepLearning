@@ -32,7 +32,6 @@ except ImportError:
 import data_fetcher
 import scoring
 import ml_model
-import dl_model
 import ensemble
 from logger import log_info, log_warning, log_error, log_critical
 from exceptions import DataFetchError, ModelPredictionError, AnalysisError

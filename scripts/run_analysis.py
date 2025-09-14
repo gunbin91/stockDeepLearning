@@ -15,7 +15,6 @@ import encoding_utils  # 인코딩 유틸리티 임포트
 import data_fetcher
 import scoring
 import ml_model
-import dl_model
 import ensemble
 from logger import log_info, log_warning, log_error, log_critical
 from exceptions import DataFetchError, ModelPredictionError, AnalysisError
@@ -98,18 +97,16 @@ def run_analysis(analysis_date_str):
             log_error(f"머신러닝 모델 예측 실패: {e}")
             raise AnalysisError(f"머신러닝 모델 예측 실패: {e.message}", step="ml_prediction")
 
-        log_info("🔄 딥러닝 모델 예측을 시작합니다...")
+        log_info("🎯 앙상블 최종 점수 계산을 시작합니다...")
         merged_df = pd.merge(scored_df, ml_predicted_df, on='종목코드', how='left')
         log_info(f"   📊 머신러닝 예측 결과 병합 완료: {len(merged_df):,}개 종목")
         
-        # dl_model 및 nlp 모듈은 현재 구현에서 제외됨 (app.py 로직 기반)
-        dl_predicted_df = dl_model.predict_with_deep_learning(merged_df)
-        nlp_analyzed_df = dl_predicted_df.copy()
-        nlp_analyzed_df['sentiment_score'] = 0
-        log_info("   ✅ 딥러닝 모델 예측 완료 (감정 분석 점수는 기본값 적용)")
+        # 딥러닝 모델 및 감정 분석 점수는 기본값으로 설정
+        merged_df['dl_trend_score(더미)'] = 0
+        merged_df['sentiment_score'] = 0
+        log_info("   ✅ 딥러닝 모델 및 감정 분석 점수 기본값 적용 완료")
         
-        log_info("🎯 앙상블 최종 점수 계산을 시작합니다...")
-        final_ranked_df = ensemble.calculate_final_score(nlp_analyzed_df)
+        final_ranked_df = ensemble.calculate_final_score(merged_df)
 
         # 최종 결과에 종목명, 현재가 등 추가 정보 병합
         log_info("📋 최종 결과 데이터 정리 중...")
