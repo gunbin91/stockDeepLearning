@@ -17,7 +17,7 @@ from smart_cache import get_cache, cached
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(PROJECT_ROOT, "cache")
 FINANCIAL_DB_PATH = os.path.join(PROJECT_ROOT, 'data', 'financial_data_pykrx_pit.parquet')
-CACHE_END_DATE = datetime(datetime.now().year - 1, 12, 31).strftime('%Y-%m-%d')
+CACHE_END_DATE = datetime(datetime.now().year, 12, 31).strftime('%Y-%m-%d')
 CACHE_FILENAME = f"historical_data_up_to_{CACHE_END_DATE.replace('-', '')}.parquet"
 CACHE_FILE_PATH = os.path.join(CACHE_DIR, CACHE_FILENAME)
 
@@ -190,6 +190,16 @@ def get_preprocessed_data(start_date, end_date):
     os.makedirs(CACHE_DIR, exist_ok=True)
     cache = get_cache()
     
+    # 실제 거래일을 확인하여 오늘 날짜 분석인지 판단
+    today = datetime.now().date()
+    end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+    
+    # 공통 함수를 사용하여 실제 거래일 확인
+    from data_fetcher import get_actual_trading_date
+    actual_trading_date = get_actual_trading_date(pd.to_datetime(end_date))
+    
+    is_today_analysis = actual_trading_date == today
+    
     # 캐시 키 생성
     cache_params = {
         'start_date': start_date,
@@ -197,17 +207,20 @@ def get_preprocessed_data(start_date, end_date):
         'function': 'get_preprocessed_data'
     }
     
-    # 캐시에서 조회 시도
-    cached_data = cache.get('preprocessed_data', cache_params, ttl_seconds=3600)
-    if cached_data is not None:
-        print(f"✅ 캐시된 데이터 로딩: {start_date} ~ {end_date}")
-        return cached_data
+    # 오늘 날짜 분석이 아닌 경우에만 캐시에서 조회 시도
+    if not is_today_analysis:
+        cached_data = cache.get('preprocessed_data', cache_params, ttl_seconds=3600)
+        if cached_data is not None:
+            print(f"✅ 캐시된 데이터 로딩: {start_date} ~ {end_date}")
+            return cached_data
+    else:
+        print(f"🔄 오늘 날짜 분석: 실시간 데이터 수집을 위해 캐시를 우회합니다 ({start_date} ~ {end_date})")
     
     print(f"⚠️ 캐시 미스. 데이터를 새로 생성합니다: {start_date} ~ {end_date}")
     
     # 청크 기반으로 데이터 처리
     historical_df = _get_historical_data_chunked(start_date, end_date)
-    fresh_df = _get_fresh_data_chunked(start_date, end_date)
+    fresh_df = _get_fresh_data_chunked(start_date, end_date, is_today_analysis)
     
     # 메모리 효율적인 병합
     if not historical_df.empty and not fresh_df.empty:
@@ -312,12 +325,16 @@ def _get_historical_data_chunked(start_date, end_date):
         print(f"✅ 주식 데이터베이스 구축 완료! ({len(historical_df):,}개 데이터 저장)")
         return historical_df
 
-def _get_fresh_data_chunked(start_date, end_date):
+def _get_fresh_data_chunked(start_date, end_date, is_today_analysis=False):
     """최신 데이터를 청크 단위로 처리"""
     fresh_start_date = (datetime.strptime(CACHE_END_DATE, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
     
-    if datetime.strptime(end_date, '%Y-%m-%d').date() > datetime.strptime(CACHE_END_DATE, '%Y-%m-%d').date():
-        print(f"\n🔄 최신 주식 데이터를 수집하는 중...")
+    # 오늘 날짜 분석이거나 캐시 종료일 이후인 경우 실시간 데이터 수집
+    if is_today_analysis or datetime.strptime(end_date, '%Y-%m-%d').date() > datetime.strptime(CACHE_END_DATE, '%Y-%m-%d').date():
+        if is_today_analysis:
+            print(f"\n🔄 오늘 날짜 분석: 실시간 주식 데이터를 수집하는 중...")
+        else:
+            print(f"\n🔄 최신 주식 데이터를 수집하는 중...")
         print(f"   📅 수집 기간: {fresh_start_date} ~ {end_date}")
         print("   🌐 인터넷에서 최신 거래 정보를 가져오고 있습니다...")
         

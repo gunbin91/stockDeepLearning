@@ -20,7 +20,90 @@ from smart_cache import get_cache, cached
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 FINANCIAL_DB_PATH = os.path.join(PROJECT_ROOT, 'data', 'financial_data_pykrx_pit.parquet')
 
+def get_actual_trading_date(selected_analysis_date):
+    """실제 거래일을 확인하는 공통 함수"""
+    today = datetime.now().date()
+    selected_date = selected_analysis_date.date()
+    
+    # 삼성전자(005930)로 실제 거래일 확인
+    try:
+        sample_fetch_start = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
+        sample_df = fdr.DataReader('005930', sample_fetch_start, datetime.now().strftime('%Y-%m-%d'))
+        if not sample_df.empty:
+            sample_analysis_date_ts = pd.Timestamp(selected_analysis_date)
+            sample_temp = sample_df[sample_df.index <= sample_analysis_date_ts]
+            if not sample_temp.empty:
+                actual_trading_date = sample_temp.index.max().date()
+                log_info(f"📅 분석기준일: {selected_analysis_date.strftime('%Y-%m-%d')} → 실제 거래일: {actual_trading_date}")
+                return actual_trading_date
+            else:
+                log_warning("⚠️ 실제 거래일을 확인할 수 없어 분석기준일을 사용합니다")
+                return selected_date
+        else:
+            log_warning("⚠️ 샘플 데이터를 가져올 수 없어 분석기준일을 사용합니다")
+            return selected_date
+    except Exception as e:
+        log_warning(f"⚠️ 실제 거래일 확인 중 오류 발생: {e}, 분석기준일을 사용합니다")
+        return selected_date
+
 def get_fs_data_from_pit(stock_list, selected_analysis_date):
+    # 공통 함수를 사용하여 실제 거래일 확인
+    actual_trading_date = get_actual_trading_date(selected_analysis_date)
+    today = datetime.now().date()
+    is_today_analysis = actual_trading_date == today
+    
+    if is_today_analysis:
+        log_info("🔄 오늘 날짜 분석: 실시간 재무데이터를 수집합니다")
+        return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
+    else:
+        log_info("📊 과거 날짜 분석: 정적 재무데이터베이스를 사용합니다")
+        return _get_historical_financial_data(stock_list, selected_analysis_date)
+
+def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
+    """실시간 재무데이터 수집"""
+    try:
+        log_info("🌐 pykrx API를 통해 실시간 재무데이터를 수집합니다...")
+        
+        # 분석 기준일을 YYYYMMDD 형식으로 변환
+        analysis_date_str = selected_analysis_date.strftime('%Y%m%d')
+        
+        # pykrx API로 재무데이터 수집
+        df_fundamental = stock.get_market_fundamental(analysis_date_str, market="ALL")
+        
+        if df_fundamental.empty:
+            log_warning("⚠️ 실시간 재무데이터를 가져올 수 없습니다. 정적 데이터베이스를 시도합니다.")
+            return _get_historical_financial_data(stock_list, selected_analysis_date)
+        
+        # 데이터 정제
+        if 'PBR' in df_fundamental.columns:
+            df_fundamental = df_fundamental[df_fundamental['PBR'] > 0]
+        
+        if df_fundamental.empty:
+            log_warning("⚠️ 유효한 재무데이터가 없습니다. 정적 데이터베이스를 시도합니다.")
+            return _get_historical_financial_data(stock_list, selected_analysis_date)
+        
+        # 컬럼명 정리
+        df_fundamental.reset_index(inplace=True)
+        df_fundamental.rename(columns={'티커': '종목코드'}, inplace=True)
+        df_fundamental['date'] = pd.to_datetime(analysis_date_str, format='%Y%m%d')
+        
+        # 요청된 종목만 필터링
+        requested_tickers = set(stock_list['종목코드'].astype(str))
+        df_fundamental = df_fundamental[df_fundamental['종목코드'].astype(str).isin(requested_tickers)]
+        
+        # stock_list와 병합
+        result_df = pd.merge(stock_list[['종목코드']], df_fundamental, on='종목코드', how='left')
+        
+        log_info(f"✅ 실시간 재무데이터 수집 완료: {len(result_df.dropna())}개 종목")
+        return result_df
+        
+    except Exception as e:
+        log_error(f"실시간 재무데이터 수집 실패: {e}")
+        log_info("정적 데이터베이스를 시도합니다.")
+        return _get_historical_financial_data(stock_list, selected_analysis_date)
+
+def _get_historical_financial_data(stock_list, selected_analysis_date):
+    """정적 재무데이터베이스에서 데이터 조회"""
     try:
         log_info(f"재무 지표 데이터베이스 로딩 시작: {FINANCIAL_DB_PATH}")
         funda_df = pd.read_parquet(FINANCIAL_DB_PATH)
@@ -28,8 +111,8 @@ def get_fs_data_from_pit(stock_list, selected_analysis_date):
     except FileNotFoundError:
         error_msg = f"재무 지표 데이터베이스 파일({FINANCIAL_DB_PATH})을 찾을 수 없습니다."
         log_critical(error_msg)
-        log_info("먼저 `scripts/build_db_pykrx.py`를 실행하여 데이터베이스를 생성해주세요.")
-        raise DataFetchError(error_msg, source="pykrx_database")
+        log_info("실시간 재무데이터 수집을 시도합니다.")
+        return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
     except Exception as e:
         import traceback
         error_msg = f"재무 지표 데이터베이스 로딩 중 오류 발생: {e}"
@@ -37,7 +120,8 @@ def get_fs_data_from_pit(stock_list, selected_analysis_date):
         print(f"❌ [ERROR] {error_msg}")
         print(f"❌ [ERROR] 상세 오류 정보:")
         print(traceback.format_exc())
-        raise DataFetchError(error_msg, source="pykrx_database")
+        log_info("실시간 재무데이터 수집을 시도합니다.")
+        return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
     
     log_info(f"분석 기준일({selected_analysis_date.strftime('%Y-%m-%d')}): pykrx DB에서 최신 재무 지표 조회.")
     analysis_date_ts = pd.to_datetime(selected_analysis_date)
@@ -46,11 +130,53 @@ def get_fs_data_from_pit(stock_list, selected_analysis_date):
     if available_funda.empty:
         warning_msg = f"{analysis_date_ts.strftime('%Y-%m-%d')} 이전에 집계된 재무 지표 데이터가 없습니다."
         log_warning(warning_msg)
-        return pd.DataFrame()
+        log_info("실시간 재무데이터 수집을 시도합니다.")
+        return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
     
     latest_funda = available_funda.sort_values('date').drop_duplicates(subset=['종목코드'], keep='last')
     
     result_df = pd.merge(stock_list[['종목코드']], latest_funda, on='종목코드', how='left')
+    
+    # 누락된 재무데이터가 있는지 확인하고 실시간으로 보완
+    missing_data_count = result_df['PER'].isna().sum()
+    if missing_data_count > 0:
+        log_info(f"⚠️ {missing_data_count}개 종목의 재무데이터가 누락되었습니다. 실시간으로 보완합니다.")
+        
+        # 누락된 종목들만 실시간으로 수집
+        missing_tickers = result_df[result_df['PER'].isna()]['종목코드'].tolist()
+        if missing_tickers:
+            try:
+                log_info("🌐 누락된 종목들의 실시간 재무데이터를 수집합니다...")
+                analysis_date_str = selected_analysis_date.strftime('%Y%m%d')
+                df_fundamental = stock.get_market_fundamental(analysis_date_str, market="ALL")
+                
+                if not df_fundamental.empty and 'PBR' in df_fundamental.columns:
+                    df_fundamental = df_fundamental[df_fundamental['PBR'] > 0]
+                    df_fundamental.reset_index(inplace=True)
+                    df_fundamental.rename(columns={'티커': '종목코드'}, inplace=True)
+                    df_fundamental['date'] = pd.to_datetime(analysis_date_str, format='%Y%m%d')
+                    
+                    # 누락된 종목들만 필터링
+                    missing_tickers_str = [str(ticker) for ticker in missing_tickers]
+                    df_fundamental = df_fundamental[df_fundamental['종목코드'].astype(str).isin(missing_tickers_str)]
+                    
+                    if not df_fundamental.empty:
+                        # 누락된 데이터를 실시간 데이터로 업데이트
+                        for idx, row in df_fundamental.iterrows():
+                            mask = result_df['종목코드'] == row['종목코드']
+                            if mask.any():
+                                for col in ['PER', 'PBR', 'EPS', 'BPS']:
+                                    if col in row and pd.notna(row[col]):
+                                        result_df.loc[mask, col] = row[col]
+                        
+                        log_info(f"✅ {len(df_fundamental)}개 종목의 누락된 재무데이터를 실시간으로 보완했습니다.")
+                    else:
+                        log_warning("⚠️ 누락된 종목들의 실시간 재무데이터를 가져올 수 없습니다.")
+                else:
+                    log_warning("⚠️ 실시간 재무데이터 수집에 실패했습니다.")
+            except Exception as e:
+                log_warning(f"⚠️ 누락된 재무데이터 보완 중 오류 발생: {e}")
+    
     log_info(f"✅ 사용 가능한 재무 지표 처리 완료: {len(result_df.dropna())}개 기업")
     return result_df
 
@@ -70,7 +196,6 @@ def fetch_stock_list():
         log_error(error_msg)
         raise DataFetchError(error_msg, source="FinanceDataReader")
 
-@cached("macro_data", ttl_seconds=3600)  # 1시간 캐시
 def _fetch_macro_data(start_date, end_date):
     log_info(f"거시 경제 지표 데이터 수집 중 ({start_date} ~ {end_date})...")
     try:
@@ -196,7 +321,31 @@ def fetch_all_data(stock_list, selected_analysis_date):
             print(f"경고: 기준일({selected_analysis_date.strftime('%Y-%m-%d')})의 시가총액 데이터를 가져오는 데 실패했습니다: {e}")
             print("최신 상장주식수 정보를 사용하여 분석을 계속합니다.")
             
-    macro_df = _fetch_macro_data(start_date_for_fetch, end_date_for_fetch)
+    # 공통 함수를 사용하여 실제 거래일 확인
+    actual_trading_date = get_actual_trading_date(selected_analysis_date)
+    today = datetime.now().date()
+    is_today_analysis = actual_trading_date == today
+    
+    if is_today_analysis:
+        log_info("🔄 오늘 날짜 분석: 거시경제 데이터를 실시간으로 수집합니다")
+        macro_df = _fetch_macro_data(start_date_for_fetch, end_date_for_fetch)
+    else:
+        # 과거 날짜 분석 시에만 캐시 사용
+        cache = get_cache()
+        cache_params = {
+            'start_date': start_date_for_fetch,
+            'end_date': end_date_for_fetch,
+            'function': 'macro_data'
+        }
+        cached_macro = cache.get('macro_data', cache_params, ttl_seconds=3600)
+        if cached_macro is not None:
+            log_info("✅ 캐시된 거시경제 데이터 로딩")
+            macro_df = cached_macro
+        else:
+            log_info("⚠️ 거시경제 데이터 캐시 미스, 새로 수집합니다")
+            macro_df = _fetch_macro_data(start_date_for_fetch, end_date_for_fetch)
+            # 캐시에 저장
+            cache.set('macro_data', cache_params, macro_df, ttl_seconds=3600)
     if macro_df.empty:
         print("거시 경제 데이터 수집에 실패하여 분석을 중단합니다."); return pd.DataFrame(), None
     all_feature_data, all_actual_dates = [], []

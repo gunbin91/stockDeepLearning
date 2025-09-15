@@ -11,6 +11,29 @@ import numpy as np # numpy 임포트 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import encoding_utils  # 인코딩 유틸리티 임포트
 
+# 추가 인코딩 설정 (한글 깨짐 방지)
+import locale
+import codecs
+
+# 시스템 인코딩을 UTF-8로 강제 설정
+try:
+    locale.setlocale(locale.LC_ALL, 'ko_KR.UTF-8')
+except:
+    try:
+        locale.setlocale(locale.LC_ALL, 'Korean_Korea.utf8')
+    except:
+        pass
+
+# stdout/stderr를 UTF-8로 설정
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+# 환경 변수 설정
+os.environ['PYTHONIOENCODING'] = 'utf-8'
+os.environ['LANG'] = 'ko_KR.UTF-8'
+
 # 내부 모듈 임포트
 import data_fetcher
 import scoring

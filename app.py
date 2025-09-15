@@ -554,6 +554,10 @@ def run_stock_recommendation():
                 # Streamlit 환경임을 알려주는 환경 변수 설정
                 env = os.environ.copy()
                 env['STREAMLIT_SERVER_PORT'] = '8501'
+                # 한글 깨짐 방지를 위한 인코딩 설정
+                env['PYTHONIOENCODING'] = 'utf-8'
+                env['LANG'] = 'ko_KR.UTF-8'
+                env['LC_ALL'] = 'ko_KR.UTF-8'
                 
                 process = subprocess.Popen(
                     command, 
@@ -762,6 +766,12 @@ def display_backtest_report():
                             ]
                             # ==========================================================
                             
+                            # 한글 깨짐 방지를 위한 환경 변수 설정
+                            env = os.environ.copy()
+                            env['PYTHONIOENCODING'] = 'utf-8'
+                            env['LANG'] = 'ko_KR.UTF-8'
+                            env['LC_ALL'] = 'ko_KR.UTF-8'
+                            
                             process = subprocess.Popen(
                                 command, 
                                 stdout=subprocess.PIPE, 
@@ -769,7 +779,8 @@ def display_backtest_report():
                                 text=True, 
                                 encoding='utf-8',  # UTF-8로 통일 (크로스 플랫폼 호환성)
                                 errors='replace',  # 인코딩 오류 시 대체 문자로 처리
-                                bufsize=1
+                                bufsize=1,
+                                env=env  # 환경 변수 전달
                             )
 
                             last_line_was_tqdm = False
