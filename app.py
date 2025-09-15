@@ -341,7 +341,15 @@ def run_stock_recommendation():
     
     # 새로운 분석 실행 섹션 (상단 고정)
     st.subheader("🔄 새로운 분석 실행")
-    st.write("새로운 분석을 실행하려면 아래 버튼을 클릭하세요.")
+    st.write("새로운 분석을 실행하려면 분석 기준일을 선택하고 아래 버튼을 클릭하세요.")
+    
+    # 분석 기준일 선택 (항상 표시)
+    selected_analysis_date = st.date_input(
+        "분석 기준일 선택",
+        value=datetime.now(),
+        max_value=datetime.now(),
+        help="선택된 날짜를 기준으로 종목을 분석합니다. 휴장일 선택 시 가장 가까운 이전 거래일이 기준이 됩니다."
+    )
     
     col1, col2, _ = st.columns([1, 1, 5])
     with col1:
@@ -361,7 +369,8 @@ def run_stock_recommendation():
         st.session_state.analysis_date = None
         if 'selected_stock' in st.session_state:
             del st.session_state['selected_stock']
-        st.rerun()
+        # 새로운 분석 시작 플래그 설정
+        start_analysis = True
     
     st.markdown("---")
     
@@ -490,13 +499,6 @@ def run_stock_recommendation():
                 for data_type, stats in cache_info['type_stats'].items():
                     st.write(f"- {data_type}: {stats['count']}개 파일, {stats['size_bytes']/1024/1024:.2f} MB")
         
-        # 분석 기준일 선택
-        selected_analysis_date = st.date_input(
-            "분석 기준일 선택",
-            value=datetime.now(),
-            max_value=datetime.now(),
-            help="선택된 날짜를 기준으로 종목을 분석합니다. 휴장일 선택 시 가장 가까운 이전 거래일이 기준이 됩니다."
-        )
         
         with st.spinner("전체 종목 목록을 API로부터 수신하는 중..."):
             try:
@@ -514,18 +516,6 @@ def run_stock_recommendation():
                 st.error("예상치 못한 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
                 st.stop()
 
-        col1, col2, _ = st.columns([1, 1, 5])
-        with col1:
-            start_analysis = st.button("실제 데이터 수집 및 분석 시작", type="primary")
-        with col2:
-            if st.session_state.analysis_result is not None:
-                if st.button("결과 초기화"):
-                    st.session_state.analysis_result = None
-                    st.session_state.market_condition = None
-                    st.session_state.analysis_date = None
-                    if 'selected_stock' in st.session_state:
-                        del st.session_state['selected_stock']
-                    st.rerun()
 
     if start_analysis:
         # --- 분석 로직을 서브프로세스로 실행 ---
