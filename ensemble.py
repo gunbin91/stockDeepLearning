@@ -16,12 +16,8 @@ def calculate_final_score(df):
 
     # 기본 가중치 설정 (optimal_weights.json 파일이 없을 경우 사용)
     factor_weights = {
-        'value_score': 0.15,
-        'quality_score': 0.15,
-        'momentum_score': 0.20,
-        'supply_score': 0.10,
         'volatility_score': 0.10,
-        'ml_pred_proba': 0.30, # ML 예측 확률
+        'ml_pred_proba': 0.90, # ML 예측 확률
         'sentiment_score': 0.00,
         'dl_trend_score(더미)': 0.00,
     }

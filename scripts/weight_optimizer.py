@@ -31,10 +31,6 @@ TRAIN_END_DATE = '2022-12-31'
 TRAIN_START_DATE = '2020-01-01'
 
 WEIGHT_GRID = {
-    'value_score': np.arange(0.0, 0.21, 0.1),
-    'quality_score': np.arange(0.0, 0.21, 0.1),
-    'momentum_score': np.arange(0.0, 0.21, 0.1),
-    'supply_score': np.arange(0.0, 0.21, 0.1),
     'volatility_score': np.arange(0.0, 0.21, 0.1),
     'ml_pred_proba': np.arange(0.1, 0.81, 0.1),
 }

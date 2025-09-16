@@ -220,7 +220,7 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         fetch_start = (pd.to_datetime(start_date_for_fetch) - timedelta(days=60)).strftime('%Y-%m-%d')
         df_price_full = fdr.DataReader(ticker, fetch_start, end_date_for_fetch)
         if df_price_full.empty or len(df_price_full) < 251 + 60: return None, None
-        df_price_full.rename(columns={'Close':'종가', 'High':'고가', 'Low':'저가', 'Volume':'거래량'}, inplace=True)
+        df_price_full.rename(columns={'Open':'시가', 'Close':'종가', 'High':'고가', 'Low':'저가', 'Volume':'거래량'}, inplace=True)
 
         selected_analysis_date_ts = pd.Timestamp(selected_analysis_date)
         df_temp = df_price_full[df_price_full.index <= selected_analysis_date_ts]
@@ -283,6 +283,7 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         latest_data['종목명'] = stock_info['종목명']
         latest_data['현재가'] = latest_current_price
         latest_data['기준일가'] = reference_date_price
+        latest_data['전날종가'] = df_price_full.iloc[-2]['종가'] if len(df_price_full) >= 2 else latest_current_price  # 전날 종가 추가
         if '시가총액_기준일' in stock_info and pd.notna(stock_info['시가총액_기준일']):
             latest_data['시가총액'] = stock_info['시가총액_기준일'] / 1_0000_0000
         else:

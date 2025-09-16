@@ -72,8 +72,8 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
     try:
         df_price = fdr.DataReader(ticker, start_date, end_date)
         if df_price is None or df_price.empty or len(df_price) < 251 + 60: return None
-        df_price.rename(columns={'Close':'종가', 'High': '고가', 'Low': '저가', 'Volume':'거래량'}, inplace=True)
-        df = df_price[['종가', '고가', '저가', '거래량']].copy(); df.sort_index(inplace=True)
+        df_price.rename(columns={'Open':'시가', 'Close':'종가', 'High': '고가', 'Low': '저가', 'Volume':'거래량'}, inplace=True)
+        df = df_price[['시가', '종가', '고가', '저가', '거래량']].copy(); df.sort_index(inplace=True)
         
         df_marcap_ticker = df_marcap_long[df_marcap_long['Code'] == ticker].copy()
         if df_marcap_ticker.empty: return None

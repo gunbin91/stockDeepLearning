@@ -320,11 +320,33 @@ def run_stock_recommendation():
                     return f"{price}원 ({formatted_change})"
 
                 display_df['현재가(원)_formatted'] = display_df.apply(format_price_with_change, axis=1)
+                
+                # 전날 종가 대비 등락율 계산 (증권사 표준 방식)
+                if '전날종가' in display_df.columns:
+                    display_df['전날종가대비등락율'] = ((display_df['현재가'] - display_df['전날종가']) / display_df['전날종가']) * 100
+                    
+                    # 등락율 컬럼 포맷팅
+                    def format_change_rate(change_percent):
+                        if pd.isna(change_percent):
+                            return "N/A"
+                        sign = '+' if change_percent > 0 else ''
+                        return f"{sign}{change_percent:.2f}%"
+                    
+                    display_df['등락율(%)'] = display_df['전날종가대비등락율'].apply(format_change_rate)
+                else:
+                    # 전날종가 데이터가 없는 경우 기존 로직 사용 (분석기준일 대비)
+                    def format_change_rate(change_percent):
+                        if pd.isna(change_percent):
+                            return "N/A"
+                        sign = '+' if change_percent > 0 else ''
+                        return f"{sign}{change_percent:.2f}%"
+                    
+                    display_df['등락율(%)'] = display_df['등락율'].apply(format_change_rate)
 
-                rename_map = { '현재가': '현재가(원)', '시가총액': '시가총액(억)', 'value_score': '가치(점)', 'quality_score': '퀄리티(점)', 'momentum_score': '모멘텀(점)', 'supply_score': '수급(점)', 'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(원)'}
+                rename_map = { '현재가': '현재가(원)', '시가총액': '시가총액(억)',  'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(원)'}
                 display_df.rename(columns=rename_map, inplace=True)
                 
-                display_columns = [ '최종순위', '종목명', '종목코드', '현재가(원)_formatted', '기준일가(원)', '최종점수(점)', '상승확률(%)', '모멘텀(점)', '가치(점)', '퀄리티(점)', '수급(점)', '변동성(점)', '시가총액(억)']
+                display_columns = [ '최종순위', '종목명', '종목코드', '현재가(원)_formatted', '등락율(%)', '기준일가(원)', '최종점수(점)', '상승확률(%)', '변동성(점)', '시가총액(억)']
                 
                 st.session_state.analysis_result = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(원)_formatted': '현재가(원)'})
                 
@@ -399,15 +421,30 @@ def run_stock_recommendation():
         def highlight_change(row):
             styles = ['' for _ in row.index] # 모든 컬럼에 대한 기본 스타일
             
-            if '등락율' in row.index:
+            # 전날 종가 대비 등락율이 있으면 그것을 사용, 없으면 기존 등락율 사용
+            if '전날종가대비등락율' in row.index:
+                change_percent = row['전날종가대비등락율']
+            elif '등락율' in row.index:
                 change_percent = row['등락율']
-                if pd.notna(change_percent):
-                    # get_loc으로 '현재가(원)' 컬럼의 정확한 위치를 찾아 스타일 적용
+            else:
+                change_percent = None
+                
+            if pd.notna(change_percent):
+                # 현재가(원) 컬럼에 색상 적용
+                if '현재가(원)' in row.index:
                     price_col_index = row.index.get_loc('현재가(원)')
                     if change_percent > 0:
-                        styles[price_col_index] = 'color: red;'
+                        styles[price_col_index] = 'color: #d32f2f;'
                     elif change_percent < 0:
-                        styles[price_col_index] = 'color: blue;'
+                        styles[price_col_index] = 'color: #1976d2;'
+                
+                # 등락율(%) 컬럼에도 색상 적용
+                if '등락율(%)' in row.index:
+                    change_rate_col_index = row.index.get_loc('등락율(%)')
+                    if change_percent > 0:
+                        styles[change_rate_col_index] = 'color: #d32f2f;'
+                    elif change_percent < 0:
+                        styles[change_rate_col_index] = 'color: #1976d2;'
             return styles
 
         # '등락율'이 포함된 전체 데이터프레임에 스타일 적용
@@ -423,6 +460,7 @@ def run_stock_recommendation():
             column_config={
                 "종목코드": None,
                 "등락율": None,
+                "전날종가대비등락율": None,
             },
             width='stretch'
         )
@@ -681,11 +719,33 @@ def run_stock_recommendation():
                     return f"{price}원 ({formatted_change})"
 
                 display_df['현재가(원)_formatted'] = display_df.apply(format_price_with_change, axis=1)
+                
+                # 전날 종가 대비 등락율 계산 (증권사 표준 방식)
+                if '전날종가' in display_df.columns:
+                    display_df['전날종가대비등락율'] = ((display_df['현재가'] - display_df['전날종가']) / display_df['전날종가']) * 100
+                    
+                    # 등락율 컬럼 포맷팅
+                    def format_change_rate(change_percent):
+                        if pd.isna(change_percent):
+                            return "N/A"
+                        sign = '+' if change_percent > 0 else ''
+                        return f"{sign}{change_percent:.2f}%"
+                    
+                    display_df['등락율(%)'] = display_df['전날종가대비등락율'].apply(format_change_rate)
+                else:
+                    # 전날종가 데이터가 없는 경우 기존 로직 사용 (분석기준일 대비)
+                    def format_change_rate(change_percent):
+                        if pd.isna(change_percent):
+                            return "N/A"
+                        sign = '+' if change_percent > 0 else ''
+                        return f"{sign}{change_percent:.2f}%"
+                    
+                    display_df['등락율(%)'] = display_df['등락율'].apply(format_change_rate)
 
-                rename_map = { '현재가': '현재가(원)', '시가총액': '시가총액(억)', 'value_score': '가치(점)', 'quality_score': '퀄리티(점)', 'momentum_score': '모멘텀(점)', 'supply_score': '수급(점)', 'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(원)'}
+                rename_map = { '현재가': '현재가(원)', '시가총액': '시가총액(억)',  'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(원)'}
                 display_df.rename(columns=rename_map, inplace=True)
                 
-                display_columns = [ '최종순위', '종목명', '종목코드', '현재가(원)_formatted', '기준일가(원)', '최종점수(점)', '상승확률(%)', '모멘텀(점)', '가치(점)', '퀄리티(점)', '수급(점)', '변동성(점)', '시가총액(억)']
+                display_columns = [ '최종순위', '종목명', '종목코드', '현재가(원)_formatted', '등락율(%)', '기준일가(원)', '최종점수(점)', '상승확률(%)', '변동성(점)', '시가총액(억)']
                 
                 st.session_state.analysis_result = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(원)_formatted': '현재가(원)'})
                 st.rerun()
