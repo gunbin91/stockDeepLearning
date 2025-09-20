@@ -35,7 +35,6 @@ import ml_model
 import ensemble
 from logger import log_info, log_warning, log_error, log_critical
 from exceptions import DataFetchError, ModelPredictionError, AnalysisError
-from smart_cache import get_cache
 
 # 페이지 레이아웃 설정
 st.set_page_config(layout="wide")
@@ -527,24 +526,6 @@ def run_stock_recommendation():
     else:
         # 기존 분석 결과가 없을 때의 UI
         st.write("### 1. 종목 데이터 수집")
-        
-        # 캐시 정보 표시
-        cache = get_cache()
-        cache_info = cache.get_cache_info()
-        
-        with st.expander("📊 캐시 상태 정보"):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("캐시 크기", f"{cache_info['total_size_gb']:.2f} GB")
-            with col2:
-                st.metric("캐시 파일 수", f"{cache_info['total_files']}개")
-            with col3:
-                st.metric("캐시 디렉토리", cache_info['cache_dir'])
-            
-            if cache_info['type_stats']:
-                st.write("**데이터 타입별 통계:**")
-                for data_type, stats in cache_info['type_stats'].items():
-                    st.write(f"- {data_type}: {stats['count']}개 파일, {stats['size_bytes']/1024/1024:.2f} MB")
         
         
         with st.spinner("전체 종목 목록을 API로부터 수신하는 중..."):

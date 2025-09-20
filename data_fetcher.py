@@ -45,13 +45,16 @@ def get_actual_trading_date(selected_analysis_date):
         log_warning(f"⚠️ 실제 거래일 확인 중 오류 발생: {e}, 분석기준일을 사용합니다")
         return selected_date
 
-def get_fs_data_from_pit(stock_list, selected_analysis_date):
+def get_fs_data_from_pit(stock_list, selected_analysis_date, use_cache=True):
     # 공통 함수를 사용하여 실제 거래일 확인
     actual_trading_date = get_actual_trading_date(selected_analysis_date)
     today = datetime.now().date()
     is_today_analysis = actual_trading_date == today
     
-    if is_today_analysis:
+    if not use_cache:
+        log_info("🔄 주식추천 페이지: 정합성 있는 실시간 재무데이터를 수집합니다")
+        return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
+    elif is_today_analysis:
         log_info("🔄 오늘 날짜 분석: 실시간 재무데이터를 수집합니다")
         return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
     else:
@@ -221,9 +224,8 @@ def _get_stock_list_from_marcap(analysis_date=None):
         log_error(error_msg)
         raise DataFetchError(error_msg, source="FinanceDataReader")
 
-@cached("stock_list", ttl_seconds=86400)  # 24시간 캐시
 def fetch_stock_list():
-    """현재 날짜 기준 주식 목록 가져오기 (캐시 적용)"""
+    """현재 날짜 기준 주식 목록 가져오기 (캐시 없이 실시간 수집)"""
     return _get_stock_list_from_marcap()
 
 def fetch_stock_list_for_date(analysis_date):
@@ -333,7 +335,7 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     end_date_for_fetch = today.strftime('%Y-%m-%d')
     start_date_for_fetch = (today - timedelta(days=450)).strftime('%Y-%m-%d')
 
-    latest_fs_df = get_fs_data_from_pit(stock_list, selected_analysis_date)
+    latest_fs_df = get_fs_data_from_pit(stock_list, selected_analysis_date, use_cache)
     
     if latest_fs_df.empty or latest_fs_df.dropna().empty:
         print("사용 가능한 재무 데이터가 없어 분석을 중단합니다."); return pd.DataFrame(), None
