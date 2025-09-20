@@ -196,7 +196,7 @@ def _fetch_and_prepare_data(start_date, end_date):
     
     return final_df
 
-def get_preprocessed_data(start_date, end_date):
+def get_preprocessed_data(start_date, end_date, use_cache=True):
     """메모리 최적화된 데이터 전처리 함수"""
     os.makedirs(CACHE_DIR, exist_ok=True)
     cache = get_cache()
@@ -211,15 +211,16 @@ def get_preprocessed_data(start_date, end_date):
     
     is_today_analysis = actual_trading_date == today
     
-    # 캐시 키 생성
-    cache_params = {
-        'start_date': start_date,
-        'end_date': end_date,
-        'function': 'get_preprocessed_data'
-    }
-    
-    # 오늘 날짜 분석이 아닌 경우에만 캐시에서 조회 시도
-    if not is_today_analysis:
+    # 캐시 사용 여부 확인
+    if not use_cache:
+        print(f"🔄 주식추천 페이지: 정합성 있는 실시간 데이터 수집을 위해 캐시를 우회합니다 ({start_date} ~ {end_date})")
+    elif not is_today_analysis:
+        # 캐시 키 생성
+        cache_params = {
+            'start_date': start_date,
+            'end_date': end_date,
+            'function': 'get_preprocessed_data'
+        }
         cached_data = cache.get('preprocessed_data', cache_params, ttl_seconds=3600)
         if cached_data is not None:
             print(f"✅ 캐시된 데이터 로딩: {start_date} ~ {end_date}")

@@ -328,7 +328,7 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
     except Exception as e:
         return None, None
 
-def fetch_all_data(stock_list, selected_analysis_date):
+def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     today = datetime.now()
     end_date_for_fetch = today.strftime('%Y-%m-%d')
     start_date_for_fetch = (today - timedelta(days=450)).strftime('%Y-%m-%d')
@@ -360,7 +360,11 @@ def fetch_all_data(stock_list, selected_analysis_date):
     today = datetime.now().date()
     is_today_analysis = actual_trading_date == today
     
-    if is_today_analysis:
+    # 캐시 사용 여부에 따른 거시경제 데이터 수집
+    if not use_cache:
+        log_info("🔄 주식추천 페이지: 정합성 있는 실시간 거시경제 데이터를 수집합니다")
+        macro_df = _fetch_macro_data(start_date_for_fetch, end_date_for_fetch)
+    elif is_today_analysis:
         log_info("🔄 오늘 날짜 분석: 거시경제 데이터를 실시간으로 수집합니다")
         macro_df = _fetch_macro_data(start_date_for_fetch, end_date_for_fetch)
     else:

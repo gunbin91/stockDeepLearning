@@ -57,6 +57,210 @@ iframe {
 # --- 설정 ---
 MODEL_PATH = os.path.join(os.path.dirname(__file__), 'data', 'stock_prediction_model_rf_upgraded.joblib')
 
+# --- 공통 함수들 ---
+def initialize_session_state():
+    """세션 상태 초기화"""
+    if 'analysis_result' not in st.session_state:
+        st.session_state.analysis_result = None
+    if 'market_condition' not in st.session_state:
+        st.session_state.market_condition = None
+    if 'analysis_date' not in st.session_state:
+        st.session_state.analysis_date = None
+    if 'cached_features_df' not in st.session_state:
+        cached_features_path = os.path.join(os.path.dirname(__file__), 'cache', 'cached_features.json')
+        if os.path.exists(cached_features_path):
+            try:
+                st.session_state.cached_features_df = pd.read_json(cached_features_path, orient='records', dtype={'종목코드': str})
+            except Exception as e:
+                import traceback
+                error_msg = f"캐시된 피처 데이터를 불러오는 데 실패했습니다: {e}"
+                print(f"⚠️ [WARNING] {error_msg}")
+                print(f"⚠️ [WARNING] 상세 오류 정보:")
+                print(traceback.format_exc())
+                st.warning(error_msg)
+        else:
+            st.session_state.cached_features_df = pd.DataFrame()
+
+def clear_analysis_state():
+    """분석 상태 초기화"""
+    st.session_state.analysis_result = None
+    st.session_state.market_condition = None
+    st.session_state.analysis_date = None
+    if 'selected_stock' in st.session_state:
+        del st.session_state['selected_stock']
+
+def format_price_with_change(row):
+    """가격과 등락율을 함께 포맷팅"""
+    price = f"{int(row['현재가']):,}"
+    change_percent = row['등락율']
+    if pd.isna(change_percent): 
+        return f"{price}원"
+    sign = '+' if change_percent > 0 else ''
+    formatted_change = f"{sign}{change_percent:.2f}%"
+    return f"{price}원 ({formatted_change})"
+
+def format_change_rate(change_percent):
+    """등락율 포맷팅"""
+    if pd.isna(change_percent):
+        return "N/A"
+    sign = '+' if change_percent > 0 else ''
+    return f"{sign}{change_percent:.2f}%"
+
+def highlight_change(row):
+    """데이터프레임 행 스타일링"""
+    styles = ['' for _ in row.index]
+    
+    # 전날 종가 대비 등락율이 있으면 그것을 사용, 없으면 기존 등락율 사용
+    if '전날종가대비등락율' in row.index:
+        change_percent = row['전날종가대비등락율']
+    elif '등락율' in row.index:
+        change_percent = row['등락율']
+    else:
+        change_percent = None
+        
+    if pd.notna(change_percent):
+        # 현재가(원) 컬럼에 색상 적용
+        if '현재가(원)' in row.index:
+            price_col_index = row.index.get_loc('현재가(원)')
+            if change_percent > 0:
+                styles[price_col_index] = 'color: #d32f2f;'
+            elif change_percent < 0:
+                styles[price_col_index] = 'color: #1976d2;'
+        
+        # 등락율(%) 컬럼에도 색상 적용
+        if '등락율(%)' in row.index:
+            change_rate_col_index = row.index.get_loc('등락율(%)')
+            if change_percent > 0:
+                styles[change_rate_col_index] = 'color: #d32f2f;'
+            elif change_percent < 0:
+                styles[change_rate_col_index] = 'color: #1976d2;'
+    return styles
+
+def load_cached_analysis_result():
+    """캐시된 분석 결과 로드"""
+    result_path = os.path.join(os.path.dirname(__file__), 'cache', 'analysis_result.json')
+    market_path = os.path.join(os.path.dirname(__file__), 'cache', 'market_condition.json')
+    
+    if os.path.exists(result_path) and os.path.exists(market_path):
+        try:
+            # 기존 분석 결과 로드
+            final_df = pd.read_json(result_path, orient='records')
+            with open(market_path, 'r', encoding='utf-8') as f:
+                st.session_state.market_condition = json.load(f)
+
+            # 날짜 형식 변환
+            final_df['date'] = pd.to_datetime(final_df['date'])
+            st.session_state.analysis_date = final_df['date'].iloc[0].strftime('%Y년 %m월 %d일')
+
+            # 데이터프레임 후처리
+            display_df = final_df.copy()
+            if 'ml_pred_proba' in display_df.columns:
+                display_df['ml_pred_proba'] = display_df['ml_pred_proba'] * 100
+            
+            display_df['등락율'] = ((display_df['현재가'] - display_df['기준일가']) / display_df['기준일가']) * 100
+            display_df['현재가(원)_formatted'] = display_df.apply(format_price_with_change, axis=1)
+            
+            # 전날 종가 대비 등락율 계산 (증권사 표준 방식)
+            if '전날종가' in display_df.columns:
+                display_df['전날종가대비등락율'] = ((display_df['현재가'] - display_df['전날종가']) / display_df['전날종가']) * 100
+                display_df['등락율(%)'] = display_df['전날종가대비등락율'].apply(format_change_rate)
+            else:
+                # 전날종가 데이터가 없는 경우 기존 로직 사용 (분석기준일 대비)
+                display_df['등락율(%)'] = display_df['등락율'].apply(format_change_rate)
+
+            rename_map = { '현재가': '현재가(원)', '시가총액': '시가총액(억)',  'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(원)'}
+            display_df.rename(columns=rename_map, inplace=True)
+            
+            display_columns = [ '최종순위', '종목명', '종목코드', '현재가(원)_formatted', '등락율(%)', '기준일가(원)', '최종점수(점)', '상승확률(%)', '변동성(점)', '시가총액(억)']
+            
+            st.session_state.analysis_result = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(원)_formatted': '현재가(원)'})
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"기존 분석 결과를 불러오는 데 실패했습니다: {e}"
+            print(f"⚠️ [WARNING] {error_msg}")
+            print(f"⚠️ [WARNING] 상세 오류 정보:")
+            print(traceback.format_exc())
+            # 오류가 발생해도 앱은 계속 실행되도록 함
+
+def display_market_condition():
+    """시장 현황 표시"""
+    market_data = st.session_state.market_condition
+    if market_data:
+        st.subheader("📈 분석 시점 시장 현황")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric(label="KOSPI", value=f"{market_data.get('KOSPI', 0):,.2f}", delta=f"{market_data.get('KOSPI_pct_1d', 0):.2%}")
+        with col2:
+            st.metric(label="USD/KRW 환율", value=f"{market_data.get('USDKRW', 0):,.2f} 원", delta=f"{market_data.get('USDKRW_pct_1d', 0):.2%}")
+        with col3:
+            st.metric(label="VIX (변동성 지수)", value=f"{market_data.get('VIX', 0):,.2f}", delta=f"{market_data.get('VIX_pct_1d', 0):.2%}", delta_color="inverse")
+        st.markdown("---")
+
+def display_stock_table(results_df):
+    """주식 테이블 표시"""
+    st.info("테이블의 행을 클릭하면 아래에 상세 차트가 나타납니다.")
+    
+    # 스타일링 적용
+    styled_df = results_df.style.apply(highlight_change, axis=1)
+
+    st.dataframe(
+        styled_df,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="selected_stock",
+        hide_index=True,
+        column_config={
+            "종목코드": None,
+            "등락율": None,
+            "전날종가대비등락율": None,
+        },
+        width='stretch'
+    )
+
+def display_stock_chart_and_features(results_df):
+    """선택된 종목의 차트와 피처 표시"""
+    if st.session_state.selected_stock and st.session_state.selected_stock.get("selection", {}).get("rows"):
+        try:
+            selected_index = st.session_state.selected_stock["selection"]["rows"][0]
+            selected_row = results_df.iloc[selected_index]
+            ticker_code = str(selected_row['종목코드'])
+            stock_name = selected_row['종목명']
+            
+            st.markdown("---")
+            st.subheader(f"📈 [{stock_name}] 상세 차트")
+            
+            with st.spinner(f"'{stock_name}'의 상세 차트 데이터를 불러오는 중..."):
+                fig = create_stock_chart(ticker_code, stock_name)
+                
+                if fig:
+                    st.plotly_chart(fig, width='stretch')
+
+                    # 피처 데이터 표시 로직
+                    if not st.session_state.cached_features_df.empty:
+                        selected_stock_features = st.session_state.cached_features_df[st.session_state.cached_features_df['종목코드'] == str(ticker_code).zfill(6)]
+                        
+                        if not selected_stock_features.empty:
+                            st.subheader(f"📊 {stock_name} ({ticker_code}) 분석 피처 데이터")
+                            
+                            display_features = selected_stock_features.drop(columns=['종목코드', 'date'], errors='ignore')
+                            transposed_df = display_features.transpose()
+                            transposed_df.columns = ['피처 값']
+                            transposed_df.fillna("N/A", inplace=True)
+                            transposed_df = transposed_df.astype(str)
+                            
+                            st.dataframe(transposed_df, width='stretch')
+                        else:
+                            st.info(f"{stock_name} ({ticker_code})에 대한 피처 데이터를 찾을 수 없습니다.")
+                    else:
+                        st.info("캐시된 피처 데이터가 없습니다. 분석을 먼저 실행해주세요.")
+                else:
+                    st.warning("차트를 표시할 수 없습니다.")
+        except (KeyError, IndexError, ValueError) as e: 
+            st.error(f"선택된 행의 인덱스를 처리하는 중 오류가 발생했습니다: {e}. 다시 시도해주세요.")
+        except Exception as e:
+            st.error(f"차트 표시 중 오류 발생: {e}")
+
 
 # --- 차트 생성 함수 (요청사항 반영) ---
 @st.cache_data(ttl=3600) # 1시간 캐싱
@@ -266,97 +470,12 @@ def run_stock_recommendation():
     # tqdm 진행률 표시줄을 식별하기 위한 정규표현식 (백테스팅에서 복사)
     TQDM_REGEX = re.compile(r'\s*\d{1,3}%|.*')
 
-    if 'analysis_result' not in st.session_state:
-        st.session_state.analysis_result = None
-    if 'market_condition' not in st.session_state:
-        st.session_state.market_condition = None
-    if 'analysis_date' not in st.session_state:
-        st.session_state.analysis_date = None
-    if 'cached_features_df' not in st.session_state:
-        cached_features_path = os.path.join(os.path.dirname(__file__), 'cache', 'cached_features.json')
-        if os.path.exists(cached_features_path):
-            try:
-                # JSON 로드 시 종목코드를 문자열로 유지
-                st.session_state.cached_features_df = pd.read_json(cached_features_path, orient='records', dtype={'종목코드': str})
-            except Exception as e:
-                import traceback
-                error_msg = f"캐시된 피처 데이터를 불러오는 데 실패했습니다: {e}"
-                print(f"⚠️ [WARNING] {error_msg}")
-                print(f"⚠️ [WARNING] 상세 오류 정보:")
-                print(traceback.format_exc())
-                st.warning(error_msg)
-        else:
-            st.session_state.cached_features_df = pd.DataFrame()
+    # 세션 상태 초기화
+    initialize_session_state()
     
     # 기존 분석 결과가 있으면 자동으로 로드
     if st.session_state.analysis_result is None:
-        result_path = os.path.join(os.path.dirname(__file__), 'cache', 'analysis_result.json')
-        market_path = os.path.join(os.path.dirname(__file__), 'cache', 'market_condition.json')
-        
-        if os.path.exists(result_path) and os.path.exists(market_path):
-            try:
-                # 기존 분석 결과 로드
-                final_df = pd.read_json(result_path, orient='records')
-                with open(market_path, 'r', encoding='utf-8') as f:
-                    st.session_state.market_condition = json.load(f)
-
-                # 날짜 형식 변환
-                final_df['date'] = pd.to_datetime(final_df['date'])
-                st.session_state.analysis_date = final_df['date'].iloc[0].strftime('%Y년 %m월 %d일')
-
-                # 데이터프레임 후처리
-                display_df = final_df.copy()
-                if 'ml_pred_proba' in display_df.columns:
-                    display_df['ml_pred_proba'] = display_df['ml_pred_proba'] * 100
-                
-                display_df['등락율'] = ((display_df['현재가'] - display_df['기준일가']) / display_df['기준일가']) * 100
-                
-                def format_price_with_change(row):
-                    price = f"{int(row['현재가']):,}"
-                    change_percent = row['등락율']
-                    if pd.isna(change_percent): return f"{price}원"
-                    sign = '+' if change_percent > 0 else ''
-                    formatted_change = f"{sign}{change_percent:.2f}%"
-                    return f"{price}원 ({formatted_change})"
-
-                display_df['현재가(원)_formatted'] = display_df.apply(format_price_with_change, axis=1)
-                
-                # 전날 종가 대비 등락율 계산 (증권사 표준 방식)
-                if '전날종가' in display_df.columns:
-                    display_df['전날종가대비등락율'] = ((display_df['현재가'] - display_df['전날종가']) / display_df['전날종가']) * 100
-                    
-                    # 등락율 컬럼 포맷팅
-                    def format_change_rate(change_percent):
-                        if pd.isna(change_percent):
-                            return "N/A"
-                        sign = '+' if change_percent > 0 else ''
-                        return f"{sign}{change_percent:.2f}%"
-                    
-                    display_df['등락율(%)'] = display_df['전날종가대비등락율'].apply(format_change_rate)
-                else:
-                    # 전날종가 데이터가 없는 경우 기존 로직 사용 (분석기준일 대비)
-                    def format_change_rate(change_percent):
-                        if pd.isna(change_percent):
-                            return "N/A"
-                        sign = '+' if change_percent > 0 else ''
-                        return f"{sign}{change_percent:.2f}%"
-                    
-                    display_df['등락율(%)'] = display_df['등락율'].apply(format_change_rate)
-
-                rename_map = { '현재가': '현재가(원)', '시가총액': '시가총액(억)',  'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(원)'}
-                display_df.rename(columns=rename_map, inplace=True)
-                
-                display_columns = [ '최종순위', '종목명', '종목코드', '현재가(원)_formatted', '등락율(%)', '기준일가(원)', '최종점수(점)', '상승확률(%)', '변동성(점)', '시가총액(억)']
-                
-                st.session_state.analysis_result = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(원)_formatted': '현재가(원)'})
-                
-            except Exception as e:
-                import traceback
-                error_msg = f"기존 분석 결과를 불러오는 데 실패했습니다: {e}"
-                print(f"⚠️ [WARNING] {error_msg}")
-                print(f"⚠️ [WARNING] 상세 오류 정보:")
-                print(traceback.format_exc())
-                # 오류가 발생해도 앱은 계속 실행되도록 함
+        load_cached_analysis_result()
 
     # start_analysis 변수 초기화
     start_analysis = False
@@ -378,19 +497,11 @@ def run_stock_recommendation():
         start_new_analysis = st.button("새로운 분석 시작", type="primary")
     with col2:
         if st.button("결과 초기화"):
-            st.session_state.analysis_result = None
-            st.session_state.market_condition = None
-            st.session_state.analysis_date = None
-            if 'selected_stock' in st.session_state:
-                del st.session_state['selected_stock']
+            clear_analysis_state()
             st.rerun()
     
     if start_new_analysis:
-        st.session_state.analysis_result = None
-        st.session_state.market_condition = None
-        st.session_state.analysis_date = None
-        if 'selected_stock' in st.session_state:
-            del st.session_state['selected_stock']
+        clear_analysis_state()
         # 새로운 분석 시작 플래그 설정
         start_analysis = True
     
@@ -401,118 +512,16 @@ def run_stock_recommendation():
         analysis_date_str = st.session_state.get('analysis_date', "알 수 없는 날짜")
         st.success(f"📊 기존 분석 결과가 있습니다. (분석 기준일: {analysis_date_str}) 아래 목록에서 종목을 클릭하여 상세 차트를 확인하세요.")
         
-        market_data = st.session_state.market_condition
-        if market_data:
-            st.subheader("📈 분석 시점 시장 현황")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric(label="KOSPI", value=f"{market_data.get('KOSPI', 0):,.2f}", delta=f"{market_data.get('KOSPI_pct_1d', 0):.2%}")
-            with col2:
-                st.metric(label="USD/KRW 환율", value=f"{market_data.get('USDKRW', 0):,.2f} 원", delta=f"{market_data.get('USDKRW_pct_1d', 0):.2%}")
-            with col3:
-                st.metric(label="VIX (변동성 지수)", value=f"{market_data.get('VIX', 0):,.2f}", delta=f"{market_data.get('VIX_pct_1d', 0):.2%}", delta_color="inverse")
-            st.markdown("---")
+        # 시장 현황 표시
+        display_market_condition()
 
         results_df = st.session_state.analysis_result
         
-        st.info("테이블의 행을 클릭하면 아래에 상세 차트가 나타납니다.")
-        
-        # 스타일링 함수 정의
-        def highlight_change(row):
-            styles = ['' for _ in row.index] # 모든 컬럼에 대한 기본 스타일
-            
-            # 전날 종가 대비 등락율이 있으면 그것을 사용, 없으면 기존 등락율 사용
-            if '전날종가대비등락율' in row.index:
-                change_percent = row['전날종가대비등락율']
-            elif '등락율' in row.index:
-                change_percent = row['등락율']
-            else:
-                change_percent = None
-                
-            if pd.notna(change_percent):
-                # 현재가(원) 컬럼에 색상 적용
-                if '현재가(원)' in row.index:
-                    price_col_index = row.index.get_loc('현재가(원)')
-                    if change_percent > 0:
-                        styles[price_col_index] = 'color: #d32f2f;'
-                    elif change_percent < 0:
-                        styles[price_col_index] = 'color: #1976d2;'
-                
-                # 등락율(%) 컬럼에도 색상 적용
-                if '등락율(%)' in row.index:
-                    change_rate_col_index = row.index.get_loc('등락율(%)')
-                    if change_percent > 0:
-                        styles[change_rate_col_index] = 'color: #d32f2f;'
-                    elif change_percent < 0:
-                        styles[change_rate_col_index] = 'color: #1976d2;'
-            return styles
-
-        # '등락율'이 포함된 전체 데이터프레임에 스타일 적용
-        styled_df = results_df.style.apply(highlight_change, axis=1)
-
-        st.dataframe(
-            styled_df,
-            on_select="rerun",
-            selection_mode="single-row",
-            key="selected_stock",
-            hide_index=True,
-            # Streamlit의 column_config를 사용하여 UI에서만 특정 컬럼 숨기기
-            column_config={
-                "종목코드": None,
-                "등락율": None,
-                "전날종가대비등락율": None,
-            },
-            width='stretch'
-        )
+        # 주식 테이블 표시
+        display_stock_table(results_df)
         
         # 선택된 종목의 상세 차트 표시
-        if st.session_state.selected_stock and st.session_state.selected_stock.get("selection", {}).get("rows"):
-            try:
-                selected_index = st.session_state.selected_stock["selection"]["rows"][0]
-                selected_row = results_df.iloc[selected_index]
-                ticker_code = str(selected_row['종목코드']) # 종목코드를 문자열로 명시적 변환
-                stock_name = selected_row['종목명']
-                
-                st.markdown("---")
-                st.subheader(f"📈 [{stock_name}] 상세 차트")
-                
-                with st.spinner(f"'{stock_name}'의 상세 차트 데이터를 불러오는 중..."):
-                    fig = create_stock_chart(ticker_code, stock_name)
-                    
-                    if fig:
-                        st.plotly_chart(fig, width='stretch')
-
-                        # 피처 데이터 표시 로직 안정화
-                        if not st.session_state.cached_features_df.empty:
-                            # 종목코드는 항상 6자리 문자열로 비교
-                            selected_stock_features = st.session_state.cached_features_df[st.session_state.cached_features_df['종목코드'] == str(ticker_code).zfill(6)]
-                            
-                            if not selected_stock_features.empty:
-                                st.subheader(f"📊 {stock_name} ({ticker_code}) 분석 피처 데이터")
-                                
-                                display_features = selected_stock_features.drop(columns=['종목코드', 'date'], errors='ignore')
-                                
-                                # 1. 행/열 전환
-                                transposed_df = display_features.transpose()
-                                # 2. 열 이름 설정
-                                transposed_df.columns = ['피처 값']
-                                # 3. Null 값을 'N/A' 문자열로 채우기
-                                transposed_df.fillna("N/A", inplace=True)
-                                # 4. 모든 값을 문자열로 변환하여 타입 일관성 확보 (오류 방지)
-                                transposed_df = transposed_df.astype(str)
-                                
-                                st.dataframe(transposed_df, width='stretch')
-                            else:
-                                st.info(f"{stock_name} ({ticker_code})에 대한 피처 데이터를 찾을 수 없습니다.")
-                        else:
-                            st.info("캐시된 피처 데이터가 없습니다. 분석을 먼저 실행해주세요.")
-                    else:
-                        st.warning("차트를 표시할 수 없습니다.")
-            except (KeyError, IndexError, ValueError) as e: 
-                st.error(f"선택된 행의 인덱스를 처리하는 중 오류가 발생했습니다: {e}. 다시 시도해주세요.")
-                pass
-            except Exception as e:
-                st.error(f"차트 표시 중 오류 발생: {e}")
+        display_stock_chart_and_features(results_df)
         
     
     else:

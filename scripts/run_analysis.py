@@ -65,7 +65,8 @@ def run_analysis(analysis_date_str):
 
         log_info("재무/가격 데이터 수집 및 기술적 지표 계산 중... (시간이 다소 소요될 수 있습니다)")
         try:
-            feature_df, actual_analysis_date = data_fetcher.fetch_all_data(stock_list_df, analysis_date)
+            # 주식추천 페이지에서는 캐시를 사용하지 않고 실시간 데이터 수집
+            feature_df, actual_analysis_date = data_fetcher.fetch_all_data(stock_list_df, analysis_date, use_cache=False)
         except DataFetchError as e:
             log_error(f"데이터 수집 실패: {e}")
             raise AnalysisError(f"데이터 수집 실패: {e.message}", step="data_fetch")
