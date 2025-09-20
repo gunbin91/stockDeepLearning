@@ -13,7 +13,6 @@ import encoding_utils  # 인코딩 유틸리티 임포트
 
 # 추가 인코딩 설정 (한글 깨짐 방지)
 import locale
-import codecs
 
 # 시스템 인코딩을 UTF-8로 강제 설정
 try:

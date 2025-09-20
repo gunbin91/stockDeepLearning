@@ -11,7 +11,6 @@ import os
 import sys
 from datetime import datetime, timedelta
 import time
-import config
 import gc
 from logger import log_info, log_warning, log_error, log_critical
 from exceptions import DataFetchError, DataValidationError

@@ -8,7 +8,6 @@ import pandas_ta as ta
 import concurrent.futures
 from tqdm import tqdm
 import os
-import config
 import gc
 
 from scoring import calculate_factor_scores
