@@ -179,21 +179,56 @@ def _get_historical_financial_data(stock_list, selected_analysis_date):
     log_info(f"✅ 사용 가능한 재무 지표 처리 완료: {len(result_df.dropna())}개 기업")
     return result_df
 
-@cached("stock_list", ttl_seconds=86400)  # 24시간 캐시
-def fetch_stock_list():
-    log_info("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보 수집 (KRX-MARCAP)...")
+def _apply_common_stock_filters(df):
+    """공통 주식 필터링 로직"""
+    if df.empty:
+        return df
+    
+    # 스팩, 리츠 제외
+    df = df[~df['Name'].str.contains('스팩|리츠', na=False)].copy()
+    
+    # 상장주식수가 있는 경우만 필터링
+    if 'Stocks' in df.columns:
+        df = df[df['Stocks'] > 0]
+    
+    return df
+
+def _get_stock_list_from_marcap(analysis_date=None):
+    """KRX-MARCAP에서 주식 목록 가져오기 (통일된 함수)"""
     try:
-        df_marcap = fdr.StockListing('KRX-MARCAP')
-        df_marcap = df_marcap[~df_marcap['Name'].str.contains('스팩|리츠', na=False)].copy()
+        if analysis_date:
+            # 과거 날짜용
+            date_str = analysis_date.strftime('%Y%m%d')
+            log_info(f"FinanceDataReader를 통해 {date_str} 기준 종목 시가총액 정보 수집 (KRX-MARCAP)...")
+            df_marcap = fdr.StockListing('KRX-MARCAP', date_str)
+        else:
+            # 현재 날짜용
+            log_info("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보 수집 (KRX-MARCAP)...")
+            df_marcap = fdr.StockListing('KRX-MARCAP')
+        
+        # 공통 필터링 적용
+        df_marcap = _apply_common_stock_filters(df_marcap)
+        
+        # 컬럼명 정리
         stock_list = df_marcap[['Code', 'Name', 'Stocks']].copy()
         stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명', 'Stocks': '상장주식수'}, inplace=True)
-        stock_list = stock_list[stock_list['상장주식수'] > 0]
+        
         log_info(f"총 {len(stock_list)}개 종목을 찾았습니다.")
         return stock_list
+        
     except Exception as e:
         error_msg = f"FinanceDataReader API 통신 실패 (KRX-MARCAP): {e}"
         log_error(error_msg)
         raise DataFetchError(error_msg, source="FinanceDataReader")
+
+@cached("stock_list", ttl_seconds=86400)  # 24시간 캐시
+def fetch_stock_list():
+    """현재 날짜 기준 주식 목록 가져오기 (캐시 적용)"""
+    return _get_stock_list_from_marcap()
+
+def fetch_stock_list_for_date(analysis_date):
+    """특정 날짜 기준 주식 목록 가져오기 (캐시 없음)"""
+    return _get_stock_list_from_marcap(analysis_date)
 
 def _fetch_macro_data(start_date, end_date):
     log_info(f"거시 경제 지표 데이터 수집 중 ({start_date} ~ {end_date})...")
@@ -306,16 +341,15 @@ def fetch_all_data(stock_list, selected_analysis_date):
     if selected_analysis_date.date() < today.date():
         print(f"과거 분석(기준일={selected_analysis_date.strftime('%Y-%m-%d')}): 기준일의 시가총액 데이터를 수집합니다.")
         try:
-            df_marcap_past = fdr.StockListing('KRX-MARCAP', selected_analysis_date.strftime('%Y%m%d'))
-            df_marcap_past.rename(columns={'Code': '종목코드'}, inplace=True)
+            # 통일된 함수 사용
+            df_marcap_past = fetch_stock_list_for_date(selected_analysis_date)
             
             stock_list = pd.merge(
                 stock_list[['종목코드', '종목명']],
-                df_marcap_past[['종목코드', 'Marcap', 'Stocks']],
+                df_marcap_past[['종목코드', '상장주식수']],
                 on='종목코드',
                 how='inner'
             )
-            stock_list.rename(columns={'Stocks': '상장주식수', 'Marcap': '시가총액_기준일'}, inplace=True)
             print(f"✅ 기준일({selected_analysis_date.strftime('%Y-%m-%d')})에 존재했던 {len(stock_list)}개 종목으로 필터링되었습니다.")
         except Exception as e:
             print(f"경고: 기준일({selected_analysis_date.strftime('%Y-%m-%d')})의 시가총액 데이터를 가져오는 데 실패했습니다: {e}")
@@ -356,10 +390,7 @@ def fetch_all_data(stock_list, selected_analysis_date):
     total_batches = (len(stock_records) + batch_size - 1) // batch_size
     total_stocks = len(stock_records)
     
-    log_info("📈 주식 분석을 위한 종목 데이터 수집을 시작합니다...")
-    log_info(f"   📊 총 {total_stocks:,}개 종목의 거래 데이터를 수집합니다")
-    log_info(f"   🔄 {total_batches}개 그룹으로 나누어 안전하게 처리합니다")
-    log_info("   ⏱️ 예상 소요 시간: 약 5-10분 (API 응답 속도에 따라 달라질 수 있습니다)")
+    log_info(f"📈 주식 분석 시작: {total_stocks:,}개 종목을 {total_batches}개 그룹으로 처리 (예상 5-10분)")
     print()
     
     for i in range(0, len(stock_records), batch_size):
@@ -368,9 +399,9 @@ def fetch_all_data(stock_list, selected_analysis_date):
         batch_start = i + 1
         batch_end = min(i + batch_size, total_stocks)
         
-        log_info(f"📊 종목 그룹 {current_batch}/{total_batches} 처리 중... ({batch_start:,}~{batch_end:,}번째 종목)")
-        log_info(f"   🔍 각 종목의 가격, 거래량, 기술적 지표를 계산하고 있습니다...")
-        log_info(f"   📈 수집 데이터: 주가, 거래량, RSI, MACD, 볼린저밴드, 이동평균선 등")
+        # 첫 번째 그룹에서만 상세 설명 표시
+        if current_batch == 1:
+            log_info("🔍 가격, 거래량, 기술적 지표 계산 중...")
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:  # 워커 수 감소
             future_to_stock = {executor.submit(fetch_and_process_ticker_data, r, start_date_for_fetch, end_date_for_fetch, selected_analysis_date, latest_fs_df): r for r in batch}
@@ -379,11 +410,11 @@ def fetch_all_data(stock_list, selected_analysis_date):
             total_processed = (current_batch - 1) * batch_size
             total_remaining = total_stocks - total_processed
             
-            # 간단한 진행률 표시 (개행 문제 해결)
+            # 통합된 진행률 표시
             completed_count = 0
             total_count = len(batch)
             
-            print(f"   └─ 그룹 {current_batch}/{total_batches} - 종목 분석 진행률: 0% (0/{total_count})", end='', flush=True)
+            print(f"📊 그룹 {current_batch}/{total_batches} - 진행률: 0% (0/{total_count})", end='', flush=True)
             
             for future in concurrent.futures.as_completed(future_to_stock):
                 try:
@@ -396,12 +427,12 @@ def fetch_all_data(stock_list, selected_analysis_date):
                     progress_percent = (completed_count / total_count) * 100
                     
                     # 같은 줄에서 진행률 업데이트
-                    print(f"\r   └─ 그룹 {current_batch}/{total_batches} - 종목 분석 진행률: {progress_percent:.0f}% ({completed_count}/{total_count})", end='', flush=True)
+                    print(f"\r📊 그룹 {current_batch}/{total_batches} - 진행률: {progress_percent:.0f}% ({completed_count}/{total_count})", end='', flush=True)
                     
                 except Exception: 
                     completed_count += 1
                     progress_percent = (completed_count / total_count) * 100
-                    print(f"\r   └─ 그룹 {current_batch}/{total_batches} - 종목 분석 진행률: {progress_percent:.0f}% ({completed_count}/{total_count})", end='', flush=True)
+                    print(f"\r📊 그룹 {current_batch}/{total_batches} - 진행률: {progress_percent:.0f}% ({completed_count}/{total_count})", end='', flush=True)
                     continue
             
             # 완료 후 개행
@@ -413,15 +444,10 @@ def fetch_all_data(stock_list, selected_analysis_date):
         
         success_count = len(all_feature_data)
         progress_percent = (current_batch / total_batches) * 100
-        log_info(f"   ✅ 그룹 {current_batch}/{total_batches} 완료! ({progress_percent:.1f}% 진행)")
-        log_info(f"   📊 현재까지 {success_count:,}개 종목의 분석 데이터를 수집했습니다")
-        log_info(f"   💾 메모리 정리 및 API 부하 방지를 위해 잠시 대기 중...")
-        print()
+        log_info(f"   ✅ 그룹 {current_batch}/{total_batches} 완료! ({progress_percent:.1f}% 진행, {success_count:,}개 종목 수집)")
     
-    log_info("🎉 종목 데이터 수집이 모두 완료되었습니다!")
-    log_info(f"   📊 총 {len(all_feature_data):,}개 종목의 분석 데이터를 준비했습니다")
-    log_info("   🔄 데이터 정제 및 거시경제 지표 병합을 시작합니다...")
-    print()
+    log_info(f"🎉 종목 데이터 수집 완료! 총 {len(all_feature_data):,}개 종목")
+    log_info("🔄 데이터 정제 및 거시경제 지표 병합 중...")
     
     if not all_feature_data: return pd.DataFrame(), None
     final_df = pd.DataFrame(all_feature_data)

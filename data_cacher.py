@@ -37,13 +37,25 @@ except Exception as e:
     funda_df = pd.DataFrame()
 
 def fetch_stock_list():
+    """통일된 주식 목록 가져오기 (data_fetcher 모듈 사용)"""
     try:
-        df_kospi = fdr.StockListing('KOSPI'); df_kosdaq = fdr.StockListing('KOSDAQ')
-        stock_list = pd.concat([df_kospi, df_kosdaq], ignore_index=True)
-        stock_list = stock_list[~stock_list['Name'].str.contains('스팩|리츠', na=False)].copy()
-        stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명'}, inplace=True)
+        # data_fetcher의 통일된 함수 사용
+        import data_fetcher
+        stock_list = data_fetcher.fetch_stock_list()
+        # 백테스팅용으로 종목코드, 종목명만 반환
         return stock_list[['종목코드', '종목명']]
-    except Exception: return pd.DataFrame()
+    except Exception as e:
+        print(f"경고: 통일된 주식 목록 가져오기 실패, 백업 방식 사용: {e}")
+        # 백업 방식 (기존 로직)
+        try:
+            df_kospi = fdr.StockListing('KOSPI')
+            df_kosdaq = fdr.StockListing('KOSDAQ')
+            stock_list = pd.concat([df_kospi, df_kosdaq], ignore_index=True)
+            stock_list = stock_list[~stock_list['Name'].str.contains('스팩|리츠', na=False)].copy()
+            stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명'}, inplace=True)
+            return stock_list[['종목코드', '종목명']]
+        except Exception:
+            return pd.DataFrame()
 
 def _fetch_macro_data(start_date, end_date):
     print("거시 경제 지표 데이터 수집 중 (KOSPI, USD/KRW, VIX)...")

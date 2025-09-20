@@ -189,6 +189,7 @@ def create_html_report(results, output_path=REPORT_FILE):
 
     sell_log = results['trade_log'].copy()
     if not sell_log.empty:
+        # 백테스팅용 주식 목록 (캐시 없이 최신 데이터 사용)
         stock_list = data_cacher.fetch_stock_list()
         sell_log = pd.merge(sell_log, stock_list, left_on='ticker', right_on='종목코드', how='left')
         
