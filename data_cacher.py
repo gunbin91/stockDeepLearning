@@ -36,6 +36,303 @@ except Exception as e:
     print(traceback.format_exc())
     funda_df = pd.DataFrame()
 
+def auto_update_financial_db():
+    """재무 데이터베이스 자동 업데이트"""
+    if not os.path.exists(FINANCIAL_DB_PATH):
+        print("⚠️ 재무 데이터베이스 파일이 없습니다. 초기 생성이 필요합니다.")
+        return False
+    
+    try:
+        # 현재 최신 날짜 확인
+        funda_df = pd.read_parquet(FINANCIAL_DB_PATH)
+        funda_df['date'] = pd.to_datetime(funda_df['date'])
+        latest_date = funda_df['date'].max().date()
+        yesterday = datetime.now().date() - timedelta(days=1)
+        
+        print(f"📊 재무 데이터베이스 최신 날짜: {latest_date}")
+        print(f"📅 어제 날짜: {yesterday}")
+        
+        # 어제까지 데이터가 없으면 수집
+        if latest_date < yesterday:
+            print(f"🔄 재무 데이터베이스 업데이트 필요: {latest_date} → {yesterday}")
+            
+            missing_start = (latest_date + timedelta(days=1)).strftime('%Y%m%d')
+            missing_end = yesterday.strftime('%Y%m%d')
+            
+            print(f"📅 누락 기간: {missing_start} ~ {missing_end}")
+            print("⏳ 재무 데이터 수집 중... (시간이 오래 걸릴 수 있습니다)")
+            
+            # 새 데이터 수집 (build_db_pykrx.py 로직 활용)
+            new_data = _collect_financial_data_period(missing_start, missing_end)
+            
+            if not new_data.empty:
+                # 기존 데이터와 병합하여 파일 업데이트
+                updated_df = pd.concat([funda_df, new_data], ignore_index=True)
+                updated_df.sort_values(by=['date', '종목코드'], inplace=True)
+                updated_df.to_parquet(FINANCIAL_DB_PATH, index=False)
+                print(f"✅ 재무 데이터베이스 업데이트 완료: {len(new_data):,}개 새 레코드 추가")
+                return True
+            else:
+                print("❌ 재무 데이터 수집 실패")
+                return False
+        else:
+            print("✅ 재무 데이터베이스가 최신 상태입니다.")
+            return True
+            
+    except Exception as e:
+        print(f"❌ 재무 데이터베이스 업데이트 중 오류: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return False
+
+def _collect_financial_data_period(start_date, end_date):
+    """지정된 기간의 재무 데이터 수집 (build_db_pykrx.py 로직 활용)"""
+    try:
+        # 거래일 목록 조회
+        trading_days = pd.to_datetime(stock.get_market_ohlcv(start_date, end_date, "005930").index).strftime('%Y%m%d').tolist()
+        
+        all_daily_data = []
+        for day in tqdm(trading_days, desc="재무 데이터 수집"):
+            try:
+                df_fundamental = stock.get_market_fundamental(day, market="ALL")
+                
+                if df_fundamental.empty:
+                    time.sleep(0.1)
+                    continue
+                
+                if 'PBR' in df_fundamental.columns:
+                    df_fundamental = df_fundamental[df_fundamental['PBR'] > 0]
+                    
+                    if not df_fundamental.empty:
+                        df_fundamental.reset_index(inplace=True)
+                        df_fundamental.rename(columns={'티커': '종목코드'}, inplace=True)
+                        df_fundamental['date'] = pd.to_datetime(day, format='%Y%m%d')
+                        all_daily_data.append(df_fundamental)
+                
+                time.sleep(0.1)
+            except Exception:
+                continue
+        
+        if all_daily_data:
+            final_df = pd.concat(all_daily_data, ignore_index=True)
+            required_cols = ['date', '종목코드', 'PBR', 'PER', 'EPS', 'BPS', 'DIV', 'DPS']
+            final_df = final_df[[col for col in required_cols if col in final_df.columns]]
+            
+            if 'PBR' in final_df.columns and 'PER' in final_df.columns:
+                final_df['ROE'] = np.where(final_df['PER'] != 0, final_df['PBR'] / final_df['PER'], np.nan)
+            
+            final_df.sort_values(by=['date', '종목코드'], inplace=True)
+            return final_df
+        else:
+            return pd.DataFrame()
+            
+    except Exception as e:
+        print(f"❌ 재무 데이터 수집 중 오류: {e}")
+        return pd.DataFrame()
+
+def auto_update_stock_cache():
+    """주식 데이터 캐시 자동 업데이트"""
+    if not os.path.exists(CACHE_FILE_PATH):
+        print("⚠️ 주식 데이터 캐시 파일이 없습니다. 초기 생성이 필요합니다.")
+        return False
+    
+    try:
+        # 현재 최신 날짜 확인
+        df = pd.read_parquet(CACHE_FILE_PATH)
+        df['date'] = pd.to_datetime(df['date'])
+        latest_date = df['date'].max().date()
+        yesterday = datetime.now().date() - timedelta(days=1)
+        
+        print(f"📊 주식 데이터 캐시 최신 날짜: {latest_date}")
+        print(f"📅 어제 날짜: {yesterday}")
+        
+        # 어제까지 데이터가 없으면 수집
+        if latest_date < yesterday:
+            print(f"🔄 주식 데이터 캐시 업데이트 필요: {latest_date} → {yesterday}")
+            
+            missing_start = (latest_date + timedelta(days=1)).strftime('%Y-%m-%d')
+            missing_end = yesterday.strftime('%Y-%m-%d')
+            
+            print(f"📅 누락 기간: {missing_start} ~ {missing_end}")
+            print("⏳ 주식 데이터 수집 중...")
+            
+            # 새 데이터 수집 (_fetch_and_prepare_data 로직 활용)
+            new_data = _fetch_and_prepare_data(missing_start, missing_end)
+            
+            if not new_data.empty:
+                # 기존 데이터와 병합하여 파일 업데이트
+                updated_df = pd.concat([df, new_data], ignore_index=True)
+                updated_df = updated_df.drop_duplicates(subset=['date', '종목코드'], keep='last')
+                updated_df.sort_values(by=['date', '종목코드'], inplace=True)
+                updated_df.to_parquet(CACHE_FILE_PATH, index=False)
+                print(f"✅ 주식 데이터 캐시 업데이트 완료: {len(new_data):,}개 새 레코드 추가")
+                return True
+            else:
+                print("❌ 주식 데이터 수집 실패")
+                return False
+        else:
+            print("✅ 주식 데이터 캐시가 최신 상태입니다.")
+            return True
+            
+    except Exception as e:
+        print(f"❌ 주식 데이터 캐시 업데이트 중 오류: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return False
+
+def auto_update_macro_cache():
+    """거시경제 데이터 캐시 자동 업데이트"""
+    try:
+        # 거시경제 데이터는 스마트 캐시 시스템에서 TTL 기반으로 관리됨
+        # 여기서는 캐시 상태만 확인하고 필요시 새로 수집하도록 함
+        print("📊 거시경제 데이터 캐시 상태 확인 중...")
+        
+        # 스마트 캐시에서 거시경제 데이터 확인
+        cache = get_cache()
+        cache_params = {
+            'start_date': (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'),
+            'end_date': (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d'),
+            'function': 'macro_data'
+        }
+        
+        cached_macro = cache.get('macro_data', cache_params, ttl_seconds=3600)
+        if cached_macro is not None:
+            print("✅ 거시경제 데이터 캐시가 최신 상태입니다.")
+            return True
+        else:
+            print("⚠️ 거시경제 데이터 캐시가 만료되었습니다. 다음 사용 시 새로 수집됩니다.")
+            return True
+            
+    except Exception as e:
+        print(f"❌ 거시경제 데이터 캐시 확인 중 오류: {e}")
+        return False
+
+def auto_update_all_caches():
+    """모든 캐시 파일 자동 업데이트"""
+    print("🔄 캐시 파일 자동 업데이트 시작...")
+    
+    success_count = 0
+    total_count = 3
+    
+    # 1. 재무 데이터베이스 업데이트
+    print("\n1️⃣ 재무 데이터베이스 업데이트 중...")
+    if auto_update_financial_db():
+        success_count += 1
+    
+    # 2. 주식 데이터 캐시 업데이트
+    print("\n2️⃣ 주식 데이터 캐시 업데이트 중...")
+    if auto_update_stock_cache():
+        success_count += 1
+    
+    # 3. 거시경제 데이터 캐시 업데이트
+    print("\n3️⃣ 거시경제 데이터 캐시 업데이트 중...")
+    if auto_update_macro_cache():
+        success_count += 1
+    
+    print(f"\n✅ 캐시 파일 업데이트 완료: {success_count}/{total_count} 성공")
+    return success_count == total_count
+
+def create_initial_financial_db(start_date, end_date):
+    """지정된 기간의 재무 데이터베이스 초기 생성"""
+    print(f"🏗️ 재무 데이터베이스 초기 생성 시작: {start_date} ~ {end_date}")
+    
+    start_date_str = start_date.replace('-', '')
+    end_date_str = end_date.replace('-', '')
+    
+    try:
+        # 거래일 목록 조회
+        trading_days = pd.to_datetime(stock.get_market_ohlcv(start_date_str, end_date_str, "005930").index).strftime('%Y%m%d').tolist()
+        
+        all_daily_data = []
+        for day in tqdm(trading_days, desc="재무 데이터 수집"):
+            try:
+                df_fundamental = stock.get_market_fundamental(day, market="ALL")
+                
+                if df_fundamental.empty:
+                    time.sleep(0.1)
+                    continue
+                
+                if 'PBR' in df_fundamental.columns:
+                    df_fundamental = df_fundamental[df_fundamental['PBR'] > 0]
+                    
+                    if not df_fundamental.empty:
+                        df_fundamental.reset_index(inplace=True)
+                        df_fundamental.rename(columns={'티커': '종목코드'}, inplace=True)
+                        df_fundamental['date'] = pd.to_datetime(day, format='%Y%m%d')
+                        all_daily_data.append(df_fundamental)
+                
+                time.sleep(0.1)
+            except Exception:
+                continue
+        
+        if all_daily_data:
+            final_df = pd.concat(all_daily_data, ignore_index=True)
+            required_cols = ['date', '종목코드', 'PBR', 'PER', 'EPS', 'BPS', 'DIV', 'DPS']
+            final_df = final_df[[col for col in required_cols if col in final_df.columns]]
+            
+            if 'PBR' in final_df.columns and 'PER' in final_df.columns:
+                final_df['ROE'] = np.where(final_df['PER'] != 0, final_df['PBR'] / final_df['PER'], np.nan)
+            
+            final_df.sort_values(by=['date', '종목코드'], inplace=True)
+            final_df.to_parquet(FINANCIAL_DB_PATH, index=False)
+            print(f"✅ 재무 데이터베이스 초기 생성 완료: {len(final_df):,}개 레코드")
+            return True
+        else:
+            print("❌ 재무 데이터 수집 실패")
+            return False
+            
+    except Exception as e:
+        print(f"❌ 재무 데이터베이스 초기 생성 중 오류: {e}")
+        return False
+
+def create_initial_stock_cache(start_date, end_date):
+    """지정된 기간의 주식 데이터 캐시 초기 생성"""
+    print(f"🏗️ 주식 데이터 캐시 초기 생성 시작: {start_date} ~ {end_date}")
+    
+    try:
+        # _fetch_and_prepare_data 로직 활용
+        historical_df = _fetch_and_prepare_data(start_date, end_date)
+        
+        if not historical_df.empty:
+            historical_df.to_parquet(CACHE_FILE_PATH)
+            print(f"✅ 주식 데이터 캐시 초기 생성 완료: {len(historical_df):,}개 레코드")
+            return True
+        else:
+            print("❌ 주식 데이터 수집 실패")
+            return False
+            
+    except Exception as e:
+        print(f"❌ 주식 데이터 캐시 초기 생성 중 오류: {e}")
+        return False
+
+def create_initial_cache_files(start_date, end_date):
+    """지정된 기간의 모든 캐싱 파일 초기 생성"""
+    print(f"🏗️ 초기 캐싱 파일 생성 시작: {start_date} ~ {end_date}")
+    
+    success_count = 0
+    total_count = 2
+    
+    # 1. 재무 데이터베이스 생성
+    if not os.path.exists(FINANCIAL_DB_PATH):
+        print("\n1️⃣ 재무 데이터베이스 초기 생성 중...")
+        if create_initial_financial_db(start_date, end_date):
+            success_count += 1
+    else:
+        print("✅ 재무 데이터베이스가 이미 존재합니다.")
+        success_count += 1
+    
+    # 2. 주식 데이터 캐시 생성
+    if not os.path.exists(CACHE_FILE_PATH):
+        print("\n2️⃣ 주식 데이터 캐시 초기 생성 중...")
+        if create_initial_stock_cache(start_date, end_date):
+            success_count += 1
+    else:
+        print("✅ 주식 데이터 캐시가 이미 존재합니다.")
+        success_count += 1
+    
+    print(f"\n✅ 초기 캐싱 파일 생성 완료: {success_count}/{total_count} 성공")
+    return success_count == total_count
+
 def fetch_stock_list():
     """통일된 주식 목록 가져오기 (data_fetcher 모듈 사용)"""
     try:
@@ -81,16 +378,42 @@ def _fetch_macro_data(start_date, end_date):
 def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long, pbar_lock):
     ticker = stock_info['종목코드']
     try:
-        df_price = fdr.DataReader(ticker, start_date, end_date)
+        # 하이브리드 방식으로 주가 데이터 수집 (Yahoo Finance → KRX → NAVER)
+        df_price = None
+        try:
+            df_price = fdr.DataReader(ticker, start_date, end_date)
+        except:
+            try:
+                df_price = fdr.DataReader(f'KRX:{ticker}', start_date, end_date)
+            except:
+                try:
+                    df_price = fdr.DataReader(f'NAVER:{ticker}', start_date, end_date)
+                except:
+                    df_price = None
+        
         if df_price is None or df_price.empty or len(df_price) < 251 + 60: return None
         df_price.rename(columns={'Open':'시가', 'Close':'종가', 'High': '고가', 'Low': '저가', 'Volume':'거래량'}, inplace=True)
         df = df_price[['시가', '종가', '고가', '저가', '거래량']].copy(); df.sort_index(inplace=True)
         
         df_marcap_ticker = df_marcap_long[df_marcap_long['Code'] == ticker].copy()
-        if df_marcap_ticker.empty: return None
+        if df_marcap_ticker.empty: 
+            # 시가총액 데이터가 없으면 이전달 데이터로 대체 시도
+            print(f"⚠️ {ticker} 종목의 시가총액 데이터가 없어 이전달 데이터로 대체를 시도합니다.")
+            return None
         df_marcap_ticker.sort_values(by='Date', inplace=True)
         df = pd.merge_asof(left=df, right=df_marcap_ticker[['Date', 'Marcap']], left_index=True, right_on='Date', direction='backward')
-        df.rename(columns={'Marcap': '시가총액'}, inplace=True); df.dropna(subset=['시가총액'], inplace=True)
+        df.rename(columns={'Marcap': '시가총액'}, inplace=True)
+        
+        # 시가총액 데이터가 None인 경우 이전달 데이터로 대체
+        if df['시가총액'].isnull().any():
+            print(f"⚠️ {ticker} 종목의 일부 시가총액 데이터가 None입니다. 이전달 데이터로 대체합니다.")
+            # 이전달 시가총액 데이터로 대체
+            df['시가총액'] = df['시가총액'].fillna(method='ffill')
+            # 여전히 None이 있으면 이전 데이터로 대체
+            if df['시가총액'].isnull().any():
+                df['시가총액'] = df['시가총액'].fillna(method='bfill')
+        
+        df.dropna(subset=['시가총액'], inplace=True)
         if df.empty: return None
         
         if not funda_df.empty:
@@ -143,16 +466,46 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
     except Exception as e:
         with pbar_lock: tqdm.write(f"⚠️ {stock_info['종목명']}({ticker}) 데이터 처리 중 오류: {e} (건너뜀)"); return None
 
+def get_marcap_dates(start_date, end_date):
+    """년도/월 비교 기반 시가총액 데이터 수집 날짜 생성"""
+    start_dt = pd.to_datetime(start_date)
+    end_dt = pd.to_datetime(end_date)
+    
+    current_year = datetime.now().year
+    current_month = datetime.now().month
+    
+    marcap_dates = []
+    
+    # 현재 년도/월인지 확인
+    if (start_dt.year == current_year and start_dt.month == current_month) or \
+       (end_dt.year == current_year and end_dt.month == current_month):
+        # 현재 월: 일별 수집 (거래일만)
+        daily_range = pd.date_range(start=start_dt, end=end_dt, freq='D')
+        for day in daily_range:
+            if day.weekday() < 5:  # 월-금 거래일만
+                marcap_dates.append(day.strftime('%Y%m%d'))
+    else:
+        # 과거 월: 월별 수집
+        monthly_dates = pd.date_range(start=start_dt, end=end_dt, freq='M')
+        marcap_dates = [date.strftime('%Y%m%d') for date in monthly_dates]
+    
+    return marcap_dates
+
 def _fetch_and_prepare_data(start_date, end_date):
     print(f"데이터 준비 중 ({start_date} ~ {end_date})...")
     stock_list = fetch_stock_list()
     if stock_list.empty: raise ValueError("종목 리스트를 가져올 수 없습니다.")
     try:
-        month_end_dates = pd.date_range(start=start_date, end=end_date, freq='M').strftime('%Y%m%d').tolist()
+        # 개선된 시가총액 데이터 수집 날짜 생성
+        marcap_dates = get_marcap_dates(start_date, end_date)
+        
+        if not marcap_dates:
+            raise Exception("수집할 시가총액 데이터 날짜가 없습니다.")
+        
         marcap_dfs = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            future_to_date = {executor.submit(fdr.StockListing, 'KRX-MARCAP', date): date for date in month_end_dates}
-            for future in tqdm(concurrent.futures.as_completed(future_to_date), total=len(month_end_dates), desc="시가총액 데이터 수집"):
+            future_to_date = {executor.submit(fdr.StockListing, 'KRX-MARCAP', date): date for date in marcap_dates}
+            for future in tqdm(concurrent.futures.as_completed(future_to_date), total=len(marcap_dates), desc="시가총액 데이터 수집"):
                 try:
                     date_str = future_to_date[future]; result_df = future.result()
                     if not result_df.empty: result_df['Date'] = pd.to_datetime(date_str); marcap_dfs.append(result_df)
@@ -196,10 +549,23 @@ def _fetch_and_prepare_data(start_date, end_date):
     
     return final_df
 
-def get_preprocessed_data(start_date, end_date, use_cache=True):
+def get_preprocessed_data(start_date, end_date, use_cache=True, auto_update=True):
     """메모리 최적화된 데이터 전처리 함수"""
     os.makedirs(CACHE_DIR, exist_ok=True)
     cache = get_cache()
+    
+    # 캐시 사용 시 자동 업데이트 실행
+    if use_cache and auto_update:
+        print("🔄 캐시 파일 자동 업데이트 확인 중...")
+        
+        # 1. 초기 캐싱 파일이 없으면 생성
+        if not os.path.exists(FINANCIAL_DB_PATH) or not os.path.exists(CACHE_FILE_PATH):
+            print("⚠️ 초기 캐싱 파일이 없습니다. 초기 생성합니다...")
+            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+            create_initial_cache_files(start_date, yesterday)
+        
+        # 2. 기존 자동 업데이트 실행
+        auto_update_all_caches()
     
     # 실제 거래일을 확인하여 오늘 날짜 분석인지 판단
     today = datetime.now().date()

@@ -65,14 +65,15 @@ def create_training_data():
     end_date_for_cacher = datetime.now().strftime('%Y-%m-%d')
     
     try:
-        final_df = data_cacher.get_preprocessed_data(start_date_for_cacher, end_date_for_cacher)
+        # 자동 업데이트 활성화하여 데이터 로딩 (2015년부터 현재까지)
+        final_df = data_cacher.get_preprocessed_data(start_date_for_cacher, end_date_for_cacher, use_cache=True, auto_update=True)
         log_memory_usage("데이터 로딩 완료")
         check_memory_and_cleanup()
     except MemoryError as e:
         log_error(f"메모리 부족으로 데이터 로딩 실패: {e}")
         log_info("   🔄 메모리 정리 후 재시도합니다...")
         safe_memory_cleanup()
-        final_df = data_cacher.get_preprocessed_data(start_date_for_cacher, end_date_for_cacher)
+        final_df = data_cacher.get_preprocessed_data(start_date_for_cacher, end_date_for_cacher, use_cache=True, auto_update=True)
         log_memory_usage("재시도 후 데이터 로딩 완료")
     
     if final_df is None or final_df.empty:

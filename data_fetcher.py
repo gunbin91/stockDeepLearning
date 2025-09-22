@@ -254,8 +254,21 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
     ticker = stock_info['종목코드']; shares = stock_info['상장주식수']
     try:
         fetch_start = (pd.to_datetime(start_date_for_fetch) - timedelta(days=60)).strftime('%Y-%m-%d')
-        df_price_full = fdr.DataReader(ticker, fetch_start, end_date_for_fetch)
-        if df_price_full.empty or len(df_price_full) < 251 + 60: return None, None
+        
+        # 하이브리드 방식으로 주가 데이터 수집 (Yahoo Finance → KRX → NAVER)
+        df_price_full = None
+        try:
+            df_price_full = fdr.DataReader(ticker, fetch_start, end_date_for_fetch)
+        except:
+            try:
+                df_price_full = fdr.DataReader(f'KRX:{ticker}', fetch_start, end_date_for_fetch)
+            except:
+                try:
+                    df_price_full = fdr.DataReader(f'NAVER:{ticker}', fetch_start, end_date_for_fetch)
+                except:
+                    df_price_full = None
+        
+        if df_price_full is None or df_price_full.empty or len(df_price_full) < 251 + 60: return None, None
         df_price_full.rename(columns={'Open':'시가', 'Close':'종가', 'High':'고가', 'Low':'저가', 'Volume':'거래량'}, inplace=True)
 
         selected_analysis_date_ts = pd.Timestamp(selected_analysis_date)

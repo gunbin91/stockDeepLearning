@@ -51,12 +51,19 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
     trade_log = []
     daily_dates = data.index.get_level_values('date').unique().sort_values()
     
+    # 로그: 백테스팅 날짜 범위 확인
+    print(f"🔍 백테스팅 날짜 범위: {daily_dates.min()} ~ {daily_dates.max()}")
+    print(f"🔍 총 백테스팅 날짜 수: {len(daily_dates)}개")
+    
     score_cols_to_log = ['final_score', 'ml_pred_proba', 'volatility_score']
 
     take_profit_multiplier = 1 + (take_profit_pct / 100)
     stop_loss_multiplier = 1 - (stop_loss_pct / 100)
 
     for date in tqdm(daily_dates, desc="상세 백테스팅 중"):
+        # 로그: 현재 처리 중인 날짜 (9월 17일 이후만)
+        if date >= pd.to_datetime('2025-09-17'):
+            print(f"🔍 백테스팅 처리 중: {date.strftime('%Y-%m-%d')}")
         daily_trades = []
         for ticker in list(portfolio.keys()):
             stock_info = portfolio[ticker]
@@ -96,6 +103,10 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         if date in data.index.get_level_values('date'):
             daily_data = data.loc[date]
             daily_data_tradable = daily_data[daily_data['거래량'] > 0]
+            
+            # 로그: 9월 17일 이후 데이터 확인
+            if date >= pd.to_datetime('2025-09-17'):
+                print(f"🔍 {date.strftime('%Y-%m-%d')} 데이터: 전체 {len(daily_data)}개, 거래가능 {len(daily_data_tradable)}개")
             
             # 1. 전체 거래 가능 종목 중에서 '최종 점수' 기준으로 상위 buy_universe_rank에 드는 종목들만 매수 고려 대상이 됩니다.
             overall_top_universe = daily_data_tradable.nlargest(buy_universe_rank, 'final_score')
@@ -146,6 +157,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                 if current_price is None:
                     current_price = info['buy_price']
                     print(f"⚠️ {ticker} 종목의 {date} 가격 데이터가 없어 매수가({current_price})로 대체합니다.")
+                    print(f"🔍 매수일: {info['buy_date']}, 매수가: {info['buy_price']}, 보유일수: {(date - info['buy_date']).days}일")
             
             current_portfolio_value += current_price * info['shares']
         total_asset = cash + current_portfolio_value
@@ -155,7 +167,15 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             entry['total_asset'] = total_asset
             trade_log.append(entry)
             
+        # 로그: 9월 17일 이후 포트폴리오 상태
+        if date >= pd.to_datetime('2025-09-17'):
+            print(f"🔍 {date.strftime('%Y-%m-%d')} 포트폴리오: 보유종목 {len(portfolio)}개, 현금 {cash:,.0f}원, 총자산 {total_asset:,.0f}원")
+            
     portfolio_ts = pd.Series(portfolio_history, index=daily_dates)
+    
+    # 로그: 백테스팅 완료 후 최종 상태
+    print(f"🔍 백테스팅 완료: 총 거래일 {len(portfolio_ts)}개, 최종 자산 {portfolio_ts.iloc[-1]:,.0f}원")
+    print(f"🔍 마지막 거래일: {portfolio_ts.index[-1].strftime('%Y-%m-%d')}")
     daily_returns = portfolio_ts.pct_change().fillna(0)
     total_return = (portfolio_ts.iloc[-1] / portfolio_ts.iloc[0]) - 1 if len(portfolio_ts) > 1 else 0
     annual_return = (1 + total_return) ** (252 / len(portfolio_ts)) - 1 if len(portfolio_ts) > 0 else 0
@@ -330,7 +350,8 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
     print(f"  - 최적 가중치를 {WEIGHTS_FILE}에서 불러왔습니다.")
     
     backtest_start_date_with_warmup = (pd.to_datetime(TEST_START_DATE) - timedelta(days=400)).strftime('%Y-%m-%d')
-    test_data = data_cacher.get_preprocessed_data(backtest_start_date_with_warmup, TEST_END_DATE)
+    # 자동 업데이트 활성화하여 데이터 로딩 (2024년부터 현재까지)
+    test_data = data_cacher.get_preprocessed_data(backtest_start_date_with_warmup, TEST_END_DATE, use_cache=True, auto_update=True)
     
     print("  - 정식 모델 로딩 중...")
     try:
@@ -350,12 +371,21 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
     
     test_data = test_data[test_data['date'] >= pd.to_datetime(TEST_START_DATE)]
     
+    # 로그: 백테스팅용 데이터 상태 확인
+    print(f"🔍 백테스팅용 데이터: {len(test_data):,}개 행")
+    print(f"🔍 데이터 날짜 범위: {test_data['date'].min()} ~ {test_data['date'].max()}")
+    
     # <<< 팩터 점수 계산 루프가 필요 없어짐 >>>
     # data_cacher에서 이미 모든 _score 컬럼들을 계산해왔기 때문입니다.
     print("  - 팩터 점수는 데이터 로딩 시 이미 계산되었습니다.")
     
     test_data.set_index(['date', '종목코드'], inplace=True)
     test_data.sort_index(inplace=True)
+    
+    # 로그: 인덱스 설정 후 상태 확인
+    print(f"🔍 인덱스 설정 후: {len(test_data):,}개 행")
+    print(f"🔍 인덱스 날짜 범위: {test_data.index.get_level_values('date').min()} ~ {test_data.index.get_level_values('date').max()}")
+    print(f"🔍 인덱스 날짜 수: {len(test_data.index.get_level_values('date').unique())}개")
     
     print(f"\n3. 최종 백테스팅 시뮬레이션 실행 중... (초기 자본: {initial_capital:,.0f}원)")
     backtest_results = run_detailed_backtest(

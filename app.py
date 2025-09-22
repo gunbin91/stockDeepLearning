@@ -272,8 +272,21 @@ def create_stock_chart(ticker_code, stock_name):
         # 데이터는 2년치를 불러와서 장기 이동평균선 계산에 사용
         end_date = datetime.now()
         start_date = end_date - timedelta(days=2*365)
-        df = fdr.DataReader(padded_ticker_code, start_date, end_date)
-        if df.empty:
+        
+        # 하이브리드 방식으로 주가 데이터 수집 (Yahoo Finance → KRX → NAVER)
+        df = None
+        try:
+            df = fdr.DataReader(padded_ticker_code, start_date, end_date)
+        except:
+            try:
+                df = fdr.DataReader(f'KRX:{padded_ticker_code}', start_date, end_date)
+            except:
+                try:
+                    df = fdr.DataReader(f'NAVER:{padded_ticker_code}', start_date, end_date)
+                except:
+                    df = None
+        
+        if df is None or df.empty:
             st.warning("차트 데이터를 불러오는 데 실패했습니다.")
             return None
 

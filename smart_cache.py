@@ -177,7 +177,7 @@ class SmartCache:
             self._delete_cache(cache_key)
             return None
     
-    def set(self, data_type: str, params: Dict[str, Any], data: pd.DataFrame, 
+    def set(self, data_type: str, params: Dict[str, Any], data, 
             ttl_seconds: int = 3600, file_type: str = "parquet"):
         """캐시에 데이터 저장"""
         cache_key = self._generate_cache_key(data_type, params)
@@ -186,7 +186,12 @@ class SmartCache:
         try:
             # 데이터 저장
             if file_type == "parquet":
-                data.to_parquet(cache_path, index=False)
+                if isinstance(data, dict):
+                    # dict 객체는 pickle로 저장
+                    with open(cache_path, 'wb') as f:
+                        pickle.dump(data, f)
+                else:
+                    data.to_parquet(cache_path, index=False)
             elif file_type == "pkl":
                 with open(cache_path, 'wb') as f:
                     pickle.dump(data, f)
@@ -194,6 +199,13 @@ class SmartCache:
                 raise ValueError(f"지원하지 않는 파일 타입: {file_type}")
             
             # 메타데이터 저장
+            if isinstance(data, dict):
+                rows = len(data)
+                columns = list(data.keys())
+            else:
+                rows = len(data)
+                columns = list(data.columns)
+                
             self.metadata[cache_key] = {
                 'data_type': data_type,
                 'params': params,
@@ -202,12 +214,15 @@ class SmartCache:
                 'ttl_seconds': ttl_seconds,
                 'file_type': file_type,
                 'size_bytes': cache_path.stat().st_size,
-                'rows': len(data),
-                'columns': list(data.columns)
+                'rows': rows,
+                'columns': columns
             }
             self._save_metadata()
             
-            self.logger.info(f"캐시 저장: {cache_key} ({len(data)}행)")
+            if isinstance(data, dict):
+                self.logger.info(f"캐시 저장: {cache_key} (dict, {len(data)}개 항목)")
+            else:
+                self.logger.info(f"캐시 저장: {cache_key} ({len(data)}행)")
             
             # 캐시 크기 확인 및 정리
             if self._get_cache_size() > self.max_cache_size_gb:

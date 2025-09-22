@@ -55,27 +55,14 @@ _(전체 라이브러리는 `requirements.txt` 파일 참조)_
 
 ### 4.1. 사전 준비
 
-1.  **DART API 키 발급**
-
-    - **[DART 인증키 신청 페이지](https://opendart.fss.or.kr/uss/umt/EgovStplat.do)**에 접속하여 **무료 인증키를 발급**받습니다.
-    - 발급받은 키(약 40자)를 복사하여 `config.py` 파일의 `DART_API_KEY` 변수에 붙여넣습니다.
-
-2.  **종목-고유번호 매핑 파일 생성 (최초 1회 필수)**
-
-    - DART API는 종목코드가 아닌 고유번호를 사용하므로, 이를 변환해주는 매핑 파일이 필요합니다.
-    - 터미널에서 아래 명령어를 실행하여 `corp_code_map.csv` 파일을 생성합니다.
-      ```bash
-      python make_corp_map.py
-      ```
-
-    3.  **pykrx 재무 데이터베이스 구축 (최초 1회 필수)**
+1.  **pykrx 재무 데이터베이스 구축 (최초 1회 필수)**
         - 모델 학습 및 분석에 필요한 과거 재무 지표 데이터를 구축합니다. 이 과정은 시간이 다소 소요될 수 있습니다.
         - 터미널에서 아래 명령어를 실행하거나, `run/build_db_pykrx.bat` (Windows) 또는 `run/build_db_pykrx.command` (macOS/Linux) 파일을 실행합니다.
           ```bash
           python scripts/build_db_pykrx.py
           ```
 
-3.  **필요 라이브러리 설치**
+2.  **필요 라이브러리 설치**
     - 프로젝트 가상 환경을 활성화한 후, 터미널에서 아래 명령어를 실행합니다.
       ```bash
       pip install -r requirements.txt
