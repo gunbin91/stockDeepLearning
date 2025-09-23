@@ -12,7 +12,7 @@ import sys
 from datetime import datetime, timedelta
 import time
 import gc
-from logger import log_info, log_warning, log_error, log_critical
+from logger import log_info, log_warning, log_error, log_critical, log_progress
 from exceptions import DataFetchError, DataValidationError
 from smart_cache import get_cache, cached
 
@@ -118,10 +118,7 @@ def _get_historical_financial_data(stock_list, selected_analysis_date):
     except Exception as e:
         import traceback
         error_msg = f"재무 지표 데이터베이스 로딩 중 오류 발생: {e}"
-        log_error(error_msg)
-        print(f"❌ [ERROR] {error_msg}")
-        print(f"❌ [ERROR] 상세 오류 정보:")
-        print(traceback.format_exc())
+        log_error(error_msg, exception=e, context={'function': 'get_fs_data_from_pit'})
         log_info("실시간 재무데이터 수집을 시도합니다.")
         return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
     
@@ -351,10 +348,11 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     latest_fs_df = get_fs_data_from_pit(stock_list, selected_analysis_date, use_cache)
     
     if latest_fs_df.empty or latest_fs_df.dropna().empty:
-        print("사용 가능한 재무 데이터가 없어 분석을 중단합니다."); return pd.DataFrame(), None
+        log_warning("사용 가능한 재무 데이터가 없어 분석을 중단합니다.")
+        return pd.DataFrame(), None
 
     if selected_analysis_date.date() < today.date():
-        print(f"과거 분석(기준일={selected_analysis_date.strftime('%Y-%m-%d')}): 기준일의 시가총액 데이터를 수집합니다.")
+        log_info(f"과거 분석(기준일={selected_analysis_date.strftime('%Y-%m-%d')}): 기준일의 시가총액 데이터를 수집합니다.")
         try:
             # 통일된 함수 사용
             df_marcap_past = fetch_stock_list_for_date(selected_analysis_date)
@@ -365,10 +363,10 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
                 on='종목코드',
                 how='inner'
             )
-            print(f"✅ 기준일({selected_analysis_date.strftime('%Y-%m-%d')})에 존재했던 {len(stock_list)}개 종목으로 필터링되었습니다.")
+            log_info(f"기준일({selected_analysis_date.strftime('%Y-%m-%d')})에 존재했던 {len(stock_list)}개 종목으로 필터링되었습니다.")
         except Exception as e:
-            print(f"경고: 기준일({selected_analysis_date.strftime('%Y-%m-%d')})의 시가총액 데이터를 가져오는 데 실패했습니다: {e}")
-            print("최신 상장주식수 정보를 사용하여 분석을 계속합니다.")
+            log_warning(f"기준일({selected_analysis_date.strftime('%Y-%m-%d')})의 시가총액 데이터를 가져오는 데 실패했습니다: {e}")
+            log_info("최신 상장주식수 정보를 사용하여 분석을 계속합니다.")
             
     # 공통 함수를 사용하여 실제 거래일 확인
     actual_trading_date = get_actual_trading_date(selected_analysis_date)
@@ -400,7 +398,8 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
             # 캐시에 저장
             cache.set('macro_data', cache_params, macro_df, ttl_seconds=3600)
     if macro_df.empty:
-        print("거시 경제 데이터 수집에 실패하여 분석을 중단합니다."); return pd.DataFrame(), None
+        log_warning("거시 경제 데이터 수집에 실패하여 분석을 중단합니다.")
+        return pd.DataFrame(), None
     all_feature_data, all_actual_dates = [], []
     stock_records = stock_list.to_dict('records')
     
@@ -409,8 +408,7 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     total_batches = (len(stock_records) + batch_size - 1) // batch_size
     total_stocks = len(stock_records)
     
-    log_info(f"📈 주식 분석 시작: {total_stocks:,}개 종목을 {total_batches}개 그룹으로 처리 (예상 5-10분)")
-    print()
+    log_info(f"주식 분석 시작: {total_stocks:,}개 종목을 {total_batches}개 그룹으로 처리 (예상 5-10분)")
     
     for i in range(0, len(stock_records), batch_size):
         batch = stock_records[i:i + batch_size]
@@ -420,7 +418,7 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
         
         # 첫 번째 그룹에서만 상세 설명 표시
         if current_batch == 1:
-            log_info("🔍 가격, 거래량, 기술적 지표 계산 중...")
+            log_info("가격, 거래량, 기술적 지표 계산 중...")
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:  # 워커 수 감소
             future_to_stock = {executor.submit(fetch_and_process_ticker_data, r, start_date_for_fetch, end_date_for_fetch, selected_analysis_date, latest_fs_df): r for r in batch}
@@ -433,7 +431,8 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
             completed_count = 0
             total_count = len(batch)
             
-            print(f"📊 그룹 {current_batch}/{total_batches} - 진행률: 0% (0/{total_count})", end='', flush=True)
+            # 배치 시작 로그
+            log_info(f"그룹 {current_batch}/{total_batches} 처리 시작 ({total_count}개 종목)")
             
             for future in concurrent.futures.as_completed(future_to_stock):
                 try:
@@ -445,17 +444,19 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
                     completed_count += 1
                     progress_percent = (completed_count / total_count) * 100
                     
-                    # 같은 줄에서 진행률 업데이트
-                    print(f"\r📊 그룹 {current_batch}/{total_batches} - 진행률: {progress_percent:.0f}% ({completed_count}/{total_count})", end='', flush=True)
+                    # 매번 진행률 업데이트 (같은 줄에서)
+                    log_progress(f"그룹 {current_batch}/{total_batches} 처리 중", 
+                               completed_count, total_count,
+                               context={'batch': current_batch, 'total_batches': total_batches})
                     
-                except Exception: 
+                except Exception as e: 
                     completed_count += 1
-                    progress_percent = (completed_count / total_count) * 100
-                    print(f"\r📊 그룹 {current_batch}/{total_batches} - 진행률: {progress_percent:.0f}% ({completed_count}/{total_count})", end='', flush=True)
+                    log_warning(f"종목 처리 중 오류 발생: {e}", 
+                               context={'batch': current_batch, 'stock': future_to_stock.get(future, {}).get('종목명', 'Unknown')})
                     continue
             
-            # 완료 후 개행
-            print()  # 개행 추가
+            # 배치 완료 로그
+            log_info(f"그룹 {current_batch}/{total_batches} 처리 완료 ({completed_count}/{total_count}개 종목)")
         
         # 배치 간 메모리 정리
         gc.collect()

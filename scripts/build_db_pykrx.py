@@ -46,25 +46,22 @@ def build_point_in_time_db_pykrx():
     log_info(f"   📅 총 {len(trading_days):,}개 거래일의 재무 데이터를 수집합니다")
     log_info(f"   📊 수집 기간: {trading_days[0]} ~ {trading_days[-1]}")
     log_info(f"   💰 각 종목의 PER, PBR, EPS, BPS 등 재무 지표를 가져옵니다")
-    log_info("   ⏱️ 예상 소요 시간: 약 30-60분 (API 응답 속도에 따라 달라질 수 있습니다)")
-    print()
+    log_info("예상 소요 시간: 약 30-60분 (API 응답 속도에 따라 달라질 수 있습니다)")
     
     # 간단한 진행률 표시 (개행 문제 해결)
     completed_days = 0
     total_days = len(trading_days)
     
-    print(f"재무 데이터 수집 진행률: 0% (0/{total_days:,})", end='', flush=True)
+    log_progress("재무 데이터 수집 중", 0, total_days)
     
     for i, day in enumerate(trading_days, 1):
         try:
-            # 같은 줄에서 진행률 업데이트
-            progress_percent = (completed_days / total_days) * 100
-            print(f"\r재무 데이터 수집 진행률: {progress_percent:.1f}% ({completed_days:,}/{total_days:,})", end='', flush=True)
-            
             df_fundamental = stock.get_market_fundamental(day, market="ALL")
 
             if df_fundamental.empty:
                 completed_days += 1
+                log_progress("재무 데이터 수집 중", completed_days, total_days,
+                           context={'day': day, 'records': 0})
                 time.sleep(0.1)
                 continue
             
@@ -79,23 +76,24 @@ def build_point_in_time_db_pykrx():
                     all_daily_data.append(df_fundamental)
 
             completed_days += 1
+            log_progress("재무 데이터 수집 중", completed_days, total_days,
+                       context={'day': day, 'records': len(df_fundamental) if not df_fundamental.empty else 0})
             time.sleep(0.1)
         except Exception as e:
             completed_days += 1
+            log_warning(f"재무 데이터 수집 중 오류 발생: {e}", 
+                       context={'day': day, 'completed_days': completed_days, 'total_days': total_days})
             continue
-    
-    # 완료 후 개행
-    print()  # 개행 추가
             
     if not all_daily_data:
-        print("\n❌ 수집된 데이터가 전혀 없습니다. 라이브러리 또는 KRX 서버 상태를 확인해주세요.")
+        log_critical("수집된 데이터가 전혀 없습니다. 라이브러리 또는 KRX 서버 상태를 확인해주세요.")
         return
 
-    print(f"\n3. 수집된 재무 데이터를 정리하고 저장합니다...")
-    print(f"   📊 총 {len(all_daily_data):,}개 거래일의 데이터를 하나로 합치는 중...")
+    log_info("수집된 재무 데이터를 정리하고 저장합니다...")
+    log_info(f"총 {len(all_daily_data):,}개 거래일의 데이터를 하나로 합치는 중...")
     
     final_df = pd.concat(all_daily_data, ignore_index=True)
-    print(f"   ✅ 데이터 병합 완료! 총 {len(final_df):,}개의 재무 데이터 레코드")
+    log_info(f"데이터 병합 완료! 총 {len(final_df):,}개의 재무 데이터 레코드")
     
     log_info("🔧 3단계: 재무 지표를 정리하고 추가 계산을 수행합니다...")
     required_cols = ['date', '종목코드', 'PBR', 'PER', 'EPS', 'BPS', 'DIV', 'DPS']

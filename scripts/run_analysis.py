@@ -167,15 +167,9 @@ def run_analysis(analysis_date_str):
         log_info("🎉 주식 분석이 성공적으로 완료되었습니다!")
 
     except AnalysisError as e:
-        log_error(f"분석 프로세스 중 오류 발생: {e}")
-        print(f"오류: {e.message}")
-        import traceback
-        traceback.print_exc()
+        log_error(f"분석 프로세스 중 오류 발생: {e}", exception=e, context={'function': 'main'})
     except Exception as e:
-        log_critical(f"분석 프로세스 중 예상치 못한 예외 발생: {e}")
-        print(f"오류: 분석 프로세스 중 예외 발생 - {e}")
-        import traceback
-        traceback.print_exc()
+        log_critical(f"분석 프로세스 중 예상치 못한 예외 발생: {e}", exception=e, context={'function': 'main'})
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='주식 분석 스크립트')

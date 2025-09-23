@@ -20,26 +20,29 @@ CACHE_END_DATE = datetime(datetime.now().year, 12, 31).strftime('%Y-%m-%d')
 CACHE_FILENAME = f"historical_data_up_to_{CACHE_END_DATE.replace('-', '')}.parquet"
 CACHE_FILE_PATH = os.path.join(CACHE_DIR, CACHE_FILENAME)
 
+from logger import log_info, log_critical, log_error, log_warning
+
 try:
     funda_df = pd.read_parquet(FINANCIAL_DB_PATH)
     funda_df['date'] = pd.to_datetime(funda_df['date'])
     funda_df.sort_values('date', inplace=True)
-    print(f"✅ pykrx 시점(Point-in-Time) 재무 지표 데이터베이스 로드 완료: {FINANCIAL_DB_PATH}")
+    log_info(f"pykrx 시점(Point-in-Time) 재무 지표 데이터베이스 로드 완료", 
+             context={'file_path': FINANCIAL_DB_PATH, 'records': len(funda_df)})
 except FileNotFoundError:
-    print(f"!!!!!!!! [치명적 오류] 재무 지표 데이터베이스 파일({FINANCIAL_DB_PATH})을 찾을 수 없습니다. !!!!!!!!")
+    error_msg = f"재무 지표 데이터베이스 파일({FINANCIAL_DB_PATH})을 찾을 수 없습니다"
+    log_critical(error_msg, context={'file_path': FINANCIAL_DB_PATH, 'action': 'build_db_pykrx_required'})
     print("먼저 `scripts/build_db_pykrx.py`를 실행하여 데이터베이스를 생성해주세요.")
     funda_df = pd.DataFrame()
 except Exception as e:
-    import traceback
-    print(f"❌ [ERROR] 재무 지표 데이터베이스 로딩 중 오류 발생: {e}")
-    print(f"❌ [ERROR] 상세 오류 정보:")
-    print(traceback.format_exc())
+    log_error("재무 지표 데이터베이스 로딩 중 오류 발생", exception=e, 
+              context={'file_path': FINANCIAL_DB_PATH})
     funda_df = pd.DataFrame()
 
 def auto_update_financial_db():
     """재무 데이터베이스 자동 업데이트"""
     if not os.path.exists(FINANCIAL_DB_PATH):
-        print("⚠️ 재무 데이터베이스 파일이 없습니다. 초기 생성이 필요합니다.")
+        log_warning("재무 데이터베이스 파일이 없습니다. 초기 생성이 필요합니다.", 
+                   context={'file_path': FINANCIAL_DB_PATH})
         return False
     
     try:
@@ -49,18 +52,19 @@ def auto_update_financial_db():
         latest_date = funda_df['date'].max().date()
         yesterday = datetime.now().date() - timedelta(days=1)
         
-        print(f"📊 재무 데이터베이스 최신 날짜: {latest_date}")
-        print(f"📅 어제 날짜: {yesterday}")
+        log_info("재무 데이터베이스 상태 확인", 
+                context={'latest_date': str(latest_date), 'yesterday': str(yesterday)})
         
         # 어제까지 데이터가 없으면 수집
         if latest_date < yesterday:
-            print(f"🔄 재무 데이터베이스 업데이트 필요: {latest_date} → {yesterday}")
+            log_info("재무 데이터베이스 업데이트 필요", 
+                    context={'from_date': str(latest_date), 'to_date': str(yesterday)})
             
             missing_start = (latest_date + timedelta(days=1)).strftime('%Y%m%d')
             missing_end = yesterday.strftime('%Y%m%d')
             
-            print(f"📅 누락 기간: {missing_start} ~ {missing_end}")
-            print("⏳ 재무 데이터 수집 중... (시간이 오래 걸릴 수 있습니다)")
+            log_info("누락 기간 데이터 수집 시작", 
+                    context={'period': f"{missing_start} ~ {missing_end}"})
             
             # 새 데이터 수집 (build_db_pykrx.py 로직 활용)
             new_data = _collect_financial_data_period(missing_start, missing_end)
@@ -70,19 +74,19 @@ def auto_update_financial_db():
                 updated_df = pd.concat([funda_df, new_data], ignore_index=True)
                 updated_df.sort_values(by=['date', '종목코드'], inplace=True)
                 updated_df.to_parquet(FINANCIAL_DB_PATH, index=False)
-                print(f"✅ 재무 데이터베이스 업데이트 완료: {len(new_data):,}개 새 레코드 추가")
+                log_info("재무 데이터베이스 업데이트 완료", 
+                        context={'new_records': len(new_data), 'total_records': len(updated_df)})
                 return True
             else:
-                print("❌ 재무 데이터 수집 실패")
+                log_warning("재무 데이터 수집 실패")
                 return False
         else:
-            print("✅ 재무 데이터베이스가 최신 상태입니다.")
+            log_info("재무 데이터베이스가 최신 상태입니다")
             return True
             
     except Exception as e:
-        print(f"❌ 재무 데이터베이스 업데이트 중 오류: {e}")
-        import traceback
-        print(traceback.format_exc())
+        log_error("재무 데이터베이스 업데이트 중 오류", exception=e, 
+                 context={'file_path': FINANCIAL_DB_PATH})
         return False
 
 def _collect_financial_data_period(start_date, end_date):
@@ -510,13 +514,21 @@ def _fetch_and_prepare_data(start_date, end_date):
                     date_str = future_to_date[future]; result_df = future.result()
                     if not result_df.empty: result_df['Date'] = pd.to_datetime(date_str); marcap_dfs.append(result_df)
                 except Exception: continue
+        
         if not marcap_dfs: raise Exception("수집된 시가총액 데이터가 없습니다.")
         df_marcap_long = pd.concat(marcap_dfs, ignore_index=True)
         df_marcap_long.sort_values(by=['Code', 'Date'], inplace=True)
+        
+        # 시가총액 데이터 수집 완료 로그
+        log_info(f"✅ 시가총액 데이터 수집 완료: {len(marcap_dfs)}개 날짜, {len(df_marcap_long)}개 레코드")
     except Exception as e:
         raise ConnectionError(f"과거 시가총액 데이터 수집 실패: {e}")
     
     all_data = []; stock_records = stock_list.to_dict('records')
+    
+    # 개별 종목 피처 데이터 생성 시작 로그
+    log_info(f"📊 개별 종목 피처 데이터 생성 시작: {len(stock_records)}개 종목")
+    
     with tqdm(total=len(stock_records), desc="개별 종목 피처 데이터 생성") as pbar:
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
             future_to_stock = {executor.submit(process_single_ticker_data, row, start_date, end_date, df_marcap_long, pbar.get_lock()): row for row in stock_records}
@@ -528,6 +540,9 @@ def _fetch_and_prepare_data(start_date, end_date):
                 pbar.update(1)
 
     if not all_data: raise ValueError("처리된 데이터가 없습니다.")
+    
+    # 개별 종목 피처 데이터 생성 완료 로그
+    log_info(f"✅ 개별 종목 피처 데이터 생성 완료: {len(all_data)}개 종목 처리됨")
     
     raw_feature_df = pd.concat(all_data).reset_index()
     raw_feature_df.rename(columns={'Date': 'date'}, inplace=True)

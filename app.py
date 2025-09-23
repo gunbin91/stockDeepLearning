@@ -71,11 +71,8 @@ def initialize_session_state():
             try:
                 st.session_state.cached_features_df = pd.read_json(cached_features_path, orient='records', dtype={'종목코드': str})
             except Exception as e:
-                import traceback
                 error_msg = f"캐시된 피처 데이터를 불러오는 데 실패했습니다: {e}"
-                print(f"⚠️ [WARNING] {error_msg}")
-                print(f"⚠️ [WARNING] 상세 오류 정보:")
-                print(traceback.format_exc())
+                log_warning(error_msg, exception=e, context={'function': 'initialize_session_state'})
                 st.warning(error_msg)
         else:
             st.session_state.cached_features_df = pd.DataFrame()
@@ -175,11 +172,8 @@ def load_cached_analysis_result():
             st.session_state.analysis_result = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(원)_formatted': '현재가(원)'})
             
         except Exception as e:
-            import traceback
             error_msg = f"기존 분석 결과를 불러오는 데 실패했습니다: {e}"
-            print(f"⚠️ [WARNING] {error_msg}")
-            print(f"⚠️ [WARNING] 상세 오류 정보:")
-            print(traceback.format_exc())
+            log_warning(error_msg, exception=e, context={'function': 'load_analysis_result'})
             # 오류가 발생해도 앱은 계속 실행되도록 함
 
 def display_market_condition():
@@ -681,14 +675,11 @@ def run_stock_recommendation():
 
             except FileNotFoundError:
                 error_msg = "'python' 명령을 찾을 수 없습니다. 가상환경이 올바르게 설정되었는지 확인하세요."
-                print(f"❌ [ERROR] {error_msg}")
+                log_error(error_msg, context={'function': 'run_analysis_script', 'script': 'run_analysis.py'})
                 st.error(error_msg)
             except Exception as e:
-                import traceback
                 error_msg = f"스크립트 실행 중 예상치 못한 오류가 발생했습니다: {e}"
-                print(f"❌ [ERROR] {error_msg}")
-                print(f"❌ [ERROR] 상세 오류 정보:")
-                print(traceback.format_exc())
+                log_error(error_msg, exception=e, context={'function': 'run_analysis_script', 'script': 'run_analysis.py'})
                 st.error(error_msg)
 
         # --- 분석 결과 처리 ---
@@ -755,14 +746,11 @@ def run_stock_recommendation():
 
             except FileNotFoundError:
                 error_msg = "분석 결과 파일을 찾을 수 없습니다. 스크립트가 정상적으로 실행되었는지 확인하세요."
-                print(f"❌ [ERROR] {error_msg}")
+                log_error(error_msg, context={'function': 'process_analysis_result', 'file': 'analysis_result.json'})
                 st.error(error_msg)
             except Exception as e:
-                import traceback
                 error_msg = f"분석 결과 처리 중 오류가 발생했습니다: {e}"
-                print(f"❌ [ERROR] {error_msg}")
-                print(f"❌ [ERROR] 상세 오류 정보:")
-                print(traceback.format_exc())
+                log_error(error_msg, exception=e, context={'function': 'process_analysis_result', 'file': 'analysis_result.json'})
                 st.error(error_msg)
     
         
