@@ -565,87 +565,228 @@ def _fetch_and_prepare_data(start_date, end_date):
     return final_df
 
 def get_preprocessed_data(start_date, end_date, use_cache=True, auto_update=True):
-    """메모리 최적화된 데이터 전처리 함수"""
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    cache = get_cache()
-    
-    # 캐시 사용 시 자동 업데이트 실행
-    if use_cache and auto_update:
-        print("🔄 캐시 파일 자동 업데이트 확인 중...")
+    """메모리 최적화된 데이터 전처리 함수 - 강화된 에러 처리"""
+    try:
+        log_info("전처리 데이터 요청 시작", context={
+            "start_date": start_date,
+            "end_date": end_date,
+            "use_cache": use_cache,
+            "auto_update": auto_update
+        })
         
-        # 1. 초기 캐싱 파일이 없으면 생성
-        if not os.path.exists(FINANCIAL_DB_PATH) or not os.path.exists(CACHE_FILE_PATH):
-            print("⚠️ 초기 캐싱 파일이 없습니다. 초기 생성합니다...")
-            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-            create_initial_cache_files(start_date, yesterday)
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        cache = get_cache()
         
-        # 2. 기존 자동 업데이트 실행
-        auto_update_all_caches()
+        # 캐시 사용 시 자동 업데이트 실행 (강화된 에러 처리)
+        if use_cache and auto_update:
+            try:
+                print("🔄 캐시 파일 자동 업데이트 확인 중...")
+                log_info("캐시 파일 자동 업데이트 확인 시작")
+                
+                # 1. 초기 캐싱 파일이 없으면 생성
+                if not os.path.exists(FINANCIAL_DB_PATH) or not os.path.exists(CACHE_FILE_PATH):
+                    print("⚠️ 초기 캐싱 파일이 없습니다. 초기 생성합니다...")
+                    log_warning("초기 캐싱 파일 없음", context={
+                        "financial_db_exists": os.path.exists(FINANCIAL_DB_PATH),
+                        "cache_file_exists": os.path.exists(CACHE_FILE_PATH)
+                    })
+                    
+                    try:
+                        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+                        create_initial_cache_files(start_date, yesterday)
+                        log_info("초기 캐싱 파일 생성 완료")
+                    except Exception as e:
+                        log_critical("초기 캐싱 파일 생성 실패", exception=e, context={
+                            "start_date": start_date,
+                            "yesterday": yesterday
+                        })
+                        raise
+                
+                # 2. 기존 자동 업데이트 실행
+                try:
+                    auto_update_all_caches()
+                    log_info("자동 업데이트 완료")
+                except Exception as e:
+                    log_critical("자동 업데이트 실패", exception=e)
+                    raise
+                    
+            except Exception as e:
+                log_critical("캐시 자동 업데이트 중 치명적 에러", exception=e)
+                # 자동 업데이트 실패해도 계속 진행
+                print(f"⚠️ 캐시 자동 업데이트 실패: {e}")
+                print("기존 캐시 파일을 사용하여 계속 진행합니다.")
     
-    # 실제 거래일을 확인하여 오늘 날짜 분석인지 판단
-    today = datetime.now().date()
-    end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+        # 실제 거래일을 확인하여 오늘 날짜 분석인지 판단 (강화된 에러 처리)
+        try:
+            today = datetime.now().date()
+            end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+            
+            # 공통 함수를 사용하여 실제 거래일 확인
+            from data_fetcher import get_actual_trading_date
+            actual_trading_date = get_actual_trading_date(pd.to_datetime(end_date))
+            
+            is_today_analysis = actual_trading_date == today
+            
+            log_info("거래일 확인 완료", context={
+                "today": str(today),
+                "end_date": end_date,
+                "actual_trading_date": str(actual_trading_date),
+                "is_today_analysis": is_today_analysis
+            })
+            
+        except Exception as e:
+            log_error("거래일 확인 실패", exception=e, context={
+                "end_date": end_date
+            })
+            # 거래일 확인 실패 시 오늘 분석으로 간주
+            is_today_analysis = True
+        
+        # 캐시 사용 여부 확인 (강화된 에러 처리)
+        try:
+            if not use_cache:
+                print(f"🔄 주식추천 페이지: 정합성 있는 실시간 데이터 수집을 위해 캐시를 우회합니다 ({start_date} ~ {end_date})")
+                log_info("캐시 우회 모드", context={"start_date": start_date, "end_date": end_date})
+            elif not is_today_analysis:
+                # 캐시 키 생성
+                cache_params = {
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'function': 'get_preprocessed_data'
+                }
+                try:
+                    cached_data = cache.get('preprocessed_data', cache_params, ttl_seconds=3600)
+                    if cached_data is not None:
+                        print(f"✅ 캐시된 데이터 로딩: {start_date} ~ {end_date}")
+                        log_info("캐시된 데이터 로딩 완료", context={
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            "cached_rows": len(cached_data)
+                        })
+                        return cached_data
+                except Exception as e:
+                    log_error("캐시 데이터 로딩 실패", exception=e, context=cache_params)
+                    # 캐시 로딩 실패 시 새로 생성
+            else:
+                print(f"🔄 오늘 날짜 분석: 실시간 데이터 수집을 위해 캐시를 우회합니다 ({start_date} ~ {end_date})")
+                log_info("오늘 날짜 분석 모드", context={"start_date": start_date, "end_date": end_date})
+                
+        except Exception as e:
+            log_error("캐시 확인 중 에러", exception=e)
+            # 캐시 확인 실패 시 새로 생성
+        
+        print(f"⚠️ 캐시 미스. 데이터를 새로 생성합니다: {start_date} ~ {end_date}")
+        log_info("새 데이터 생성 시작", context={"start_date": start_date, "end_date": end_date})
+        
+        # 청크 기반으로 데이터 처리 (강화된 에러 처리)
+        try:
+            historical_df = _get_historical_data_chunked(start_date, end_date)
+            log_info("과거 데이터 로딩 완료", context={
+                "historical_rows": len(historical_df),
+                "start_date": start_date,
+                "end_date": end_date
+            })
+        except Exception as e:
+            log_critical("과거 데이터 로딩 실패", exception=e, context={
+                "start_date": start_date,
+                "end_date": end_date
+            })
+            historical_df = pd.DataFrame()
+        
+        try:
+            fresh_df = _get_fresh_data_chunked(start_date, end_date, is_today_analysis)
+            log_info("최신 데이터 로딩 완료", context={
+                "fresh_rows": len(fresh_df),
+                "is_today_analysis": is_today_analysis
+            })
+        except Exception as e:
+            log_critical("최신 데이터 로딩 실패", exception=e, context={
+                "start_date": start_date,
+                "end_date": end_date,
+                "is_today_analysis": is_today_analysis
+            })
+            fresh_df = pd.DataFrame()
     
-    # 공통 함수를 사용하여 실제 거래일 확인
-    from data_fetcher import get_actual_trading_date
-    actual_trading_date = get_actual_trading_date(pd.to_datetime(end_date))
-    
-    is_today_analysis = actual_trading_date == today
-    
-    # 캐시 사용 여부 확인
-    if not use_cache:
-        print(f"🔄 주식추천 페이지: 정합성 있는 실시간 데이터 수집을 위해 캐시를 우회합니다 ({start_date} ~ {end_date})")
-    elif not is_today_analysis:
-        # 캐시 키 생성
-        cache_params = {
-            'start_date': start_date,
-            'end_date': end_date,
-            'function': 'get_preprocessed_data'
-        }
-        cached_data = cache.get('preprocessed_data', cache_params, ttl_seconds=3600)
-        if cached_data is not None:
-            print(f"✅ 캐시된 데이터 로딩: {start_date} ~ {end_date}")
-            return cached_data
-    else:
-        print(f"🔄 오늘 날짜 분석: 실시간 데이터 수집을 위해 캐시를 우회합니다 ({start_date} ~ {end_date})")
-    
-    print(f"⚠️ 캐시 미스. 데이터를 새로 생성합니다: {start_date} ~ {end_date}")
-    
-    # 청크 기반으로 데이터 처리
-    historical_df = _get_historical_data_chunked(start_date, end_date)
-    fresh_df = _get_fresh_data_chunked(start_date, end_date, is_today_analysis)
-    
-    # 메모리 효율적인 병합
-    if not historical_df.empty and not fresh_df.empty:
-        combined_df = pd.concat([historical_df, fresh_df], ignore_index=True)
-        # 중복 제거
-        combined_df = combined_df.drop_duplicates(subset=['date', '종목코드'], keep='last')
-    elif not historical_df.empty:
-        combined_df = historical_df
-    elif not fresh_df.empty:
-        combined_df = fresh_df
-    else:
-        combined_df = pd.DataFrame()
-    
-    # 날짜 범위 필터링
-    if not combined_df.empty:
-        final_df = combined_df[
-            (combined_df['date'] >= pd.to_datetime(start_date)) & 
-            (combined_df['date'] <= pd.to_datetime(end_date))
-        ].copy()
-    else:
-        final_df = pd.DataFrame()
-    
-    # 결과 캐싱
-    if not final_df.empty:
-        cache.set('preprocessed_data', cache_params, final_df, ttl_seconds=3600)
-    
-    # 메모리 정리
-    del historical_df, fresh_df, combined_df
-    gc.collect()
-    
-    print('✅ 모든 데이터 준비 완료.')
-    return final_df
+        # 메모리 효율적인 병합 (강화된 에러 처리)
+        try:
+            if not historical_df.empty and not fresh_df.empty:
+                combined_df = pd.concat([historical_df, fresh_df], ignore_index=True)
+                # 중복 제거
+                combined_df = combined_df.drop_duplicates(subset=['date', '종목코드'], keep='last')
+                log_info("데이터 병합 완료", context={
+                    "historical_rows": len(historical_df),
+                    "fresh_rows": len(fresh_df),
+                    "combined_rows": len(combined_df)
+                })
+            elif not historical_df.empty:
+                combined_df = historical_df
+                log_info("과거 데이터만 사용", context={"rows": len(combined_df)})
+            elif not fresh_df.empty:
+                combined_df = fresh_df
+                log_info("최신 데이터만 사용", context={"rows": len(combined_df)})
+            else:
+                combined_df = pd.DataFrame()
+                log_warning("사용 가능한 데이터 없음")
+            
+            # 날짜 범위 필터링
+            if not combined_df.empty:
+                final_df = combined_df[
+                    (combined_df['date'] >= pd.to_datetime(start_date)) & 
+                    (combined_df['date'] <= pd.to_datetime(end_date))
+                ].copy()
+                log_info("날짜 범위 필터링 완료", context={
+                    "filtered_rows": len(final_df),
+                    "start_date": start_date,
+                    "end_date": end_date
+                })
+            else:
+                final_df = pd.DataFrame()
+                log_warning("필터링 후 데이터 없음")
+            
+            # 결과 캐싱 (강화된 에러 처리)
+            try:
+                if not final_df.empty:
+                    cache_params = {
+                        'start_date': start_date,
+                        'end_date': end_date,
+                        'function': 'get_preprocessed_data'
+                    }
+                    cache.set('preprocessed_data', cache_params, final_df, ttl_seconds=3600)
+                    log_info("결과 캐싱 완료", context={"cached_rows": len(final_df)})
+            except Exception as e:
+                log_error("결과 캐싱 실패", exception=e, context={
+                    "final_rows": len(final_df)
+                })
+                # 캐싱 실패해도 결과는 반환
+            
+            # 메모리 정리
+            del historical_df, fresh_df, combined_df
+            gc.collect()
+            
+            print('✅ 모든 데이터 준비 완료.')
+            log_info("전처리 데이터 생성 완료", context={
+                "final_rows": len(final_df),
+                "start_date": start_date,
+                "end_date": end_date
+            })
+            return final_df
+            
+        except Exception as e:
+            log_critical("데이터 병합 및 처리 중 치명적 에러", exception=e, context={
+                "historical_rows": len(historical_df) if 'historical_df' in locals() else 0,
+                "fresh_rows": len(fresh_df) if 'fresh_df' in locals() else 0
+            })
+            # 에러 발생 시 빈 DataFrame 반환
+            return pd.DataFrame()
+            
+    except Exception as e:
+        log_critical("전처리 데이터 요청 중 치명적 에러", exception=e, context={
+            "start_date": start_date,
+            "end_date": end_date,
+            "use_cache": use_cache,
+            "auto_update": auto_update
+        })
+        # 치명적 에러 발생 시 빈 DataFrame 반환
+        return pd.DataFrame()
 
 def _get_historical_data_chunked(start_date, end_date):
     """과거 데이터를 청크 단위로 처리"""
