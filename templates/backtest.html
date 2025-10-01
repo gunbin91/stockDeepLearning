@@ -1,0 +1,243 @@
+{% extends "base.html" %}
+
+{% block title %}백테스팅 리포트 - AI 주식 분석 시스템{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h1 class="mb-4">
+            <i class="fas fa-chart-bar text-primary me-2"></i>백테스팅 리포트
+        </h1>
+    </div>
+</div>
+
+<!-- 백테스팅 신규 실행 버튼 -->
+<div class="card mb-4">
+    <div class="card-body text-center">
+        <button type="button" class="btn btn-primary btn-lg" data-bs-toggle="modal" data-bs-target="#backtest_modal">
+            <i class="fas fa-play me-2"></i>백테스팅 신규 실행
+        </button>
+    </div>
+</div>
+
+<!-- 기존 백테스팅 리포트가 있는 경우 -->
+{% if has_report %}
+<div class="card">
+    <div class="card-header">
+        <h5 class="mb-0">
+            <i class="fas fa-file-alt text-success me-2"></i>백테스팅 리포트
+        </h5>
+    </div>
+    <div class="card-body">
+        <div class="alert alert-success" role="alert">
+            <i class="fas fa-check-circle me-2"></i>백테스팅 리포트가 성공적으로 불러왔습니다.
+        </div>
+        <div id="backtest_report" style="height: 1600px; overflow-y: auto;">
+            <!-- 백테스팅 리포트가 여기에 로드됩니다 -->
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="card">
+    <div class="card-body text-center">
+        <i class="fas fa-chart-line fa-3x text-muted mb-3"></i>
+        <h5 class="text-muted">백테스팅 리포트가 없습니다</h5>
+        <p class="text-muted">위의 '백테스팅 신규 실행' 버튼을 클릭하여 백테스팅을 실행하세요.</p>
+    </div>
+</div>
+{% endif %}
+
+<!-- 백테스팅 설정 모달 -->
+<div class="modal fade" id="backtest_modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-cogs text-primary me-2"></i>백테스팅 조건 설정
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form id="backtest_form">
+                <div class="modal-body">
+                    <p class="text-muted">백테스팅에 사용할 파라미터를 입력하세요.</p>
+                    
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="capital" class="form-label">초기 자본 (원)</label>
+                                <input type="number" class="form-control" id="capital" name="capital" 
+                                       min="1000000" value="10000000" step="1000000" required>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="max_hold" class="form-label">최대 보유 기간 (일)</label>
+                                <input type="number" class="form-control" id="max_hold" name="max_hold" 
+                                       min="1" value="15" step="1" required>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="take_profit" class="form-label">수익 실현율 (%)</label>
+                                <input type="number" class="form-control" id="take_profit" name="take_profit" 
+                                       min="0.1" value="5.0" step="0.1" required>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="stop_loss" class="form-label">손절률 (%)</label>
+                                <input type="number" class="form-control" id="stop_loss" name="stop_loss" 
+                                       min="0.1" value="3.0" step="0.1" required>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="top_n" class="form-label">매수 종목 수 (상위 N개)</label>
+                                <input type="number" class="form-control" id="top_n" name="top_n" 
+                                       min="1" value="5" step="1" required>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="buy_universe" class="form-label">매수 대상 범위 (상위 N위)</label>
+                                <input type="number" class="form-control" id="buy_universe" name="buy_universe" 
+                                       min="1" value="20" step="1" required>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-md-12">
+                            <div class="mb-3">
+                                <label for="transaction_fee" class="form-label">거래 수수료 (%)</label>
+                                <input type="number" class="form-control" id="transaction_fee" name="transaction_fee" 
+                                       min="0.0" max="1.0" value="0.015" step="0.001" required>
+                                <div class="form-text">매수 및 매도 시 적용될 거래 수수료율 (예: 0.015는 0.015%)</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">취소</button>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-play me-1"></i>실행
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- 백테스팅 진행 로그 모달 -->
+<div class="modal fade" id="backtest_progress_modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-cogs text-primary me-2"></i>백테스팅 실행 로그
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info" role="alert">
+                    <i class="fas fa-info-circle me-2"></i>백테스팅이 진행 중입니다. 완료될 때까지 기다려주세요.
+                </div>
+                <div class="log-container" style="height: 400px; overflow-y: auto; background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 0.375rem; padding: 1rem;">
+                    <pre id="backtest_log" style="margin: 0; font-family: 'Courier New', monospace; font-size: 0.875rem;"></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+$(document).ready(function() {
+    // 기존 백테스팅 리포트가 있으면 로드
+    {% if has_report %}
+    loadBacktestReport();
+    {% endif %}
+    
+    // 백테스팅 폼 제출
+    $('#backtest_form').submit(function(e) {
+        e.preventDefault();
+        
+        // 모달 닫기
+        $('#backtest_modal').modal('hide');
+        
+        // 진행 모달 표시
+        $('#backtest_progress_modal').modal('show');
+        
+        // 폼 데이터 수집
+        const formData = {
+            capital: parseInt($('#capital').val()),
+            max_hold: parseInt($('#max_hold').val()),
+            take_profit: parseFloat($('#take_profit').val()),
+            stop_loss: parseFloat($('#stop_loss').val()),
+            top_n: parseInt($('#top_n').val()),
+            buy_universe: parseInt($('#buy_universe').val()),
+            transaction_fee: parseFloat($('#transaction_fee').val())
+        };
+        
+        // 백테스팅 시작
+        $.ajax({
+            url: '/api/start_backtest',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify(formData),
+            success: function(response) {
+                console.log('백테스팅 시작:', response);
+            },
+            error: function(xhr) {
+                const error = JSON.parse(xhr.responseText);
+                alert('백테스팅 시작 중 오류: ' + error.error);
+                $('#backtest_progress_modal').modal('hide');
+            }
+        });
+    });
+    
+    // WebSocket 연결
+    const socket = io();
+    
+    // 백테스팅 로그 수신
+    socket.on('backtest_log', function(data) {
+        const logContainer = $('#backtest_log');
+        const currentLog = logContainer.text();
+        logContainer.text(currentLog + data.message + '\n');
+        logContainer.scrollTop(logContainer[0].scrollHeight);
+    });
+    
+    // 백테스팅 완료
+    socket.on('backtest_complete', function(data) {
+        if (data.success) {
+            $('#backtest_progress_modal').modal('hide');
+            // 페이지 새로고침하여 새로운 리포트 표시
+            setTimeout(function() {
+                location.reload();
+            }, 1000);
+        } else {
+            alert('백테스팅 중 오류가 발생했습니다: ' + data.error);
+            $('#backtest_progress_modal').modal('hide');
+        }
+    });
+    
+    // 백테스팅 리포트 로드 함수
+    function loadBacktestReport() {
+        $.get('/static/backtest_report.html')
+            .done(function(data) {
+                $('#backtest_report').html(data);
+            })
+            .fail(function() {
+                $('#backtest_report').html('<div class="alert alert-danger">리포트를 로드할 수 없습니다.</div>');
+            });
+    }
+});
+</script>
+{% endblock %}
