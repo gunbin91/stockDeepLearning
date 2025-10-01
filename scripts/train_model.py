@@ -20,7 +20,6 @@ import psutil
 
 # 크로스 플랫폼 인코딩 설정
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import encoding_utils  # 인코딩 유틸리티 임포트
 
 import data_cacher
 from logger import log_info, log_warning, log_error 

@@ -9,7 +9,6 @@ import numpy as np # numpy 임포트 추가
 
 # 크로스 플랫폼 인코딩 설정
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import encoding_utils  # 인코딩 유틸리티 임포트
 
 # 추가 인코딩 설정 (한글 깨짐 방지)
 import locale
