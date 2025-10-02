@@ -76,7 +76,7 @@ def run_analysis(analysis_date_str):
         feature_df_for_json = feature_df_for_json.where(pd.notna(feature_df_for_json), None)
         
         if '종목코드' in feature_df_for_json.columns:
-            feature_df_for_json['종목코드'] = feature_df_for_json['종목코드'].astype(str)
+            feature_df_for_json['종목코드'] = feature_df_for_json['종목코드'].astype(str).str.zfill(6)
             
         feature_df_path = os.path.join(CACHE_DIR, 'cached_features.json')
         feature_df_for_json.to_json(feature_df_path, orient='records', force_ascii=False, indent=4)
@@ -131,6 +131,11 @@ def run_analysis(analysis_date_str):
         log_info("📋 최종 결과 데이터 정리 중...")
         if '종목코드' not in final_ranked_df.columns:
             final_ranked_df.reset_index(inplace=True)
+        
+        # 종목코드 6자리 패딩 보장
+        final_ranked_df['종목코드'] = final_ranked_df['종목코드'].astype(str).str.zfill(6)
+        stock_list_df['종목코드'] = stock_list_df['종목코드'].astype(str).str.zfill(6)
+        
         final_df_with_names = pd.merge(final_ranked_df, stock_list_df[['종목코드', '종목명']].drop_duplicates(), on='종목코드', how='left')
         log_info(f"   📊 종목명 병합 완료: {len(final_df_with_names):,}개 종목")
         

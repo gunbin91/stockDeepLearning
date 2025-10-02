@@ -209,9 +209,12 @@ def _get_stock_list_from_marcap(analysis_date=None):
         # 공통 필터링 적용
         df_marcap = _apply_common_stock_filters(df_marcap)
         
-        # 컬럼명 정리
+        # 컬럼명 정리 및 종목코드 6자리 패딩
         stock_list = df_marcap[['Code', 'Name', 'Stocks']].copy()
         stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명', 'Stocks': '상장주식수'}, inplace=True)
+        
+        # 종목코드를 6자리로 패딩
+        stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.zfill(6)
         
         log_info(f"총 {len(stock_list)}개 종목을 찾았습니다.")
         return stock_list

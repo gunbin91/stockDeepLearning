@@ -118,6 +118,11 @@ def load_cached_analysis_result():
 
             # 데이터프레임 후처리
             display_df = final_df.copy()
+            
+            # 종목코드 6자리 패딩 보장
+            if '종목코드' in display_df.columns:
+                display_df['종목코드'] = display_df['종목코드'].astype(str).str.zfill(6)
+            
             if 'ml_pred_proba' in display_df.columns:
                 display_df['ml_pred_proba'] = display_df['ml_pred_proba'] * 100
             
@@ -148,7 +153,7 @@ def load_cached_analysis_result():
 def create_stock_chart(ticker_code, stock_name):
     """지정된 종목의 상세 기술적 분석 차트를 생성합니다."""
     try:
-        # Ensure ticker_code is a 6-digit string
+        # Ensure ticker_code is a 6-digit string (이미 패딩된 경우 중복 패딩 방지)
         padded_ticker_code = str(ticker_code).zfill(6)
 
         # 데이터는 2년치를 불러와서 장기 이동평균선 계산에 사용
@@ -568,16 +573,17 @@ def start_backtest():
 def get_stock_chart(ticker_code):
     """종목 차트 데이터 API"""
     try:
-        # 종목명 가져오기
+        # 종목명 가져오기 (종목코드 정규화)
         stock_list_df = data_fetcher.fetch_stock_list()
-        stock_info = stock_list_df[stock_list_df['종목코드'] == ticker_code]
+        normalized_ticker = str(ticker_code).zfill(6)
+        stock_info = stock_list_df[stock_list_df['종목코드'] == normalized_ticker]
         if stock_info.empty:
             return jsonify({'error': '종목을 찾을 수 없습니다.'}), 404
         
         stock_name = stock_info.iloc[0]['종목명']
         
         # 차트 생성
-        fig = create_stock_chart(ticker_code, stock_name)
+        fig = create_stock_chart(normalized_ticker, stock_name)
         if fig is None:
             return jsonify({'error': '차트를 생성할 수 없습니다.'}), 500
         
@@ -604,12 +610,21 @@ def get_stock_features(ticker_code):
         
         # 피처 데이터 정리
         display_features = selected_stock_features.drop(columns=['종목코드', 'date'], errors='ignore')
-        transposed_df = display_features.transpose()
-        transposed_df.columns = ['피처 값']
-        transposed_df.fillna("N/A", inplace=True)
-        transposed_df = transposed_df.astype(str)
         
-        return jsonify({'features': transposed_df.to_dict()})
+        # 객체를 문자열로 변환
+        features_dict = {}
+        for column in display_features.columns:
+            value = display_features.iloc[0][column]
+            if pd.isna(value):
+                features_dict[column] = "N/A"
+            elif isinstance(value, (dict, list)):
+                # 중첩된 객체를 JSON 문자열로 변환
+                features_dict[column] = json.dumps(value, ensure_ascii=False)
+            else:
+                # 일반 값은 문자열로 변환
+                features_dict[column] = str(value)
+        
+        return jsonify({'features': features_dict})
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500

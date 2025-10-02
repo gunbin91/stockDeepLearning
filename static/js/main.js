@@ -331,6 +331,10 @@ $(document).ready(function() {
     }
     
     function showStockDetails(ticker, name) {
+        // 종목코드를 문자열로 변환하고 6자리로 패딩 (호환성 개선)
+        const tickerStr = String(ticker);
+        const paddedTicker = tickerStr.length < 6 ? ('000000' + tickerStr).slice(-6) : tickerStr;
+        
         // 차트 섹션 표시
         $('#chart_title').text(`📈 [${name}] 상세 차트`);
         $('#chart_section').show();
@@ -343,27 +347,53 @@ $(document).ready(function() {
         $('#stock_chart').html('<div class="text-center"><i class="fas fa-spinner fa-spin fa-2x"></i><br>차트를 불러오는 중...</div>');
         
         // 차트 데이터 요청
-        $.get(`/api/stock_chart/${ticker}`)
+        $.get(`/api/stock_chart/${paddedTicker}`)
             .done(function(data) {
                 if (data.chart) {
-                    const chartData = JSON.parse(data.chart);
-                    Plotly.newPlot('stock_chart', chartData.data, chartData.layout, {responsive: true});
+                    try {
+                        const chartData = JSON.parse(data.chart);
+                        // 기존 차트 제거 후 새로 생성
+                        $('#stock_chart').empty();
+                        Plotly.newPlot('stock_chart', chartData.data, chartData.layout, {
+                            responsive: true,
+                            displayModeBar: true,
+                            modeBarButtonsToRemove: ['pan2d', 'lasso2d', 'select2d']
+                        });
+                        console.log('차트 렌더링 완료:', paddedTicker);
+                    } catch (error) {
+                        console.error('차트 렌더링 오류:', error);
+                        $('#stock_chart').html('<div class="alert alert-warning">차트 데이터 형식 오류</div>');
+                    }
                 } else {
                     $('#stock_chart').html('<div class="alert alert-warning">차트를 표시할 수 없습니다.</div>');
                 }
             })
-            .fail(function() {
+            .fail(function(xhr, status, error) {
+                console.error('차트 로드 실패:', error);
                 $('#stock_chart').html('<div class="alert alert-danger">차트 로드 중 오류가 발생했습니다.</div>');
             });
         
         // 피처 데이터 요청
-        $.get(`/api/stock_features/${ticker}`)
+        $.get(`/api/stock_features/${paddedTicker}`)
             .done(function(data) {
                 if (data.features) {
                     const tbody = $('#features_tbody');
                     tbody.empty();
                     for (const [feature, value] of Object.entries(data.features)) {
-                        tbody.append(`<tr><td>${feature}</td><td>${value}</td></tr>`);
+                        // JSON 문자열인지 확인하고 적절히 표시
+                        let displayValue = value;
+                        try {
+                            const parsed = JSON.parse(value);
+                            if (Array.isArray(parsed)) {
+                                displayValue = parsed.join(', ');
+                            } else if (typeof parsed === 'object') {
+                                displayValue = JSON.stringify(parsed, null, 2);
+                            }
+                        } catch (e) {
+                            // JSON이 아닌 경우 그대로 표시
+                            displayValue = value;
+                        }
+                        tbody.append(`<tr><td>${feature}</td><td>${displayValue}</td></tr>`);
                     }
                 } else {
                     $('#features_tbody').html('<tr><td colspan="2" class="text-center">피처 데이터를 찾을 수 없습니다.</td></tr>');
