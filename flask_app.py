@@ -369,6 +369,10 @@ def start_analysis():
         if not analysis_date:
             return jsonify({'error': '분석 기준일이 필요합니다.'}), 400
         
+        # 분석 중복 실행 방지
+        if get_analysis_running():
+            return jsonify({'error': '이미 분석이 실행 중입니다. 완료될 때까지 기다려주세요.'}), 400
+        
         # 분석 실행 중 플래그 설정
         set_analysis_running(True)
         
@@ -709,5 +713,11 @@ if __name__ == '__main__':
     print(f"🌐 브라우저에서 http://localhost:{port} 으로 접속하세요.")
     print(f"🔧 디버그 모드: {'활성화' if args.debug else '비활성화'}")
     
-    # Flask 앱 실행
-    socketio.run(app, debug=args.debug, host=args.host, port=port)
+    # Flask 앱 실행 (디버그 모드에서도 단일 프로세스로 실행)
+    if args.debug:
+        # 디버그 모드에서도 단일 프로세스로 실행
+        # Flask-SocketIO의 디버그 모드에서 두 개의 프로세스 생성을 방지
+        socketio.run(app, debug=False, host=args.host, port=port, use_reloader=False, log_output=False)
+    else:
+        # 일반 모드
+        socketio.run(app, debug=False, host=args.host, port=port)
