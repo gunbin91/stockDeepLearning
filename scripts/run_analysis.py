@@ -123,10 +123,7 @@ def run_analysis(analysis_date_str):
         merged_df = pd.merge(scored_df, ml_predicted_df, on='종목코드', how='left')
         log_info(f"   📊 머신러닝 예측 결과 병합 완료: {len(merged_df):,}개 종목")
         
-        # 딥러닝 모델 및 감정 분석 점수는 기본값으로 설정
-        merged_df['dl_trend_score(더미)'] = 0
-        merged_df['sentiment_score'] = 0
-        log_info("   ✅ 딥러닝 모델 및 감정 분석 점수 기본값 적용 완료")
+        log_info("   ✅ 팩터 점수 계산 완료")
         
         final_ranked_df = ensemble.calculate_final_score(merged_df)
 

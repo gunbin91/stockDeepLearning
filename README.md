@@ -8,7 +8,7 @@
 - **다양한 팩터**(가치, 퀄리티, 모멘텀) 기반 종목 점수 산출
 - **Random Forest 머신러닝 모델**을 통한 **'15일 내 5% 이상 상승 확률'** 예측
 - **백테스팅 기반 가중치 최적화**로 **샤프 지수 최대화**
-- **Streamlit 웹 애플리케이션**을 통한 **시각적 분석 결과 제공**
+- **Flask 웹 애플리케이션**을 통한 **시각적 분석 결과 제공**
 
 ---
 
@@ -18,7 +18,7 @@
 ```
 stockDeepLearning/
 ├── 📱 웹 애플리케이션
-│   ├── app.py                    # Streamlit 메인 애플리케이션
+│   ├── flask_app.py              # Flask 메인 애플리케이션
 │   └── config.py                 # 설정 파일
 │
 ├── 🔧 핵심 모듈
@@ -38,7 +38,7 @@ stockDeepLearning/
 │   │   ├── weight_optimizer.py    # 가중치 최적화
 │   │   ├── backtest.py            # 백테스팅 실행
 │   │   └── run_analysis.py        # 분석 실행
-│   └── run/                       # 실행 스크립트 (Windows/macOS)
+│   └── run/                       # Flask 실행 스크립트 (Windows/macOS)
 │
 ├── 💾 데이터 저장소
 │   ├── data/
@@ -122,8 +122,6 @@ def calculate_final_score(df):
     factor_weights = {
         'volatility_score': 0.10,
         'ml_pred_proba': 0.90,
-        'sentiment_score': 0.00,
-        'dl_trend_score(더미)': 0.00,
     }
     
     # 정규화 및 가중합
@@ -405,8 +403,6 @@ cache/
 ## 🔮 향후 개선 계획
 
 ### 🚀 **기능 개선**
-- **딥러닝 모델**: LSTM, Transformer 기반 예측 모델 추가
-- **감정 분석**: 뉴스, SNS 데이터 기반 감정 점수
 - **포트폴리오 최적화**: 마코위츠 모델 기반 포트폴리오 구성
 - **실시간 알림**: 추천 종목 실시간 알림 시스템
 

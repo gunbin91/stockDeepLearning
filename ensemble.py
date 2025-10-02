@@ -17,8 +17,6 @@ def calculate_final_score(df):
     factor_weights = {
         'volatility_score': 0.10,
         'ml_pred_proba': 0.90, # ML 예측 확률
-        'sentiment_score': 0.00,
-        'dl_trend_score(더미)': 0.00,
     }
 
     # 최적화된 가중치 파일이 있으면 불러오기
