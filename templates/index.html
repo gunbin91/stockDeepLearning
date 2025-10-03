@@ -129,7 +129,7 @@
                         <td>{{ row['최종순위'] }}</td>
                         <td>{{ row['종목명'] }}</td>
                         <td>{{ row['종목코드'] }}</td>
-                        <td class="price-cell">{{ row['현재가(원)'] }}</td>
+                        <td class="price-cell">{{ row['현재가(원)']|safe }}</td>
                         <td class="change-cell">{{ row['등락율(%)'] }}</td>
                         <td>{{ "{:,.0f}".format(row['기준일가(원)']) }}</td>
                         <td>{{ "{:.2f}".format(row['최종점수(점)']) }}</td>
@@ -248,49 +248,7 @@
 <script>
 $(document).ready(function() {
     
-    // 주식 테이블 초기화 (재초기화 방지)
-    if (!$.fn.DataTable.isDataTable('#stock_table')) {
-        $('#stock_table').DataTable({
-            pageLength: 25,
-            order: [[0, 'asc']],
-            language: {
-                "lengthMenu": "페이지당 _MENU_ 개씩 보기",
-                "zeroRecords": "데이터가 없습니다",
-                "info": "_START_ - _END_ / _TOTAL_ 개",
-                "infoEmpty": "0 개",
-                "infoFiltered": "(전체 _MAX_ 개 중 필터링됨)",
-                "search": "검색:",
-                "paginate": {
-                    "first": "처음",
-                    "last": "마지막",
-                    "next": "다음",
-                    "previous": "이전"
-                }
-            }
-        });
-    }
-    
-    // 등락율 색상 적용
-    $('.change-cell').each(function() {
-        const changeText = $(this).text();
-        if (changeText.includes('+')) {
-            $(this).addClass('text-danger fw-bold');
-        } else if (changeText.includes('-')) {
-            $(this).addClass('text-primary fw-bold');
-        }
-    });
-    
-    // 가격 색상 적용
-    $('.price-cell').each(function() {
-        const row = $(this).closest('tr');
-        const changeCell = row.find('.change-cell');
-        const changeText = changeCell.text();
-        if (changeText.includes('+')) {
-            $(this).addClass('text-danger fw-bold');
-        } else if (changeText.includes('-')) {
-            $(this).addClass('text-primary fw-bold');
-        }
-    });
+    // 주식 테이블은 static/js/main.js에서 초기화됨
     
     // 주식 행 클릭 이벤트
     $('.stock-row').click(function() {

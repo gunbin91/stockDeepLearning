@@ -147,20 +147,20 @@ $(document).ready(function() {
             $('#stock_table').DataTable({
                 pageLength: 25,
                 order: [[0, 'asc']],
-            language: {
-                "lengthMenu": "페이지당 _MENU_ 개씩 보기",
-                "zeroRecords": "데이터가 없습니다",
-                "info": "_START_ - _END_ / _TOTAL_ 개",
-                "infoEmpty": "0 개",
-                "infoFiltered": "(전체 _MAX_ 개 중 필터링됨)",
-                "search": "검색:",
-                "paginate": {
-                    "first": "처음",
-                    "last": "마지막",
-                    "next": "다음",
-                    "previous": "이전"
-                }
-            },
+                language: {
+                    "lengthMenu": "페이지당 _MENU_ 개씩 보기",
+                    "zeroRecords": "데이터가 없습니다",
+                    "info": "_START_ - _END_ / _TOTAL_ 개",
+                    "infoEmpty": "0 개",
+                    "infoFiltered": "(전체 _MAX_ 개 중 필터링됨)",
+                    "search": "검색:",
+                    "paginate": {
+                        "first": "처음",
+                        "last": "마지막",
+                        "next": "다음",
+                        "previous": "이전"
+                    }
+                },
                 columnDefs: [
                     { targets: [0], width: '80px' },
                     { targets: [1], width: '120px' },
@@ -171,12 +171,14 @@ $(document).ready(function() {
                     { targets: [9], width: '120px', className: 'text-end' }
                 ],
                 responsive: true,
-                scrollX: true
+                scrollX: true,
+                drawCallback: function() {
+                    // 테이블이 다시 그려질 때마다 색상 적용
+                    applyChangeRateColors();
+                    applyPriceColors();
+                }
             });
         }
-        
-        // 등락율 색상 적용
-        applyChangeRateColors();
     }
     
     function applyChangeRateColors() {
@@ -188,15 +190,18 @@ $(document).ready(function() {
                 $(this).addClass('text-primary fw-bold');
             }
         });
-        
+    }
+    
+    function applyPriceColors() {
         $('.price-cell').each(function() {
             const row = $(this).closest('tr');
-            const changeCell = row.find('.change-cell');
-            const changeText = changeCell.text();
-            if (changeText.includes('+')) {
-                $(this).addClass('text-danger fw-bold');
-            } else if (changeText.includes('-')) {
-                $(this).addClass('text-primary fw-bold');
+            const currentPrice = parseFloat($(this).text().replace(/,/g, ''));
+            const basePrice = parseFloat(row.find('td:eq(5)').text().replace(/,/g, ''));
+            
+            if (currentPrice > basePrice) {
+                $(this).addClass('text-danger fw-bold'); // 상승: 빨간색
+            } else if (currentPrice < basePrice) {
+                $(this).addClass('text-primary fw-bold'); // 하락: 파란색
             }
         });
     }

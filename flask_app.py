@@ -91,7 +91,7 @@ def format_price_with_change(row):
         return f"{price}원"
     sign = '+' if change_percent > 0 else ''
     formatted_change = f"{sign}{change_percent:.2f}%"
-    return f"{price}원 ({formatted_change})"
+    return f"{price}원<br>({formatted_change})"
 
 def format_change_rate(change_percent):
     """등락율 포맷팅"""
@@ -728,11 +728,11 @@ if __name__ == '__main__':
     print(f"🌐 브라우저에서 http://localhost:{port} 으로 접속하세요.")
     print(f"🔧 디버그 모드: {'활성화' if args.debug else '비활성화'}")
     
-    # Flask 앱 실행 (디버그 모드에서도 단일 프로세스로 실행)
+    # Flask 앱 실행
     if args.debug:
-        # 디버그 모드에서도 단일 프로세스로 실행
-        # Flask-SocketIO의 디버그 모드에서 두 개의 프로세스 생성을 방지
-        socketio.run(app, debug=False, host=args.host, port=port, use_reloader=False, log_output=False)
+        # 디버그 모드: 파일 변경 감지, 상세 오류 정보, 자동 재시작
+        print("🔧 디버그 모드 활성화: 파일 변경 시 자동 재시작됩니다.")
+        socketio.run(app, debug=True, host=args.host, port=port, use_reloader=True, log_output=True)
     else:
-        # 일반 모드
-        socketio.run(app, debug=False, host=args.host, port=port)
+        # 일반 모드: 안정적이고 빠름
+        socketio.run(app, debug=False, host=args.host, port=port, use_reloader=False, log_output=False)
