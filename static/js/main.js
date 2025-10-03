@@ -212,10 +212,6 @@ $(document).ready(function() {
             startAnalysis();
         });
         
-        // 결과 초기화 버튼
-        $('#clear_results_btn').on('click', function() {
-            clearResults();
-        });
         
         // 분석 중단 버튼 (팝업 내부)
         $('#stop_analysis_btn_modal').on('click', function() {
@@ -308,11 +304,6 @@ $(document).ready(function() {
         });
     }
     
-    function clearResults() {
-        if (confirm('분석 결과를 초기화하시겠습니까?')) {
-            location.reload();
-        }
-    }
     
     function stopAnalysis() {
         if (confirm('실행 중인 분석을 중단하시겠습니까?')) {

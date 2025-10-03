@@ -32,9 +32,6 @@
                 <button type="button" class="btn btn-primary me-2" id="start_analysis_btn">
                     <i class="fas fa-play me-1"></i>새로운 분석 시작
                 </button>
-                <button type="button" class="btn btn-outline-secondary" id="clear_results_btn">
-                    <i class="fas fa-trash me-1"></i>결과 초기화
-                </button>
             </div>
         </div>
     </div>
@@ -280,12 +277,6 @@ $(document).ready(function() {
         });
     });
     
-    // 결과 초기화 버튼
-    $('#clear_results_btn').click(function() {
-        if (confirm('분석 결과를 초기화하시겠습니까?')) {
-            location.reload();
-        }
-    });
     
     // WebSocket 연결
     const socket = io();
