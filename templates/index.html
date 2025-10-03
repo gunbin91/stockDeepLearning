@@ -250,53 +250,7 @@ $(document).ready(function() {
     
     // 주식 테이블은 static/js/main.js에서 초기화됨
     
-    // 주식 행 클릭 이벤트
-    $('.stock-row').click(function() {
-        const ticker = $(this).data('ticker');
-        const name = $(this).data('name');
-        
-        // 차트 섹션 표시
-        $('#chart_title').text(`📈 [${name}] 상세 차트`);
-        $('#chart_section').show();
-        
-        // 피처 섹션 표시
-        $('#features_title').text(`📊 ${name} (${ticker}) 분석 피처 데이터`);
-        $('#features_section').show();
-        
-        // 차트 로딩
-        $('#stock_chart').html('<div class="text-center"><i class="fas fa-spinner fa-spin fa-2x"></i><br>차트를 불러오는 중...</div>');
-        
-        // 차트 데이터 요청
-        $.get(`/api/stock_chart/${ticker}`)
-            .done(function(data) {
-                if (data.chart) {
-                    const chartData = JSON.parse(data.chart);
-                    Plotly.newPlot('stock_chart', chartData.data, chartData.layout, {responsive: true});
-                } else {
-                    $('#stock_chart').html('<div class="alert alert-warning">차트를 표시할 수 없습니다.</div>');
-                }
-            })
-            .fail(function() {
-                $('#stock_chart').html('<div class="alert alert-danger">차트 로드 중 오류가 발생했습니다.</div>');
-            });
-        
-        // 피처 데이터 요청
-        $.get(`/api/stock_features/${ticker}`)
-            .done(function(data) {
-                if (data.features) {
-                    const tbody = $('#features_tbody');
-                    tbody.empty();
-                    for (const [feature, value] of Object.entries(data.features)) {
-                        tbody.append(`<tr><td>${feature}</td><td>${value}</td></tr>`);
-                    }
-                } else {
-                    $('#features_tbody').html('<tr><td colspan="2" class="text-center">피처 데이터를 찾을 수 없습니다.</td></tr>');
-                }
-            })
-            .fail(function() {
-                $('#features_tbody').html('<tr><td colspan="2" class="text-center text-danger">피처 데이터 로드 중 오류가 발생했습니다.</td></tr>');
-            });
-    });
+    // 주식 행 클릭 이벤트는 static/js/main.js에서 처리됨
     
     // 분석 시작 버튼
     $('#start_analysis_btn').click(function() {

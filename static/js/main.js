@@ -229,8 +229,8 @@ $(document).ready(function() {
             }
         });
         
-        // 주식 행 클릭
-        $('.stock-row').on('click', function() {
+        // 주식 행 클릭 (이벤트 위임으로 동적 생성된 행에도 적용)
+        $(document).on('click', '.stock-row', function() {
             const ticker = $(this).data('ticker');
             const name = $(this).data('name');
             showStockDetails(ticker, name);
