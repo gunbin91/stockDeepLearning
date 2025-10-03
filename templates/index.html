@@ -249,33 +249,7 @@ $(document).ready(function() {
     
     // 주식 행 클릭 이벤트는 static/js/main.js에서 처리됨
     
-    // 분석 시작 버튼
-    $('#start_analysis_btn').click(function() {
-        const analysisDate = $('#analysis_date').val();
-        if (!analysisDate) {
-            alert('분석 기준일을 선택해주세요.');
-            return;
-        }
-        
-        // 모달 표시
-        $('#analysis_modal').modal('show');
-        
-        // 분석 시작
-        $.ajax({
-            url: '/api/start_analysis',
-            method: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify({analysis_date: analysisDate}),
-            success: function(response) {
-                console.log('분석 시작:', response);
-            },
-            error: function(xhr) {
-                const error = JSON.parse(xhr.responseText);
-                alert('분석 시작 중 오류: ' + error.error);
-                $('#analysis_modal').modal('hide');
-            }
-        });
-    });
+    // 분석 시작 버튼 이벤트는 static/js/main.js에서 처리됨
     
     
     // WebSocket 연결

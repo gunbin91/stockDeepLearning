@@ -253,31 +253,23 @@ $(document).ready(function() {
             return;
         }
         
-        // 이미 분석이 실행 중인지 확인
-        if (window.analysisRunning) {
+        // 이미 분석이 실행 중인지 확인 (다중 체크)
+        if (window.analysisRunning || $('#start_analysis_btn').prop('disabled')) {
             showToast('이미 분석이 실행 중입니다.', 'warning');
             return;
         }
         
-        // 버튼이 이미 비활성화되어 있는지 확인
-        if ($('#start_analysis_btn').prop('disabled')) {
-            showToast('이미 분석이 실행 중입니다.', 'warning');
-            return;
-        }
+        // 즉시 플래그 설정 및 버튼 비활성화 (중복 실행 방지)
+        window.analysisRunning = true;
+        $('#start_analysis_btn').prop('disabled', true).text('분석 실행 중...');
         
         // 1. 먼저 팝업 표시
         $('#analysis_modal').modal('show');
         
-        // 2. 분석 실행 중 플래그 설정
-        window.analysisRunning = true;
-        
-        // 3. 분석 시작 버튼 비활성화
-        $('#start_analysis_btn').prop('disabled', true).text('분석 실행 중...');
-        
-        // 4. 분석 중단 버튼 표시 (팝업 내부)
+        // 2. 분석 중단 버튼 표시 (팝업 내부)
         $('#stop_analysis_btn_modal').show();
         
-        // 5. 분석 시작 요청
+        // 3. 분석 시작 요청
         $.ajax({
             url: '/api/start_analysis',
             method: 'POST',
@@ -288,20 +280,25 @@ $(document).ready(function() {
                 showToast('분석이 시작되었습니다.', 'info');
             },
             error: function(xhr) {
-                // 분석 실행 중 플래그 해제
-                window.analysisRunning = false;
-                
-                // 분석 시작 버튼 다시 활성화
-                $('#start_analysis_btn').prop('disabled', false).html('<i class="fas fa-play me-1"></i>새로운 분석 시작');
-                
-                // 분석 중단 버튼 숨기기
-                $('#stop_analysis_btn_modal').hide();
+                // 오류 발생 시 상태 복구
+                resetAnalysisState();
                 
                 const error = JSON.parse(xhr.responseText);
                 showToast('분석 시작 중 오류: ' + error.error, 'danger');
                 $('#analysis_modal').modal('hide');
             }
         });
+    }
+    
+    function resetAnalysisState() {
+        // 분석 실행 중 플래그 해제
+        window.analysisRunning = false;
+        
+        // 분석 시작 버튼 다시 활성화
+        $('#start_analysis_btn').prop('disabled', false).html('<i class="fas fa-play me-1"></i>새로운 분석 시작');
+        
+        // 분석 중단 버튼 숨기기
+        $('#stop_analysis_btn_modal').hide();
     }
     
     
@@ -313,9 +310,7 @@ $(document).ready(function() {
                 success: function(response) {
                     showToast('분석이 중단되었습니다.', 'warning');
                     // 상태 복구
-                    window.analysisRunning = false;
-                    $('#start_analysis_btn').prop('disabled', false).html('<i class="fas fa-play me-1"></i>새로운 분석 시작');
-                    $('#stop_analysis_btn_modal').hide();
+                    resetAnalysisState();
                     $('#analysis_modal').modal('hide');
                 },
                 error: function(xhr) {
@@ -423,15 +418,6 @@ $(document).ready(function() {
     }
     
     function handleAnalysisComplete(data) {
-        // 분석 실행 중 플래그 해제
-        window.analysisRunning = false;
-        
-        // 분석 시작 버튼 다시 활성화
-        $('#start_analysis_btn').prop('disabled', false).html('<i class="fas fa-play me-1"></i>새로운 분석 시작');
-        
-        // 분석 중단 버튼 숨기기 (팝업 내부)
-        $('#stop_analysis_btn_modal').hide();
-        
         if (data.success) {
             $('#analysis_status').html('<span class="text-success">✅ 완료</span>');
             showToast('분석이 완료되었습니다.', 'success');
@@ -444,6 +430,8 @@ $(document).ready(function() {
             showToast('분석 중 오류가 발생했습니다: ' + data.error, 'danger');
             setTimeout(function() {
                 $('#analysis_modal').modal('hide');
+                // 오류 발생 시 상태 복구
+                resetAnalysisState();
             }, 3000);
         }
     }
