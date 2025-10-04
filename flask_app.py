@@ -60,6 +60,7 @@ CACHE_DIR = os.path.join(os.path.dirname(__file__), 'cache')
 # 전역 변수
 analysis_processes = {}  # 진행 중인 분석 프로세스 추적
 current_analysis_process = None  # 현재 분석 프로세스
+current_backtest_process = None  # 현재 백테스팅 프로세스
 
 # 플래그를 함수로 관리하여 더 안전하게 처리
 def get_analysis_running():
@@ -103,6 +104,27 @@ def cleanup_analysis_process():
             pass  # 프로세스가 이미 종료된 경우 무시
     set_analysis_running(False)
     current_analysis_process = None
+
+def is_backtest_process_running(process):
+    """백테스팅 프로세스가 실제로 실행 중인지 확인"""
+    if process is None:
+        return False
+    return process.poll() is None
+
+def cleanup_backtest_process():
+    """백테스팅 프로세스 정리"""
+    global current_backtest_process
+    if current_backtest_process and is_backtest_process_running(current_backtest_process):
+        try:
+            current_backtest_process.terminate()
+            current_backtest_process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            current_backtest_process.kill()
+            current_backtest_process.wait()
+        except Exception:
+            pass  # 프로세스가 이미 종료된 경우 무시
+    set_backtest_running(False)
+    current_backtest_process = None
 
 # =============================================================================
 # 유틸리티 함수들 (기존 app.py에서 가져옴)
@@ -541,7 +563,21 @@ def start_backtest():
             if param not in data:
                 return jsonify({'error': f'{param} 파라미터가 필요합니다.'}), 400
         
+        # 기존 백테스팅 프로세스 정리
+        global current_backtest_process
+        if current_backtest_process and is_backtest_process_running(current_backtest_process):
+            cleanup_backtest_process()
+        
+        # 백테스팅 중복 실행 방지
+        if get_backtest_running():
+            return jsonify({'error': '이미 백테스팅이 실행 중입니다. 완료될 때까지 기다려주세요.'}), 400
+        
+        # 백테스팅 실행 중 플래그 설정
+        set_backtest_running(True)
+        
         def run_backtest_process():
+            global current_backtest_process
+            process = None
             try:
                 # 백테스팅 스크립트 실행
                 command = [
@@ -571,6 +607,9 @@ def start_backtest():
                     bufsize=1,
                     env=env
                 )
+                
+                # 현재 백테스팅 프로세스 저장
+                current_backtest_process = process
                 
                 # 실시간 로그 전송
                 TQDM_REGEX = re.compile(r'\s*\d{1,3}%|.*')
@@ -611,6 +650,10 @@ def start_backtest():
                     
             except Exception as e:
                 socketio.emit('backtest_complete', {'success': False, 'error': str(e)})
+            finally:
+                # 백테스팅 완료 시 플래그 해제 및 프로세스 초기화
+                set_backtest_running(False)
+                current_backtest_process = None
         
         # 백그라운드에서 백테스팅 실행 (SocketIO 컨텍스트 유지)
         socketio.start_background_task(run_backtest_process)
@@ -618,6 +661,41 @@ def start_backtest():
         return jsonify({'message': '백테스팅이 시작되었습니다.'})
         
     except Exception as e:
+        # 오류 발생 시 플래그 해제
+        set_backtest_running(False)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/stop_backtest', methods=['POST'])
+def stop_backtest():
+    """백테스팅 중단 API"""
+    try:
+        global current_backtest_process
+        
+        # 실제 프로세스 상태 확인
+        if current_backtest_process is None or not is_backtest_process_running(current_backtest_process):
+            # 이미 종료된 프로세스인 경우 플래그만 해제
+            cleanup_backtest_process()
+            return jsonify({'message': '실행 중인 백테스팅이 없습니다.'})
+        
+        # 프로세스 종료
+        current_backtest_process.terminate()
+        try:
+            current_backtest_process.wait(timeout=5)  # 타임아웃 증가
+        except subprocess.TimeoutExpired:
+            current_backtest_process.kill()
+            current_backtest_process.wait()
+        
+        # 플래그 해제 및 프로세스 초기화
+        cleanup_backtest_process()
+        
+        # WebSocket으로 중단 알림
+        socketio.emit('backtest_complete', {'success': False, 'error': '사용자에 의해 백테스팅이 중단되었습니다.'})
+        
+        return jsonify({'message': '백테스팅이 중단되었습니다.'})
+        
+    except Exception as e:
+        # 오류 발생 시에도 플래그 강제 해제
+        cleanup_backtest_process()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/stock_chart/<ticker_code>')
@@ -712,6 +790,16 @@ def get_analysis_status():
         'analysis_running': get_analysis_running(),
         'process_exists': current_analysis_process is not None,
         'process_running': is_process_running(current_analysis_process) if current_analysis_process else False,
+        'timestamp': datetime.now().isoformat()
+    })
+
+@app.route('/api/backtest_status')
+def get_backtest_status():
+    """백테스팅 상태 상세 확인 API"""
+    return jsonify({
+        'backtest_running': get_backtest_running(),
+        'process_exists': current_backtest_process is not None,
+        'process_running': is_backtest_process_running(current_backtest_process) if current_backtest_process else False,
         'timestamp': datetime.now().isoformat()
     })
 
