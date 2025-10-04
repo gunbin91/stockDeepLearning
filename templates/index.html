@@ -252,35 +252,7 @@ $(document).ready(function() {
     // 분석 시작 버튼 이벤트는 static/js/main.js에서 처리됨
     
     
-    // WebSocket 연결
-    const socket = io();
-    
-    // 분석 로그 수신
-    socket.on('analysis_log', function(data) {
-        const logContainer = $('#analysis_log');
-        const currentLog = logContainer.text();
-        logContainer.text(currentLog + data.message + '\n');
-        logContainer.scrollTop(logContainer[0].scrollHeight);
-        
-        // 로그 통계 업데이트
-        const lines = logContainer.text().split('\n').filter(line => line.trim());
-        $('#total_logs').text(lines.length);
-        $('#displayed_logs').text(lines.length);
-    });
-    
-    // 분석 완료
-    socket.on('analysis_complete', function(data) {
-        if (data.success) {
-            $('#analysis_status').html('<span class="text-success">✅ 완료</span>');
-            setTimeout(function() {
-                $('#analysis_modal').modal('hide');
-                location.reload();
-            }, 2000);
-        } else {
-            $('#analysis_status').html('<span class="text-danger">❌ 오류</span>');
-            alert('분석 중 오류가 발생했습니다: ' + data.error);
-        }
-    });
+    // WebSocket 연결은 static/js/main.js에서 처리됨
 });
 </script>
 {% endblock %}

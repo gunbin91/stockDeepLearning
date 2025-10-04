@@ -235,12 +235,10 @@ $(document).ready(function() {
         // 분석 로그 수신
         if (socket) {
             socket.on('analysis_log', function(data) {
-                console.log('DEBUG: WebSocket 로그 수신 -', data.message);
                 updateAnalysisLog(data.message);
             });
             
             socket.on('analysis_complete', function(data) {
-                console.log('DEBUG: WebSocket 완료 수신 -', data);
                 handleAnalysisComplete(data);
             });
         }
@@ -396,25 +394,57 @@ $(document).ready(function() {
     }
     
     function updateAnalysisLog(message) {
-        console.log('DEBUG: updateAnalysisLog 호출 -', message);
         const logContainer = $('#analysis_log');
-        console.log('DEBUG: logContainer 찾음 -', logContainer.length);
         
         if (logContainer.length === 0) {
-            console.error('DEBUG: analysis_log 요소를 찾을 수 없습니다!');
             return;
         }
         
+        // 진행률 패턴 감지 (터미널 스타일 처리)
+        const progressPattern = /^\[PROGRESS\]/;
+        const isProgressMessage = progressPattern.test(message);
+        
+        // 진행률 메시지가 아닌 경우에만 중복 필터링 적용
+        if (!isProgressMessage) {
+            // 중복 메시지 필터링 (마지막 3줄과 비교)
+            const currentLog = logContainer.text();
+            const lines = currentLog.split('\n').filter(line => line.trim());
+            const lastThreeLines = lines.slice(-3);
+            
+            // 동일한 메시지가 최근 3줄에 있으면 무시
+            if (lastThreeLines.includes(message)) {
+                return;
+            }
+        }
+        
         const currentLog = logContainer.text();
-        logContainer.text(currentLog + message + '\n');
+        
+        if (isProgressMessage) {
+            // 진행률 메시지는 같은 줄에서 업데이트 (터미널 스타일)
+            const currentLogLines = currentLog.split('\n').filter(line => line.trim() !== '');
+            const lastLine = currentLogLines.length > 0 ? currentLogLines[currentLogLines.length - 1] : '';
+            const isLastLineProgress = lastLine.startsWith('[PROGRESS]');
+            
+            // 마지막 줄이 진행률이면 덮어쓰기, 아니면 새 줄 추가
+            if (currentLogLines.length > 0 && isLastLineProgress) {
+                // 덮어쓰기: 마지막 진행률 메시지를 새 메시지로 교체
+                currentLogLines[currentLogLines.length - 1] = message;
+                logContainer.text(currentLogLines.join('\n'));
+            } else {
+                // 새 줄에 추가
+                logContainer.text(currentLog + message + '\n');
+            }
+        } else {
+            // 일반 로그는 새 줄에 추가
+            logContainer.text(currentLog + message + '\n');
+        }
+        
         logContainer.scrollTop(logContainer[0].scrollHeight);
         
         // 로그 통계 업데이트
-        const lines = logContainer.text().split('\n').filter(line => line.trim());
-        $('#total_logs').text(lines.length);
-        $('#displayed_logs').text(lines.length);
-        
-        console.log('DEBUG: 로그 업데이트 완료 - 총', lines.length, '줄');
+        const finalLines = logContainer.text().split('\n').filter(line => line.trim());
+        $('#total_logs').text(finalLines.length);
+        $('#displayed_logs').text(finalLines.length);
     }
     
     function handleAnalysisComplete(data) {

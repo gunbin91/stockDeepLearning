@@ -1,5 +1,9 @@
 # flask_app.py - Flask 기반 주식 분석 시스템
 
+# Eventlet 몽키 패치 (최상단에 위치해야 함)
+import eventlet
+eventlet.monkey_patch()
+
 import os
 import sys
 import json
@@ -414,6 +418,7 @@ def start_analysis():
                 
                 # 실시간 로그 전송
                 TQDM_REGEX = re.compile(r'\s*\d{1,3}%|.*')
+                PROGRESS_REGEX = re.compile(r'그룹 \d+/\d+ 처리 중 \(\d+/\d+ - \d+\.\d+%\)')
                 last_line_was_tqdm = False
                 
                 for line in iter(process.stdout.readline, ''):
@@ -427,8 +432,18 @@ def start_analysis():
                         last_line_was_tqdm = False
                     sys.stdout.flush()
                     
+                    # 진행률 메시지 감지 및 접두사 추가
+                    if PROGRESS_REGEX.search(line):
+                        # 진행률 메시지에 [PROGRESS] 접두사 추가
+                        message = f"[PROGRESS] {line.strip()}"
+                    else:
+                        message = line.strip()
+                    
                     # WebSocket으로 로그 전송
-                    socketio.emit('analysis_log', {'message': line.strip()})
+                    socketio.emit('analysis_log', {'message': message})
+                    
+                    # 실행 양보 (이벤트 루프가 블로킹되지 않도록)
+                    socketio.sleep(0.01)
                 
                 process.stdout.close()
                 return_code = process.wait()
@@ -445,10 +460,8 @@ def start_analysis():
                 set_analysis_running(False)
                 current_analysis_process = None
         
-        # 백그라운드에서 분석 실행
-        thread = threading.Thread(target=run_analysis_process)
-        thread.daemon = True
-        thread.start()
+        # 백그라운드에서 분석 실행 (SocketIO 컨텍스트 유지)
+        socketio.start_background_task(run_analysis_process)
         
         return jsonify({'message': '분석이 시작되었습니다.'})
         
@@ -532,6 +545,7 @@ def start_backtest():
                 
                 # 실시간 로그 전송
                 TQDM_REGEX = re.compile(r'\s*\d{1,3}%|.*')
+                PROGRESS_REGEX = re.compile(r'그룹 \d+/\d+ 처리 중 \(\d+/\d+ - \d+\.\d+%\)')
                 last_line_was_tqdm = False
                 
                 for line in iter(process.stdout.readline, ''):
@@ -545,8 +559,18 @@ def start_backtest():
                         last_line_was_tqdm = False
                     sys.stdout.flush()
                     
+                    # 진행률 메시지 감지 및 접두사 추가
+                    if PROGRESS_REGEX.search(line):
+                        # 진행률 메시지에 [PROGRESS] 접두사 추가
+                        message = f"[PROGRESS] {line.strip()}"
+                    else:
+                        message = line.strip()
+                    
                     # WebSocket으로 로그 전송
-                    socketio.emit('backtest_log', {'message': line.strip()})
+                    socketio.emit('backtest_log', {'message': message})
+                    
+                    # 실행 양보 (이벤트 루프가 블로킹되지 않도록)
+                    socketio.sleep(0.01)
                 
                 process.stdout.close()
                 return_code = process.wait()
@@ -559,10 +583,8 @@ def start_backtest():
             except Exception as e:
                 socketio.emit('backtest_complete', {'success': False, 'error': str(e)})
         
-        # 백그라운드에서 백테스팅 실행
-        thread = threading.Thread(target=run_backtest_process)
-        thread.daemon = True
-        thread.start()
+        # 백그라운드에서 백테스팅 실행 (SocketIO 컨텍스트 유지)
+        socketio.start_background_task(run_backtest_process)
         
         return jsonify({'message': '백테스팅이 시작되었습니다.'})
         
