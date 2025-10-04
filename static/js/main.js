@@ -22,6 +22,9 @@ $(document).ready(function() {
         
         // 페이지별 초기화
         initializePageSpecific();
+        
+        // 서버 상태 동기화
+        syncServerStatus();
     }
     
     function connectWebSocket() {
@@ -38,6 +41,8 @@ $(document).ready(function() {
                 showToast('서버에 연결되었습니다.', 'success');
                 window.initialConnection = true;
             }
+            // 연결 시 서버 상태 동기화
+            syncServerStatus();
         });
         
         socket.on('disconnect', function() {
@@ -49,6 +54,37 @@ $(document).ready(function() {
             console.error('WebSocket 연결 오류:', error);
             showToast('서버 연결에 실패했습니다.', 'danger');
         });
+    }
+    
+    function syncServerStatus() {
+        // 서버 상태 확인
+        checkServerStatus().then(function(serverRunning) {
+            if (serverRunning !== window.analysisRunning) {
+                console.log('서버-클라이언트 상태 불일치 감지, 동기화 중...');
+                window.analysisRunning = serverRunning;
+                updateAnalysisUI();
+            }
+        }).catch(function(error) {
+            console.error('서버 상태 확인 실패:', error);
+        });
+    }
+    
+    function checkServerStatus() {
+        return $.get('/api/analysis_status').then(function(data) {
+            return data.analysis_running;
+        }).catch(function() {
+            return false; // 서버 오류 시 false로 가정
+        });
+    }
+    
+    function updateAnalysisUI() {
+        if (window.analysisRunning) {
+            $('#start_analysis_btn').prop('disabled', true).text('분석 실행 중...');
+            $('#stop_analysis_btn_modal').show();
+        } else {
+            $('#start_analysis_btn').prop('disabled', false).html('<i class="fas fa-play me-1"></i>새로운 분석 시작');
+            $('#stop_analysis_btn_modal').hide();
+        }
     }
     
     function setupCommonEventListeners() {
@@ -213,15 +249,54 @@ $(document).ready(function() {
         });
         
         
+        // 분석 실행 버튼 (모달 내부)
+        $('#execute_analysis_btn').on('click', function() {
+            executeAnalysis();
+        });
+        
         // 분석 중단 버튼 (팝업 내부)
         $('#stop_analysis_btn_modal').on('click', function() {
             stopAnalysis();
         });
         
-        // 팝업이 닫힐 때 분석 종료
+        // 모달이 열릴 때 서버 상태 확인
+        $('#analysis_modal').on('show.bs.modal', function() {
+            checkServerStatus().then(function(serverRunning) {
+                if (serverRunning) {
+                    // 서버에서 분석이 실행 중이면 실행 중 상태로 표시
+                    showAnalysisRunningState();
+                    window.analysisRunning = true;
+                    $('#start_analysis_btn').prop('disabled', true).text('분석 실행 중...');
+                } else {
+                    // 서버에서 분석이 실행 중이 아니면 준비 상태로 표시
+                    showAnalysisReadyState();
+                    window.analysisRunning = false;
+                    $('#start_analysis_btn').prop('disabled', false).html('<i class="fas fa-play me-1"></i>새로운 분석 시작');
+                }
+            }).catch(function(error) {
+                console.error('서버 상태 확인 실패:', error);
+                // 서버 상태 확인 실패 시 준비 상태로 표시
+                showAnalysisReadyState();
+            });
+        });
+        
+        // 팝업이 닫힐 때 분석 종료 (서버 상태 확인 후)
         $('#analysis_modal').on('hidden.bs.modal', function() {
             if (window.analysisRunning) {
-                stopAnalysis();
+                // 서버 상태 확인 후 처리
+                checkServerStatus().then(function(serverRunning) {
+                    if (serverRunning && window.analysisRunning) {
+                        // 서버와 클라이언트 모두 실행 중이면 중지 요청
+                        stopAnalysis();
+                    } else {
+                        // 상태 불일치 시 클라이언트 상태만 초기화
+                        resetAnalysisState();
+                    }
+                }).catch(function(error) {
+                    console.error('서버 상태 확인 실패:', error);
+                    // 서버 상태 확인 실패 시 안전하게 중지
+                    stopAnalysis();
+                });
             }
         });
         
@@ -245,47 +320,15 @@ $(document).ready(function() {
     }
     
     function startAnalysis() {
+        // 메인 페이지의 분석 기준일을 모달로 복사
         const analysisDate = $('#analysis_date').val();
-        if (!analysisDate) {
-            showToast('분석 기준일을 선택해주세요.', 'warning');
-            return;
-        }
+        $('#modal_analysis_date').val(analysisDate);
         
-        // 이미 분석이 실행 중인지 확인 (다중 체크)
-        if (window.analysisRunning || $('#start_analysis_btn').prop('disabled')) {
-            showToast('이미 분석이 실행 중입니다.', 'warning');
-            return;
-        }
+        // 모달 상태 초기화
+        showAnalysisReadyState();
         
-        // 즉시 플래그 설정 및 버튼 비활성화 (중복 실행 방지)
-        window.analysisRunning = true;
-        $('#start_analysis_btn').prop('disabled', true).text('분석 실행 중...');
-        
-        // 1. 먼저 팝업 표시
+        // 모달 표시
         $('#analysis_modal').modal('show');
-        
-        // 2. 분석 중단 버튼 표시 (팝업 내부)
-        $('#stop_analysis_btn_modal').show();
-        
-        // 3. 분석 시작 요청
-        $.ajax({
-            url: '/api/start_analysis',
-            method: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify({analysis_date: analysisDate}),
-            success: function(response) {
-                console.log('분석 시작:', response);
-                showToast('분석이 시작되었습니다.', 'info');
-            },
-            error: function(xhr) {
-                // 오류 발생 시 상태 복구
-                resetAnalysisState();
-                
-                const error = JSON.parse(xhr.responseText);
-                showToast('분석 시작 중 오류: ' + error.error, 'danger');
-                $('#analysis_modal').modal('hide');
-            }
-        });
     }
     
     function resetAnalysisState() {
@@ -295,8 +338,75 @@ $(document).ready(function() {
         // 분석 시작 버튼 다시 활성화
         $('#start_analysis_btn').prop('disabled', false).html('<i class="fas fa-play me-1"></i>새로운 분석 시작');
         
-        // 분석 중단 버튼 숨기기
-        $('#stop_analysis_btn_modal').hide();
+        // 모달 상태를 준비 상태로 변경
+        showAnalysisReadyState();
+    }
+    
+    function showAnalysisReadyState() {
+        // 분석 준비 상태 표시
+        $('#analysis_ready_section').show();
+        $('#analysis_running_section').hide();
+        
+        // 분석 실행 버튼 활성화
+        $('#execute_analysis_btn').prop('disabled', false).html('<i class="fas fa-play me-1"></i>분석 실행');
+    }
+    
+    function showAnalysisRunningState() {
+        // 분석 실행 중 상태 표시
+        $('#analysis_ready_section').hide();
+        $('#analysis_running_section').show();
+        
+        // 로그 초기화
+        $('#analysis_log').text('');
+        $('#total_logs').text('0');
+        $('#displayed_logs').text('0');
+        $('#analysis_status').html('🔄 진행 중');
+    }
+    
+    function executeAnalysis() {
+        const analysisDate = $('#modal_analysis_date').val();
+        if (!analysisDate) {
+            showToast('분석 기준일을 선택해주세요.', 'warning');
+            return;
+        }
+        
+        // 서버 상태 확인 후 진행
+        checkServerStatus().then(function(serverRunning) {
+            if (serverRunning || window.analysisRunning) {
+                showToast('이미 분석이 실행 중입니다.', 'warning');
+                return;
+            }
+            
+            // 분석 실행 중 상태로 변경
+            showAnalysisRunningState();
+            
+            // 즉시 플래그 설정 및 버튼 비활성화 (중복 실행 방지)
+            window.analysisRunning = true;
+            $('#start_analysis_btn').prop('disabled', true).text('분석 실행 중...');
+            
+            // 분석 시작 요청
+            $.ajax({
+                url: '/api/start_analysis',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({analysis_date: analysisDate}),
+                success: function(response) {
+                    console.log('분석 시작:', response);
+                    showToast('분석이 시작되었습니다.', 'info');
+                },
+                error: function(xhr) {
+                    // 오류 발생 시 상태 복구
+                    resetAnalysisState();
+                    
+                    const error = JSON.parse(xhr.responseText);
+                    showToast('분석 시작 중 오류: ' + error.error, 'danger');
+                    $('#analysis_modal').modal('hide');
+                }
+            });
+        }).catch(function(error) {
+            console.error('서버 상태 확인 실패:', error);
+            showToast('서버 상태를 확인할 수 없습니다.', 'warning');
+        });
     }
     
     
@@ -464,6 +574,8 @@ $(document).ready(function() {
                 resetAnalysisState();
             }, 3000);
         }
+        // 분석 완료 시 서버 상태 동기화
+        syncServerStatus();
     }
     
     function setupBacktestEvents() {

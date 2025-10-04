@@ -193,47 +193,69 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title">
-                    <i class="fas fa-cogs text-primary me-2"></i>분석 진행 상황
+                    <i class="fas fa-cogs text-primary me-2"></i>분석 실행
                 </h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <div class="alert alert-info" role="alert">
-                    <i class="fas fa-info-circle me-2"></i>분석이 진행 중입니다. 완료될 때까지 기다려주세요.
-                </div>
-                <div class="log-container" style="height: 400px; overflow-y: auto; background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 0.375rem; padding: 1rem;">
-                    <pre id="analysis_log" style="margin: 0; font-family: 'Courier New', monospace; font-size: 0.875rem;"></pre>
-                </div>
-                <div class="row mt-3">
-                    <div class="col-md-4">
-                        <div class="card bg-light">
-                            <div class="card-body text-center">
-                                <h6 class="card-title">총 로그 수</h6>
-                                <h4 class="text-primary" id="total_logs">0</h4>
-                            </div>
-                        </div>
+                <!-- 분석 시작 전 상태 -->
+                <div id="analysis_ready_section">
+                    <div class="alert alert-info" role="alert">
+                        <i class="fas fa-info-circle me-2"></i>분석을 시작하려면 아래 버튼을 클릭하세요.
                     </div>
-                    <div class="col-md-4">
-                        <div class="card bg-light">
-                            <div class="card-body text-center">
-                                <h6 class="card-title">표시된 로그</h6>
-                                <h4 class="text-info" id="displayed_logs">0</h4>
-                            </div>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <label for="modal_analysis_date" class="form-label">분석 기준일</label>
+                            <input type="date" class="form-control" id="modal_analysis_date" 
+                                   value="{{ current_date }}" max="{{ current_date }}">
                         </div>
-                    </div>
-                    <div class="col-md-4">
-                        <div class="card bg-light">
-                            <div class="card-body text-center">
-                                <h6 class="card-title">상태</h6>
-                                <h4 class="text-warning" id="analysis_status">🔄 진행 중</h4>
-                            </div>
+                        <div class="col-md-6 d-flex align-items-end">
+                            <button type="button" class="btn btn-primary" id="execute_analysis_btn">
+                                <i class="fas fa-play me-1"></i>분석 실행
+                            </button>
                         </div>
                     </div>
                 </div>
-                <div class="text-center mt-3">
-                    <button type="button" class="btn btn-danger" id="stop_analysis_btn_modal">
-                        <i class="fas fa-stop me-1"></i>분석 중단
-                    </button>
+                
+                <!-- 분석 실행 중 상태 -->
+                <div id="analysis_running_section" style="display: none;">
+                    <div class="alert alert-warning" role="alert">
+                        <i class="fas fa-spinner fa-spin me-2"></i>분석이 진행 중입니다. 완료될 때까지 기다려주세요.
+                    </div>
+                    <div class="log-container" style="height: 400px; overflow-y: auto; background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 0.375rem; padding: 1rem;">
+                        <pre id="analysis_log" style="margin: 0; font-family: 'Courier New', monospace; font-size: 0.875rem;"></pre>
+                    </div>
+                    <div class="row mt-3">
+                        <div class="col-md-4">
+                            <div class="card bg-light">
+                                <div class="card-body text-center">
+                                    <h6 class="card-title">총 로그 수</h6>
+                                    <h4 class="text-primary" id="total_logs">0</h4>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card bg-light">
+                                <div class="card-body text-center">
+                                    <h6 class="card-title">표시된 로그</h6>
+                                    <h4 class="text-info" id="displayed_logs">0</h4>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card bg-light">
+                                <div class="card-body text-center">
+                                    <h6 class="card-title">상태</h6>
+                                    <h4 class="text-warning" id="analysis_status">🔄 진행 중</h4>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="text-center mt-3">
+                        <button type="button" class="btn btn-danger" id="stop_analysis_btn_modal">
+                            <i class="fas fa-stop me-1"></i>분석 중단
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>

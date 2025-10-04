@@ -83,6 +83,27 @@ def reset_flags():
     set_analysis_running(False)
     set_backtest_running(False)
 
+def is_process_running(process):
+    """프로세스가 실제로 실행 중인지 확인"""
+    if process is None:
+        return False
+    return process.poll() is None
+
+def cleanup_analysis_process():
+    """분석 프로세스 정리"""
+    global current_analysis_process
+    if current_analysis_process and is_process_running(current_analysis_process):
+        try:
+            current_analysis_process.terminate()
+            current_analysis_process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            current_analysis_process.kill()
+            current_analysis_process.wait()
+        except Exception:
+            pass  # 프로세스가 이미 종료된 경우 무시
+    set_analysis_running(False)
+    current_analysis_process = None
+
 # =============================================================================
 # 유틸리티 함수들 (기존 app.py에서 가져옴)
 # =============================================================================
@@ -378,7 +399,12 @@ def start_analysis():
         if not analysis_date:
             return jsonify({'error': '분석 기준일이 필요합니다.'}), 400
         
-        # 분석 중복 실행 방지
+        # 기존 프로세스 정리
+        global current_analysis_process
+        if current_analysis_process and is_process_running(current_analysis_process):
+            cleanup_analysis_process()
+        
+        # 분석 중복 실행 방지 (개선된 체크)
         if get_analysis_running():
             return jsonify({'error': '이미 분석이 실행 중입니다. 완료될 때까지 기다려주세요.'}), 400
         
@@ -476,21 +502,22 @@ def stop_analysis():
     try:
         global current_analysis_process
         
-        if current_analysis_process is None:
-            return jsonify({'error': '실행 중인 분석이 없습니다.'}), 400
+        # 실제 프로세스 상태 확인
+        if current_analysis_process is None or not is_process_running(current_analysis_process):
+            # 이미 종료된 프로세스인 경우 플래그만 해제
+            cleanup_analysis_process()
+            return jsonify({'message': '실행 중인 분석이 없습니다.'})
         
         # 프로세스 종료
-        if current_analysis_process and current_analysis_process.poll() is None:
-            current_analysis_process.terminate()
-            try:
-                current_analysis_process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                current_analysis_process.kill()
-                current_analysis_process.wait()
+        current_analysis_process.terminate()
+        try:
+            current_analysis_process.wait(timeout=5)  # 타임아웃 증가
+        except subprocess.TimeoutExpired:
+            current_analysis_process.kill()
+            current_analysis_process.wait()
         
-        # 플래그 해제
-        set_analysis_running(False)
-        current_analysis_process = None
+        # 플래그 해제 및 프로세스 초기화
+        cleanup_analysis_process()
         
         # WebSocket으로 중단 알림
         socketio.emit('analysis_complete', {'success': False, 'error': '사용자에 의해 분석이 중단되었습니다.'})
@@ -498,6 +525,8 @@ def stop_analysis():
         return jsonify({'message': '분석이 중단되었습니다.'})
         
     except Exception as e:
+        # 오류 발생 시에도 플래그 강제 해제
+        cleanup_analysis_process()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/start_backtest', methods=['POST'])
@@ -671,6 +700,18 @@ def get_status():
     return jsonify({
         'analysis_running': get_analysis_running(),
         'backtest_running': get_backtest_running(),
+        'process_exists': current_analysis_process is not None,
+        'process_running': is_process_running(current_analysis_process) if current_analysis_process else False,
+        'timestamp': datetime.now().isoformat()
+    })
+
+@app.route('/api/analysis_status')
+def get_analysis_status():
+    """분석 상태 상세 확인 API"""
+    return jsonify({
+        'analysis_running': get_analysis_running(),
+        'process_exists': current_analysis_process is not None,
+        'process_running': is_process_running(current_analysis_process) if current_analysis_process else False,
         'timestamp': datetime.now().isoformat()
     })
 
