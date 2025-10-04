@@ -29,7 +29,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 내부 모듈 임포트
 import ensemble
 import data_cacher
-from logger import log_info, log_error, log_critical, log_warning, shutdown_logger
+from logger import (log_info, log_error, log_critical, log_warning, shutdown_logger,
+                   start_analysis_report, log_data_collection_status, log_processing_status, 
+                   log_final_results, log_performance_info, log_saved_files, complete_analysis_report)
 
 # --- 설정 변수 ---
 TEST_START_DATE = '2024-01-01'
@@ -446,18 +448,22 @@ def create_html_report(results, output_path=REPORT_FILE):
 
 def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate):
     """최종 백테스팅 실행 - 강화된 에러 처리"""
+    start_time = time.time()
+    
     try:
-        log_info("최종 백테스트 시작", context={
-            "initial_capital": initial_capital,
-            "max_hold_period": max_hold_period,
-            "take_profit_pct": take_profit_pct,
-            "stop_loss_pct": stop_loss_pct,
-            "top_n": top_n,
-            "buy_universe_rank": buy_universe_rank,
-            "transaction_fee_rate": transaction_fee_rate
-        })
+        # 백테스팅 시작 보고서 (중복 제거)
+        start_analysis_report(f"백테스팅 ({TEST_START_DATE} ~ {TEST_END_DATE})")
         
-        print("1. 최종 백테스트 시작...")
+        log_info("💰 투자 설정")
+        log_info(f"   └─ 초기 자본: {initial_capital:,}원")
+        log_info(f"   └─ 매수 종목 수: {top_n}개")
+        log_info(f"   └─ 최대 보유 기간: {max_hold_period}일")
+        log_info(f"   └─ 익절 기준: +{take_profit_pct}%")
+        log_info(f"   └─ 손절 기준: -{stop_loss_pct}%")
+        log_info(f"   └─ 거래 수수료: {transaction_fee_rate}%")
+        
+        # print 문 제거하여 중복 방지
+        log_info("1. 최종 백테스트 시작...")
         
         # 가중치 파일 확인 및 로딩
         if not os.path.exists(WEIGHTS_FILE):
@@ -469,7 +475,8 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             with open(WEIGHTS_FILE, 'r') as f:
                 optimal_weights = json.load(f)
             log_info("최적 가중치 로딩 완료", context={"weights_file": WEIGHTS_FILE})
-            print(f"  - 최적 가중치를 {WEIGHTS_FILE}에서 불러왔습니다.")
+            # print 문 제거하여 중복 방지
+            log_info(f"  - 최적 가중치를 {WEIGHTS_FILE}에서 불러왔습니다.")
         except Exception as e:
             log_critical("가중치 파일 로딩 실패", exception=e, context={"weights_file": WEIGHTS_FILE})
             raise
@@ -554,8 +561,8 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             test_data = test_data[test_data['date'] >= pd.to_datetime(TEST_START_DATE)]
             
             # 로그: 백테스팅용 데이터 상태 확인
-            print(f"🔍 백테스팅용 데이터: {len(test_data):,}개 행")
-            print(f"🔍 데이터 날짜 범위: {test_data['date'].min()} ~ {test_data['date'].max()}")
+            log_info(f"🔍 백테스팅용 데이터: {len(test_data):,}개 행")
+            log_info(f"🔍 데이터 날짜 범위: {test_data['date'].min()} ~ {test_data['date'].max()}")
             
             log_info("백테스팅 데이터 전처리 완료", context={
                 "filtered_rows": len(test_data),
@@ -564,15 +571,15 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             
             # <<< 팩터 점수 계산 루프가 필요 없어짐 >>>
             # data_cacher에서 이미 모든 _score 컬럼들을 계산해왔기 때문입니다.
-            print("  - 팩터 점수는 데이터 로딩 시 이미 계산되었습니다.")
+            log_info("  - 팩터 점수는 데이터 로딩 시 이미 계산되었습니다.")
             
             test_data.set_index(['date', '종목코드'], inplace=True)
             test_data.sort_index(inplace=True)
             
             # 로그: 인덱스 설정 후 상태 확인
-            print(f"🔍 인덱스 설정 후: {len(test_data):,}개 행")
-            print(f"🔍 인덱스 날짜 범위: {test_data.index.get_level_values('date').min()} ~ {test_data.index.get_level_values('date').max()}")
-            print(f"🔍 인덱스 날짜 수: {len(test_data.index.get_level_values('date').unique())}개")
+            log_info(f"🔍 인덱스 설정 후: {len(test_data):,}개 행")
+            log_info(f"🔍 인덱스 날짜 범위: {test_data.index.get_level_values('date').min()} ~ {test_data.index.get_level_values('date').max()}")
+            log_info(f"🔍 인덱스 날짜 수: {len(test_data.index.get_level_values('date').unique())}개")
             
             log_info("데이터 인덱스 설정 완료", context={
                 "indexed_rows": len(test_data),
@@ -588,7 +595,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         
         # 백테스팅 실행 (강화된 에러 처리)
         try:
-            print(f"\n3. 최종 백테스팅 시뮬레이션 실행 중... (초기 자본: {initial_capital:,.0f}원)")
+            log_info(f"\n3. 최종 백테스팅 시뮬레이션 실행 중... (초기 자본: {initial_capital:,.0f}원)")
             log_info("백테스팅 시뮬레이션 시작", context={
                 "initial_capital": initial_capital,
                 "data_rows": len(test_data)
@@ -631,18 +638,18 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         
         # HTML 리포트 생성 (강화된 에러 처리)
         try:
-            print("\n4. HTML 리포트 생성 중...")
+            log_info("\n4. HTML 리포트 생성 중...")
             log_info("HTML 리포트 생성 시작", context={"report_file": REPORT_FILE})
             
             create_html_report(backtest_results, output_path=REPORT_FILE)
             
             log_info("HTML 리포트 생성 완료", context={"report_file": REPORT_FILE})
-            print(f"\n✅ 백테스팅 완료. `{REPORT_FILE}` 파일이 생성되었습니다.")
+            log_info(f"\n✅ 백테스팅 완료. `{REPORT_FILE}` 파일이 생성되었습니다.")
             
         except Exception as e:
             log_critical("HTML 리포트 생성 실패", exception=e, context={"report_file": REPORT_FILE})
             # 리포트 생성 실패해도 백테스팅 결과는 반환
-            print(f"\n⚠️ 백테스팅은 완료되었지만 리포트 생성에 실패했습니다: {e}")
+            log_info(f"\n⚠️ 백테스팅은 완료되었지만 리포트 생성에 실패했습니다: {e}")
         
         # 로거 종료
         try:

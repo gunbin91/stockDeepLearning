@@ -466,7 +466,7 @@ def start_analysis():
                 
                 # 실시간 로그 전송
                 TQDM_REGEX = re.compile(r'\s*\d{1,3}%|.*')
-                PROGRESS_REGEX = re.compile(r'그룹 \d+/\d+ 처리 중 \(\d+/\d+ - \d+\.\d+%\)')
+                PROGRESS_REGEX = re.compile(r'\[PROGRESS\].*\(\d+/\d+ - \d+\.\d+%\)')
                 last_line_was_tqdm = False
                 
                 for line in iter(process.stdout.readline, ''):
@@ -480,12 +480,41 @@ def start_analysis():
                         last_line_was_tqdm = False
                     sys.stdout.flush()
                     
-                    # 진행률 메시지 감지 및 접두사 추가
+                    # 이모지 대체
+                    emoji_replacements = {
+                        '🎉': '[SUCCESS]',
+                        '✅': '[OK]',
+                        '⚠️': '[WARN]',
+                        '🔄': '[PROC]',
+                        '🌐': '[NET]',
+                        '📅': '[DATE]',
+                        '❌': '[ERROR]',
+                        '🔍': '[SEARCH]',
+                        '💾': '[SAVE]',
+                        '📊': '[DATA]',
+                        '💰': '[PRICE]',
+                        '📈': '[CHART]',
+                        '🎯': '[TARGET]',
+                        '📋': '[LIST]',
+                        '🔧': '[TOOL]',
+                        '⚡': '[FAST]',
+                        '🛡️': '[SAFE]',
+                        '🎪': '[SHOW]',
+                        '🏆': '[WIN]',
+                        '💡': '[IDEA]'
+                    }
+                    
+                    # 이모지 대체 적용
+                    processed_line = line.strip()
+                    for emoji, replacement in emoji_replacements.items():
+                        processed_line = processed_line.replace(emoji, replacement)
+                    
+                    # 진행률 메시지 감지 및 접두사 추가 (기존 로직 유지)
                     if PROGRESS_REGEX.search(line):
                         # 진행률 메시지에 [PROGRESS] 접두사 추가
-                        message = f"[PROGRESS] {line.strip()}"
+                        message = f"[PROGRESS] {processed_line}"
                     else:
-                        message = line.strip()
+                        message = processed_line
                     
                     # WebSocket으로 로그 전송
                     socketio.emit('analysis_log', {'message': message})
@@ -613,7 +642,7 @@ def start_backtest():
                 
                 # 실시간 로그 전송
                 TQDM_REGEX = re.compile(r'\s*\d{1,3}%|.*')
-                PROGRESS_REGEX = re.compile(r'그룹 \d+/\d+ 처리 중 \(\d+/\d+ - \d+\.\d+%\)')
+                PROGRESS_REGEX = re.compile(r'\[PROGRESS\].*\(\d+/\d+ - \d+\.\d+%\)')
                 last_line_was_tqdm = False
                 
                 for line in iter(process.stdout.readline, ''):
@@ -627,12 +656,41 @@ def start_backtest():
                         last_line_was_tqdm = False
                     sys.stdout.flush()
                     
-                    # 진행률 메시지 감지 및 접두사 추가
+                    # 이모지 대체
+                    emoji_replacements = {
+                        '🎉': '[SUCCESS]',
+                        '✅': '[OK]',
+                        '⚠️': '[WARN]',
+                        '🔄': '[PROC]',
+                        '🌐': '[NET]',
+                        '📅': '[DATE]',
+                        '❌': '[ERROR]',
+                        '🔍': '[SEARCH]',
+                        '💾': '[SAVE]',
+                        '📊': '[DATA]',
+                        '💰': '[PRICE]',
+                        '📈': '[CHART]',
+                        '🎯': '[TARGET]',
+                        '📋': '[LIST]',
+                        '🔧': '[TOOL]',
+                        '⚡': '[FAST]',
+                        '🛡️': '[SAFE]',
+                        '🎪': '[SHOW]',
+                        '🏆': '[WIN]',
+                        '💡': '[IDEA]'
+                    }
+                    
+                    # 이모지 대체 적용
+                    processed_line = line.strip()
+                    for emoji, replacement in emoji_replacements.items():
+                        processed_line = processed_line.replace(emoji, replacement)
+                    
+                    # 진행률 메시지 감지 및 접두사 추가 (기존 로직 유지)
                     if PROGRESS_REGEX.search(line):
                         # 진행률 메시지에 [PROGRESS] 접두사 추가
-                        message = f"[PROGRESS] {line.strip()}"
+                        message = f"[PROGRESS] {processed_line}"
                     else:
-                        message = line.strip()
+                        message = processed_line
                     
                     # WebSocket으로 로그 전송
                     socketio.emit('backtest_log', {'message': message})

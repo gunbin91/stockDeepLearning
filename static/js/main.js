@@ -635,8 +635,30 @@ $(document).ready(function() {
     
     function updateBacktestLog(message) {
         const logContainer = $('#backtest_log');
+        const isProgressMessage = message.startsWith('[PROGRESS]');
+        
         const currentLog = logContainer.text();
-        logContainer.text(currentLog + message + '\n');
+        
+        if (isProgressMessage) {
+            // 진행률 메시지는 같은 줄에서 업데이트 (터미널 스타일)
+            const currentLogLines = currentLog.split('\n').filter(line => line.trim() !== '');
+            const lastLine = currentLogLines.length > 0 ? currentLogLines[currentLogLines.length - 1] : '';
+            const isLastLineProgress = lastLine.startsWith('[PROGRESS]');
+            
+            // 마지막 줄이 진행률이면 덮어쓰기, 아니면 새 줄 추가
+            if (currentLogLines.length > 0 && isLastLineProgress) {
+                // 덮어쓰기: 마지막 진행률 메시지를 새 메시지로 교체
+                currentLogLines[currentLogLines.length - 1] = message;
+                logContainer.text(currentLogLines.join('\n'));
+            } else {
+                // 새 줄에 추가
+                logContainer.text(currentLog + message + '\n');
+            }
+        } else {
+            // 일반 로그는 새 줄에 추가
+            logContainer.text(currentLog + message + '\n');
+        }
+        
         logContainer.scrollTop(logContainer[0].scrollHeight);
     }
     

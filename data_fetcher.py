@@ -12,7 +12,8 @@ import sys
 from datetime import datetime, timedelta
 import time
 import gc
-from logger import log_info, log_warning, log_error, log_critical, log_progress
+from logger import (log_info, log_warning, log_error, log_critical, log_progress, log_step, log_success, log_start, log_complete,
+                   log_data_collection_status)
 from exceptions import DataFetchError, DataValidationError
 from smart_cache import get_cache, cached
 
@@ -33,16 +34,16 @@ def get_actual_trading_date(selected_analysis_date):
             sample_temp = sample_df[sample_df.index <= sample_analysis_date_ts]
             if not sample_temp.empty:
                 actual_trading_date = sample_temp.index.max().date()
-                log_info(f"📅 분석기준일: {selected_analysis_date.strftime('%Y-%m-%d')} → 실제 거래일: {actual_trading_date}")
+                log_info(f"[DATE] 분석기준일: {selected_analysis_date.strftime('%Y-%m-%d')} → 실제 거래일: {actual_trading_date}")
                 return actual_trading_date
             else:
-                log_warning("⚠️ 실제 거래일을 확인할 수 없어 분석기준일을 사용합니다")
+                log_warning("[WARN] 실제 거래일을 확인할 수 없어 분석기준일을 사용합니다")
                 return selected_date
         else:
-            log_warning("⚠️ 샘플 데이터를 가져올 수 없어 분석기준일을 사용합니다")
+            log_warning("[WARN] 샘플 데이터를 가져올 수 없어 분석기준일을 사용합니다")
             return selected_date
     except Exception as e:
-        log_warning(f"⚠️ 실제 거래일 확인 중 오류 발생: {e}, 분석기준일을 사용합니다")
+        log_warning(f"[WARN] 실제 거래일 확인 중 오류 발생: {e}, 분석기준일을 사용합니다")
         return selected_date
 
 def get_fs_data_from_pit(stock_list, selected_analysis_date, use_cache=True):
@@ -52,19 +53,19 @@ def get_fs_data_from_pit(stock_list, selected_analysis_date, use_cache=True):
     is_today_analysis = actual_trading_date == today
     
     if not use_cache:
-        log_info("🔄 주식추천 페이지: 정합성 있는 실시간 재무데이터를 수집합니다")
+        log_step("실시간 재무데이터 수집", "START", {"모드": "주식추천 페이지"})
         return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
     elif is_today_analysis:
-        log_info("🔄 오늘 날짜 분석: 실시간 재무데이터를 수집합니다")
+        log_step("실시간 재무데이터 수집", "START", {"모드": "오늘 날짜 분석"})
         return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
     else:
-        log_info("📊 과거 날짜 분석: 정적 재무데이터베이스를 사용합니다")
+        log_step("과거 재무데이터 수집", "START", {"모드": "정적 데이터베이스"})
         return _get_historical_financial_data(stock_list, selected_analysis_date)
 
 def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
     """실시간 재무데이터 수집"""
     try:
-        log_info("🌐 pykrx API를 통해 실시간 재무데이터를 수집합니다...")
+        log_info("[NET] pykrx API를 통해 실시간 재무데이터를 수집합니다...")
         
         # 분석 기준일을 YYYYMMDD 형식으로 변환
         analysis_date_str = selected_analysis_date.strftime('%Y%m%d')
@@ -73,7 +74,7 @@ def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
         df_fundamental = stock.get_market_fundamental(analysis_date_str, market="ALL")
         
         if df_fundamental.empty:
-            log_warning("⚠️ 실시간 재무데이터를 가져올 수 없습니다. 정적 데이터베이스를 시도합니다.")
+            log_warning("[WARN] 실시간 재무데이터를 가져올 수 없습니다. 정적 데이터베이스를 시도합니다.")
             return _get_historical_financial_data(stock_list, selected_analysis_date)
         
         # 데이터 정제
@@ -81,7 +82,7 @@ def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
             df_fundamental = df_fundamental[df_fundamental['PBR'] > 0]
         
         if df_fundamental.empty:
-            log_warning("⚠️ 유효한 재무데이터가 없습니다. 정적 데이터베이스를 시도합니다.")
+            log_warning("[WARN] 유효한 재무데이터가 없습니다. 정적 데이터베이스를 시도합니다.")
             return _get_historical_financial_data(stock_list, selected_analysis_date)
         
         # 컬럼명 정리
@@ -96,7 +97,7 @@ def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
         # stock_list와 병합
         result_df = pd.merge(stock_list[['종목코드']], df_fundamental, on='종목코드', how='left')
         
-        log_info(f"✅ 실시간 재무데이터 수집 완료: {len(result_df.dropna())}개 종목")
+        log_success(f"실시간 재무데이터 수집 완료: {len(result_df.dropna())}개 종목")
         return result_df
         
     except Exception as e:
@@ -447,7 +448,7 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
                     completed_count += 1
                     progress_percent = (completed_count / total_count) * 100
                     
-                    # 매번 진행률 업데이트 (같은 줄에서)
+                    # 매번 진행률 업데이트 (같은 줄에서) - PROGRESS 접두사 유지
                     log_progress(f"그룹 {current_batch}/{total_batches} 처리 중", 
                                completed_count, total_count,
                                context={'batch': current_batch, 'total_batches': total_batches})

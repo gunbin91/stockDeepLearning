@@ -20,7 +20,7 @@ CACHE_END_DATE = datetime(datetime.now().year, 12, 31).strftime('%Y-%m-%d')
 CACHE_FILENAME = f"historical_data_up_to_{CACHE_END_DATE.replace('-', '')}.parquet"
 CACHE_FILE_PATH = os.path.join(CACHE_DIR, CACHE_FILENAME)
 
-from logger import log_info, log_critical, log_error, log_warning
+from logger import log_info, log_critical, log_error, log_warning, log_progress
 
 try:
     funda_df = pd.read_parquet(FINANCIAL_DB_PATH)
@@ -147,18 +147,18 @@ def auto_update_stock_cache():
         latest_date = df['date'].max().date()
         yesterday = datetime.now().date() - timedelta(days=1)
         
-        print(f"📊 주식 데이터 캐시 최신 날짜: {latest_date}")
-        print(f"📅 어제 날짜: {yesterday}")
+        log_info(f"📊 주식 데이터 캐시 최신 날짜: {latest_date}")
+        log_info(f"📅 어제 날짜: {yesterday}")
         
         # 어제까지 데이터가 없으면 수집
         if latest_date < yesterday:
-            print(f"🔄 주식 데이터 캐시 업데이트 필요: {latest_date} → {yesterday}")
+            log_info(f"🔄 주식 데이터 캐시 업데이트 필요: {latest_date} → {yesterday}")
             
             missing_start = (latest_date + timedelta(days=1)).strftime('%Y-%m-%d')
             missing_end = yesterday.strftime('%Y-%m-%d')
             
-            print(f"📅 누락 기간: {missing_start} ~ {missing_end}")
-            print("⏳ 주식 데이터 수집 중...")
+            log_info(f"📅 누락 기간: {missing_start} ~ {missing_end}")
+            log_info("⏳ 주식 데이터 수집 중...")
             
             # 새 데이터 수집 (_fetch_and_prepare_data 로직 활용)
             new_data = _fetch_and_prepare_data(missing_start, missing_end)
@@ -169,19 +169,19 @@ def auto_update_stock_cache():
                 updated_df = updated_df.drop_duplicates(subset=['date', '종목코드'], keep='last')
                 updated_df.sort_values(by=['date', '종목코드'], inplace=True)
                 updated_df.to_parquet(CACHE_FILE_PATH, index=False)
-                print(f"✅ 주식 데이터 캐시 업데이트 완료: {len(new_data):,}개 새 레코드 추가")
+                log_info(f"✅ 주식 데이터 캐시 업데이트 완료: {len(new_data):,}개 새 레코드 추가")
                 return True
             else:
-                print("❌ 주식 데이터 수집 실패")
+                log_info("❌ 주식 데이터 수집 실패")
                 return False
         else:
-            print("✅ 주식 데이터 캐시가 최신 상태입니다.")
+            log_info("✅ 주식 데이터 캐시가 최신 상태입니다.")
             return True
             
     except Exception as e:
-        print(f"❌ 주식 데이터 캐시 업데이트 중 오류: {e}")
+        log_error(f"❌ 주식 데이터 캐시 업데이트 중 오류: {e}")
         import traceback
-        print(traceback.format_exc())
+        log_error(traceback.format_exc())
         return False
 
 def auto_update_macro_cache():
@@ -189,7 +189,7 @@ def auto_update_macro_cache():
     try:
         # 거시경제 데이터는 스마트 캐시 시스템에서 TTL 기반으로 관리됨
         # 여기서는 캐시 상태만 확인하고 필요시 새로 수집하도록 함
-        print("📊 거시경제 데이터 캐시 상태 확인 중...")
+        log_info("📊 거시경제 데이터 캐시 상태 확인 중...")
         
         # 스마트 캐시에서 거시경제 데이터 확인
         cache = get_cache()
@@ -201,39 +201,39 @@ def auto_update_macro_cache():
         
         cached_macro = cache.get('macro_data', cache_params, ttl_seconds=3600)
         if cached_macro is not None:
-            print("✅ 거시경제 데이터 캐시가 최신 상태입니다.")
+            log_info("✅ 거시경제 데이터 캐시가 최신 상태입니다.")
             return True
         else:
-            print("⚠️ 거시경제 데이터 캐시가 만료되었습니다. 다음 사용 시 새로 수집됩니다.")
+            log_info("⚠️ 거시경제 데이터 캐시가 만료되었습니다. 다음 사용 시 새로 수집됩니다.")
             return True
             
     except Exception as e:
-        print(f"❌ 거시경제 데이터 캐시 확인 중 오류: {e}")
+        log_error(f"❌ 거시경제 데이터 캐시 확인 중 오류: {e}")
         return False
 
 def auto_update_all_caches():
     """모든 캐시 파일 자동 업데이트"""
-    print("🔄 캐시 파일 자동 업데이트 시작...")
+    log_info("🔄 캐시 파일 자동 업데이트 시작...")
     
     success_count = 0
     total_count = 3
     
     # 1. 재무 데이터베이스 업데이트
-    print("\n1️⃣ 재무 데이터베이스 업데이트 중...")
+    log_info("\n1️⃣ 재무 데이터베이스 업데이트 중...")
     if auto_update_financial_db():
         success_count += 1
     
     # 2. 주식 데이터 캐시 업데이트
-    print("\n2️⃣ 주식 데이터 캐시 업데이트 중...")
+    log_info("\n2️⃣ 주식 데이터 캐시 업데이트 중...")
     if auto_update_stock_cache():
         success_count += 1
     
     # 3. 거시경제 데이터 캐시 업데이트
-    print("\n3️⃣ 거시경제 데이터 캐시 업데이트 중...")
+    log_info("\n3️⃣ 거시경제 데이터 캐시 업데이트 중...")
     if auto_update_macro_cache():
         success_count += 1
     
-    print(f"\n✅ 캐시 파일 업데이트 완료: {success_count}/{total_count} 성공")
+    log_info(f"\n✅ 캐시 파일 업데이트 완료: {success_count}/{total_count} 성공")
     return success_count == total_count
 
 def create_initial_financial_db(start_date, end_date):
@@ -496,7 +496,7 @@ def get_marcap_dates(start_date, end_date):
     return marcap_dates
 
 def _fetch_and_prepare_data(start_date, end_date):
-    print(f"데이터 준비 중 ({start_date} ~ {end_date})...")
+    log_info(f"데이터 준비 중 ({start_date} ~ {end_date})...")
     stock_list = fetch_stock_list()
     if stock_list.empty: raise ValueError("종목 리스트를 가져올 수 없습니다.")
     try:
@@ -529,15 +529,20 @@ def _fetch_and_prepare_data(start_date, end_date):
     # 개별 종목 피처 데이터 생성 시작 로그
     log_info(f"📊 개별 종목 피처 데이터 생성 시작: {len(stock_records)}개 종목")
     
-    with tqdm(total=len(stock_records), desc="개별 종목 피처 데이터 생성") as pbar:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
-            future_to_stock = {executor.submit(process_single_ticker_data, row, start_date, end_date, df_marcap_long, pbar.get_lock()): row for row in stock_records}
-            for future in concurrent.futures.as_completed(future_to_stock):
-                try:
-                    result_df = future.result()
-                    if result_df is not None: all_data.append(result_df)
-                except Exception: pass
-                pbar.update(1)
+    completed_count = 0
+    total_count = len(stock_records)
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        future_to_stock = {executor.submit(process_single_ticker_data, row, start_date, end_date, df_marcap_long, None): row for row in stock_records}
+        for future in concurrent.futures.as_completed(future_to_stock):
+            try:
+                result_df = future.result()
+                if result_df is not None: all_data.append(result_df)
+            except Exception: pass
+            
+            completed_count += 1
+            # PROGRESS 접두사가 있는 진행률 로그 사용
+            log_progress("개별 종목 피처 데이터 생성", completed_count, total_count)
 
     if not all_data: raise ValueError("처리된 데이터가 없습니다.")
     
@@ -559,7 +564,7 @@ def _fetch_and_prepare_data(start_date, end_date):
     
     raw_feature_df.sort_values(by=['date', '종목코드'], inplace=True)
 
-    print("일별 팩터 점수 계산 중...")
+    log_info("일별 팩터 점수 계산 중...")
     final_df = raw_feature_df.groupby('date', group_keys=False).apply(calculate_factor_scores).reset_index(drop=True)
     
     return final_df
@@ -580,12 +585,12 @@ def get_preprocessed_data(start_date, end_date, use_cache=True, auto_update=True
         # 캐시 사용 시 자동 업데이트 실행 (강화된 에러 처리)
         if use_cache and auto_update:
             try:
-                print("🔄 캐시 파일 자동 업데이트 확인 중...")
+                log_info("🔄 캐시 파일 자동 업데이트 확인 중...")
                 log_info("캐시 파일 자동 업데이트 확인 시작")
                 
                 # 1. 초기 캐싱 파일이 없으면 생성
                 if not os.path.exists(FINANCIAL_DB_PATH) or not os.path.exists(CACHE_FILE_PATH):
-                    print("⚠️ 초기 캐싱 파일이 없습니다. 초기 생성합니다...")
+                    log_info("⚠️ 초기 캐싱 파일이 없습니다. 초기 생성합니다...")
                     log_warning("초기 캐싱 파일 없음", context={
                         "financial_db_exists": os.path.exists(FINANCIAL_DB_PATH),
                         "cache_file_exists": os.path.exists(CACHE_FILE_PATH)
@@ -613,8 +618,8 @@ def get_preprocessed_data(start_date, end_date, use_cache=True, auto_update=True
             except Exception as e:
                 log_critical("캐시 자동 업데이트 중 치명적 에러", exception=e)
                 # 자동 업데이트 실패해도 계속 진행
-                print(f"⚠️ 캐시 자동 업데이트 실패: {e}")
-                print("기존 캐시 파일을 사용하여 계속 진행합니다.")
+                log_info(f"⚠️ 캐시 자동 업데이트 실패: {e}")
+                log_info("기존 캐시 파일을 사용하여 계속 진행합니다.")
     
         # 실제 거래일을 확인하여 오늘 날짜 분석인지 판단 (강화된 에러 처리)
         try:
@@ -674,7 +679,7 @@ def get_preprocessed_data(start_date, end_date, use_cache=True, auto_update=True
             log_error("캐시 확인 중 에러", exception=e)
             # 캐시 확인 실패 시 새로 생성
         
-        print(f"⚠️ 캐시 미스. 데이터를 새로 생성합니다: {start_date} ~ {end_date}")
+        log_info(f"⚠️ 캐시 미스. 데이터를 새로 생성합니다: {start_date} ~ {end_date}")
         log_info("새 데이터 생성 시작", context={"start_date": start_date, "end_date": end_date})
         
         # 청크 기반으로 데이터 처리 (강화된 에러 처리)

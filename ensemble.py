@@ -3,14 +3,14 @@ import numpy as np
 import json
 import os
 from smart_cache import get_cache
-from logger import log_info, log_warning, log_error
+from logger import log_info, log_warning, log_error, log_step, log_success, log_start, log_complete
 
 def calculate_final_score(df):
     if df.empty:
-        log_warning("입력 데이터가 비어있어 앙상블 점수 계산을 건너뜁니다.")
+        log_warning("[WARN] 입력 데이터가 비어있어 앙상블 점수 계산을 건너뜁니다.")
         return df.copy()
 
-    log_info(f"🎯 앙상블 점수 계산 중... ({len(df):,}개 종목)")
+    log_step("앙상블 점수 계산", "START", {"종목수": len(df)})
     final_df = df.copy()
 
     # 기본 가중치 설정 (optimal_weights.json 파일이 없을 경우 사용)
@@ -20,7 +20,6 @@ def calculate_final_score(df):
     }
 
     # 최적화된 가중치 파일이 있으면 불러오기
-    # ensemble.py 파일의 절대 경로를 기준으로 optimal_weights.json 파일 경로 설정
     script_dir = os.path.dirname(__file__)
     optimal_weights_path = os.path.join(script_dir, 'data', 'optimal_weights.json')
 
@@ -28,15 +27,15 @@ def calculate_final_score(df):
         with open(optimal_weights_path, 'r') as f:
             loaded_weights = json.load(f)
             factor_weights.update(loaded_weights)
-        log_info("   ✅ 최적화된 가중치 적용")
+        log_info("[OK] 최적화된 가중치 적용")
     else:
-        log_info("   📋 기본 가중치 사용")
+        log_info("[INFO] 기본 가중치 사용")
 
     active_factors = {k: v for k, v in factor_weights.items() if v > 0 and k in final_df.columns}
-    log_info(f"   🔍 활성 팩터: {len(active_factors)}개")
+    log_info(f"[SEARCH] 활성 팩터: {len(active_factors)}개")
     
     if not active_factors:
-        log_warning("활성화된 팩터가 없어 기본 점수를 적용합니다.")
+        log_warning("[WARN] 활성화된 팩터가 없어 기본 점수를 적용합니다.")
         final_df['final_score'] = 50
         final_df['최종순위'] = 1
         return final_df

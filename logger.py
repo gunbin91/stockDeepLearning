@@ -12,7 +12,7 @@ import time
 from typing import Optional, Dict, Any
 
 class StockAnalysisLogger:
-    """주식 분석 시스템용 로거 클래스 - 멀티스레드 안전 버전"""
+    """보고서 형식 주식 분석 로거 - 엑셀 스타일 깔끔한 로그 시스템"""
     
     def __init__(self, name="stock_analysis", log_dir=None):
         self.name = name
@@ -31,6 +31,50 @@ class StockAnalysisLogger:
         self._background_thread = None
         self._shutdown_event = threading.Event()
         self._start_background_logging()
+        
+        # 보고서 형식 로그 시스템
+        self._report_sections = {
+            'header': '📋 주식 분석 보고서',
+            'info': '📅 분석 정보',
+            'data_collection': '📊 데이터 수집 현황',
+            'processing': '🧮 분석 처리 현황',
+            'results': '📈 최종 결과',
+            'performance': '⏱️ 성능 정보',
+            'files': '💾 저장된 파일'
+        }
+        
+        # 진행률 추적
+        self._progress_tracker = {
+            'current_step': 0,
+            'total_steps': 0,
+            'step_name': '',
+            'start_time': None,
+            'estimated_time': None
+        }
+        
+        # 이모지 대체 시스템 (Windows 호환)
+        self._emoji_replacements = {
+            '🎉': '[SUCCESS]',
+            '✅': '[OK]',
+            '⚠️': '[WARN]',
+            '🔄': '[PROC]',
+            '🌐': '[NET]',
+            '📅': '[DATE]',
+            '❌': '[ERROR]',
+            '🔍': '[SEARCH]',
+            '💾': '[SAVE]',
+            '📊': '[DATA]',
+            '💰': '[PRICE]',
+            '📈': '[CHART]',
+            '🎯': '[TARGET]',
+            '📋': '[LIST]',
+            '🔧': '[TOOL]',
+            '⚡': '[FAST]',
+            '🛡️': '[SAFE]',
+            '🎪': '[SHOW]',
+            '🏆': '[WIN]',
+            '💡': '[IDEA]'
+        }
         
     def _get_log_directory(self, log_dir: Optional[str]) -> str:
         """로그 디렉토리 경로 설정"""
@@ -192,10 +236,21 @@ class StockAnalysisLogger:
             return True
     
     def _format_message(self, message: str, level: str, context: Optional[Dict[str, Any]] = None) -> str:
-        """메시지 포맷팅"""
+        """메시지 포맷팅 - 이모지 대체 및 사용자 친화적 개선"""
+        # 이모지 대체
+        formatted_message = self._replace_emojis(message)
+        
+        # 컨텍스트 정보 추가
         if context:
             context_str = " | ".join([f"{k}={v}" for k, v in context.items()])
-            return f"{message} | {context_str}"
+            formatted_message = f"{formatted_message} | {context_str}"
+        
+        return formatted_message
+    
+    def _replace_emojis(self, message: str) -> str:
+        """이모지를 대체 문자로 변환"""
+        for emoji, replacement in self._emoji_replacements.items():
+            message = message.replace(emoji, replacement)
         return message
     
     def info(self, message: str, context: Optional[Dict[str, Any]] = None, skip_duplicate: bool = True):
@@ -231,7 +286,7 @@ class StockAnalysisLogger:
     def progress(self, message: str, current: int, total: int, context: Optional[Dict[str, Any]] = None):
         """진행률 로그 - 스레드 안전 버전 (tqdm과 충돌 방지)"""
         percentage = (current / total * 100) if total > 0 else 0
-        progress_message = f"{message} ({current:,}/{total:,} - {percentage:.1f}%)"
+        progress_message = f"[PROGRESS] {message} ({current:,}/{total:,} - {percentage:.1f}%)"
         
         if context:
             context_str = " | ".join([f"{k}={v}" for k, v in context.items()])
@@ -246,6 +301,152 @@ class StockAnalysisLogger:
                     print()  # 개행 추가
         except Exception:
             print(f"[PROGRESS] {progress_message}")
+    
+    def log_step(self, step_name: str, status: str = "START", context: Optional[Dict[str, Any]] = None):
+        """단계별 로그 - 사용자 친화적"""
+        status_messages = {
+            'START': f"[START] {step_name} 시작",
+            'PROCESSING': f"[PROC] {step_name} 처리 중",
+            'COMPLETE': f"[COMPLETE] {step_name} 완료",
+            'ERROR': f"[ERROR] {step_name} 실패"
+        }
+        
+        message = status_messages.get(status, f"[INFO] {step_name}")
+        if context:
+            context_str = " | ".join([f"{k}={v}" for k, v in context.items()])
+            message = f"{message} | {context_str}"
+        
+        # 이모지 대체 적용
+        message = self._replace_emojis(message)
+        
+        if status == 'ERROR':
+            self.error(message)
+        elif status == 'COMPLETE':
+            self.info(message)
+        else:
+            self.info(message)
+    
+    def start_analysis_report(self, analysis_date: str):
+        """분석 시작 보고서 헤더"""
+        with self._lock:
+            self._progress_tracker['start_time'] = time.time()
+            self._progress_tracker['current_step'] = 0
+            self._progress_tracker['total_steps'] = 6
+            
+        header = f"""
+═══════════════════════════════════════════════════════════════
+📋 주식 분석 보고서
+═══════════════════════════════════════════════════════════════
+📅 분석 정보
+   • 분석 기준일: {analysis_date}
+   • 분석 대상: KOSPI + KOSDAQ 전체 종목
+   • 분석 시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+═══════════════════════════════════════════════════════════════
+"""
+        self.info(header.strip())
+    
+    def log_data_collection_status(self, step: str, status: str, details: Dict[str, Any] = None):
+        """데이터 수집 현황 로그"""
+        if step == "start":
+            self.info("📊 데이터 수집 현황")
+            self.info("   └─ 종목 목록 수집 중...")
+        elif step == "stock_list":
+            if status == "complete":
+                count = details.get('count', 0) if details else 0
+                self.info(f"   └─ 종목 목록: {count:,}개 종목 수집 완료")
+        elif step == "financial_data":
+            if status == "complete":
+                count = details.get('count', 0) if details else 0
+                coverage = details.get('coverage', 0) if details else 0
+                self.info(f"   └─ 재무 데이터: {count:,}개 기업 ({coverage:.1f}% 커버리지)")
+        elif step == "macro_data":
+            if status == "complete":
+                self.info("   └─ 거시경제 데이터: KOSPI, USD/KRW, VIX 수집 완료")
+        elif step == "price_data":
+            if status == "start":
+                total = details.get('total', 0) if details else 0
+                batches = details.get('batches', 0) if details else 0
+                self.info(f"   └─ 주가 데이터: {total:,}개 종목 처리 중... ({batches}개 그룹)")
+            elif status == "progress":
+                current = details.get('current', 0) if details else 0
+                total = details.get('total', 0) if details else 0
+                percent = details.get('percent', 0) if details else 0
+                collected = details.get('collected', 0) if details else 0
+                self.info(f"   └─ 주가 데이터 수집: {percent:.1f}% ({collected:,}/{total:,}개 종목)")
+            elif status == "complete":
+                count = details.get('count', 0) if details else 0
+                self.info(f"   └─ 주가 데이터: {count:,}개 종목 수집 완료")
+    
+    def log_processing_status(self, step: str, status: str, details: Dict[str, Any] = None):
+        """분석 처리 현황 로그"""
+        if step == "start":
+            self.info("🧮 분석 처리 현황")
+        elif step == "factor_scoring":
+            if status == "complete":
+                factors = details.get('factors', 0) if details else 0
+                self.info(f"   └─ 팩터 점수 계산: 완료 ({factors}개 팩터)")
+        elif step == "ml_prediction":
+            if status == "complete":
+                self.info("   └─ 머신러닝 예측: 완료")
+        elif step == "ensemble":
+            if status == "complete":
+                avg_score = details.get('avg_score', 0) if details else 0
+                max_score = details.get('max_score', 0) if details else 0
+                self.info(f"   └─ 앙상블 점수 계산: 완료 (평균: {avg_score:.1f}, 최고: {max_score:.1f})")
+    
+    def log_final_results(self, results: Dict[str, Any]):
+        """최종 결과 로그"""
+        self.info("📈 최종 결과")
+        top_10 = results.get('top_10_count', 0)
+        avg_score = results.get('avg_score', 0)
+        max_score = results.get('max_score', 0)
+        total_stocks = results.get('total_stocks', 0)
+        
+        self.info(f"   └─ 상위 10위 종목: {top_10}개")
+        self.info(f"   └─ 평균 점수: {avg_score:.1f}점")
+        self.info(f"   └─ 최고 점수: {max_score:.1f}점")
+        self.info(f"   └─ 분석 대상: {total_stocks:,}개 종목")
+    
+    def log_performance_info(self, performance: Dict[str, Any]):
+        """성능 정보 로그"""
+        self.info("⏱️ 성능 정보")
+        total_time = performance.get('total_time', 0)
+        data_time = performance.get('data_time', 0)
+        analysis_time = performance.get('analysis_time', 0)
+        
+        self.info(f"   └─ 총 소요 시간: {total_time:.0f}초")
+        self.info(f"   └─ 데이터 수집: {data_time:.0f}초")
+        self.info(f"   └─ 분석 처리: {analysis_time:.0f}초")
+    
+    def log_saved_files(self, files: Dict[str, str]):
+        """저장된 파일 로그"""
+        self.info("💾 저장된 파일")
+        for file_type, file_path in files.items():
+            self.info(f"   └─ {file_type}: {file_path}")
+    
+    def complete_analysis_report(self, results: Dict[str, Any], performance: Dict[str, Any], files: Dict[str, str]):
+        """분석 완료 보고서"""
+        end_time = time.time()
+        start_time = self._progress_tracker.get('start_time', end_time)
+        total_time = end_time - start_time
+        
+        self.info("═══════════════════════════════════════════════════════════════")
+        self.info("🎉 분석 완료 보고서")
+        self.info("═══════════════════════════════════════════════════════════════")
+        
+        # 최종 결과
+        self.log_final_results(results)
+        
+        # 성능 정보
+        performance['total_time'] = total_time
+        self.log_performance_info(performance)
+        
+        # 저장된 파일
+        self.log_saved_files(files)
+        
+        self.info("═══════════════════════════════════════════════════════════════")
+        self.info(f"[SUCCESS] 주식 분석이 성공적으로 완료되었습니다! (총 {total_time:.0f}초 소요)")
+        self.info("═══════════════════════════════════════════════════════════════")
     
     def clear_duplicate_cache(self):
         """중복 메시지 캐시 초기화 (스레드 안전)"""
@@ -311,6 +512,83 @@ def log_progress(message: str, current: int, total: int, context: Optional[Dict[
     except Exception as e:
         percentage = (current / total * 100) if total > 0 else 0
         print(f"[PROGRESS] {message} ({current:,}/{total:,} - {percentage:.1f}%) | Logger Error: {e}")
+
+def log_step(step_name: str, status: str = "START", context: Optional[Dict[str, Any]] = None):
+    """단계별 로그 편의 함수 - 사용자 친화적"""
+    try:
+        _get_logger().log_step(step_name, status, context)
+    except Exception as e:
+        print(f"[{status}] {step_name} | Logger Error: {e}")
+
+def log_success(message: str, context: Optional[Dict[str, Any]] = None):
+    """성공 로그 편의 함수"""
+    try:
+        _get_logger().info(f"[SUCCESS] {message}", context)
+    except Exception as e:
+        print(f"[SUCCESS] {message} | Logger Error: {e}")
+
+def log_start(message: str, context: Optional[Dict[str, Any]] = None):
+    """시작 로그 편의 함수"""
+    try:
+        _get_logger().info(f"[START] {message}", context)
+    except Exception as e:
+        print(f"[START] {message} | Logger Error: {e}")
+
+def log_complete(message: str, context: Optional[Dict[str, Any]] = None):
+    """완료 로그 편의 함수"""
+    try:
+        _get_logger().info(f"[COMPLETE] {message}", context)
+    except Exception as e:
+        print(f"[COMPLETE] {message} | Logger Error: {e}")
+
+def start_analysis_report(analysis_date: str):
+    """분석 시작 보고서 헤더"""
+    try:
+        _get_logger().start_analysis_report(analysis_date)
+    except Exception as e:
+        print(f"[REPORT] Analysis report start failed: {e}")
+
+def log_data_collection_status(step: str, status: str, details: Dict[str, Any] = None):
+    """데이터 수집 현황 로그"""
+    try:
+        _get_logger().log_data_collection_status(step, status, details)
+    except Exception as e:
+        print(f"[REPORT] Data collection status log failed: {e}")
+
+def log_processing_status(step: str, status: str, details: Dict[str, Any] = None):
+    """분석 처리 현황 로그"""
+    try:
+        _get_logger().log_processing_status(step, status, details)
+    except Exception as e:
+        print(f"[REPORT] Processing status log failed: {e}")
+
+def log_final_results(results: Dict[str, Any]):
+    """최종 결과 로그"""
+    try:
+        _get_logger().log_final_results(results)
+    except Exception as e:
+        print(f"[REPORT] Final results log failed: {e}")
+
+def log_performance_info(performance: Dict[str, Any]):
+    """성능 정보 로그"""
+    try:
+        _get_logger().log_performance_info(performance)
+    except Exception as e:
+        print(f"[REPORT] Performance info log failed: {e}")
+
+def log_saved_files(files: Dict[str, str]):
+    """저장된 파일 로그"""
+    try:
+        _get_logger().log_saved_files(files)
+    except Exception as e:
+        print(f"[REPORT] Saved files log failed: {e}")
+
+def complete_analysis_report(results: Dict[str, Any], performance: Dict[str, Any], files: Dict[str, str]):
+    """분석 완료 보고서"""
+    try:
+        _get_logger().complete_analysis_report(results, performance, files)
+    except Exception as e:
+        print(f"[REPORT] Complete analysis report failed: {e}")
 
 def clear_log_cache():
     """중복 메시지 캐시 초기화 - 스레드 안전 버전"""

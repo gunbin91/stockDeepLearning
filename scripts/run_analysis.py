@@ -6,6 +6,7 @@ import os
 import sys
 import io
 import numpy as np # numpy 임포트 추가
+import time
 
 # 크로스 플랫폼 인코딩 설정
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,7 +38,9 @@ import data_fetcher
 import scoring
 import ml_model
 import ensemble
-from logger import log_info, log_warning, log_error, log_critical
+from logger import (log_info, log_warning, log_error, log_critical, log_step, log_success, log_start, log_complete,
+                   start_analysis_report, log_data_collection_status, log_processing_status, log_final_results,
+                   log_performance_info, log_saved_files, complete_analysis_report)
 from exceptions import DataFetchError, ModelPredictionError, AnalysisError
 
 # 결과물을 저장할 캐시 디렉토리 생성
@@ -46,10 +49,17 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 def run_analysis(analysis_date_str):
     """주어진 날짜를 기준으로 주식 데이터를 분석하고 결과를 파일에 저장합니다."""
+    start_time = time.time()
+    data_start_time = None
+    analysis_start_time = None
+    
     try:
-        log_info(f"분석 시작 (기준일: {analysis_date_str})")
+        # 분석 시작 보고서 헤더 (기존 로그와 함께)
+        start_analysis_report(analysis_date_str)
+        log_start(f"주식 분석 시작 (기준일: {analysis_date_str})")
         analysis_date = datetime.strptime(analysis_date_str, '%Y-%m-%d')
 
+        # 1단계: 종목 목록 수집
         log_info("전체 종목 목록 수신 중...")
         try:
             stock_list_df = data_fetcher.fetch_stock_list()
@@ -62,7 +72,9 @@ def run_analysis(analysis_date_str):
             log_error(f"종목 목록 수신 실패: {e}")
             raise AnalysisError(f"종목 목록 수신 실패: {e.message}", step="stock_list_fetch")
 
+        # 2단계: 데이터 수집 및 기술적 지표 계산
         log_info("재무/가격 데이터 수집 및 기술적 지표 계산 중... (시간이 다소 소요될 수 있습니다)")
+        data_start_time = time.time()
         try:
             # 주식추천 페이지에서는 캐시를 사용하지 않고 실시간 데이터 수집
             feature_df, actual_analysis_date = data_fetcher.fetch_all_data(stock_list_df, analysis_date, use_cache=False)
