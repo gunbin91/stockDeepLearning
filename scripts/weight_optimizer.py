@@ -23,6 +23,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 내부 모듈 임포트
 import ensemble
 import data_cacher
+from path_manager import path_manager
 
 # --- 설정 변수 ---
 VALIDATION_START_DATE = '2023-01-01'
@@ -154,7 +155,7 @@ if __name__ == '__main__':
         print(f"  - 최적 샤프 지수: {best_sharpe:.4f}")
         print(f"  - 최적 가중치: {best_weights}")
         if best_weights:
-            output_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'optimal_weights.json')
+            output_path = str(path_manager.get_weights_path())
             with open(output_path, 'w') as f:
                 json.dump(best_weights, f, indent=4)
             print(f"`{output_path}` 파일에 최적 가중치를 저장했습니다.")

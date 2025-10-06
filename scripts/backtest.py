@@ -32,13 +32,14 @@ import data_cacher
 from logger import (log_info, log_error, log_critical, log_warning, shutdown_logger,
                    start_analysis_report, log_data_collection_status, log_processing_status, 
                    log_final_results, log_performance_info, log_saved_files, complete_analysis_report)
+from path_manager import path_manager
 
-# --- 설정 변수 ---
+# --- 설정 변수 (통일된 경로 사용) ---
 TEST_START_DATE = '2024-01-01'
 TEST_END_DATE = datetime.now().strftime('%Y-%m-%d')
-WEIGHTS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'optimal_weights.json')
-MODEL_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'stock_prediction_model_rf_upgraded.joblib')
-REPORT_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'backtest_report.html')
+WEIGHTS_FILE = str(path_manager.get_weights_path())
+MODEL_FILE = str(path_manager.get_model_path())
+REPORT_FILE = str(path_manager.get_backtest_report_path())
 TOP_N_STOCKS = 5
 
 def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, buy_universe_rank, transaction_fee_rate):

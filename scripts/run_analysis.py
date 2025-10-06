@@ -43,9 +43,9 @@ from logger import (log_info, log_warning, log_error, log_critical, log_step, lo
                    log_performance_info, log_saved_files, complete_analysis_report)
 from exceptions import DataFetchError, ModelPredictionError, AnalysisError
 
-# 결과물을 저장할 캐시 디렉토리 생성
-CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'cache')
-os.makedirs(CACHE_DIR, exist_ok=True)
+# 통일된 경로 사용 (중복 생성 제거)
+from path_manager import get_cache_dir
+CACHE_DIR = str(get_cache_dir())
 
 def run_analysis(analysis_date_str):
     """주어진 날짜를 기준으로 주식 데이터를 분석하고 결과를 파일에 저장합니다."""

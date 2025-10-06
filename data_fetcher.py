@@ -17,8 +17,9 @@ from logger import (log_info, log_warning, log_error, log_critical, log_progress
 from exceptions import DataFetchError, DataValidationError
 from smart_cache import get_cache, cached
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-FINANCIAL_DB_PATH = os.path.join(PROJECT_ROOT, 'data', 'financial_data_pykrx_pit.parquet')
+from path_manager import path_manager
+PROJECT_ROOT = str(path_manager.project_root)
+FINANCIAL_DB_PATH = str(path_manager.get_financial_db_path())
 
 def get_actual_trading_date(selected_analysis_date):
     """실제 거래일을 확인하는 공통 함수"""

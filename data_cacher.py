@@ -12,10 +12,12 @@ import gc
 
 from scoring import calculate_factor_scores
 from smart_cache import get_cache, cached
+from path_manager import path_manager
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-CACHE_DIR = os.path.join(PROJECT_ROOT, "cache")
-FINANCIAL_DB_PATH = os.path.join(PROJECT_ROOT, 'data', 'financial_data_pykrx_pit.parquet')
+# 통일된 경로 사용
+PROJECT_ROOT = str(path_manager.project_root)
+CACHE_DIR = str(path_manager.cache_dir)
+FINANCIAL_DB_PATH = str(path_manager.get_financial_db_path())
 CACHE_END_DATE = datetime(datetime.now().year, 12, 31).strftime('%Y-%m-%d')
 CACHE_FILENAME = f"historical_data_up_to_{CACHE_END_DATE.replace('-', '')}.parquet"
 CACHE_FILE_PATH = os.path.join(CACHE_DIR, CACHE_FILENAME)
@@ -579,7 +581,7 @@ def get_preprocessed_data(start_date, end_date, use_cache=True, auto_update=True
             "auto_update": auto_update
         })
         
-        os.makedirs(CACHE_DIR, exist_ok=True)
+        # 캐시 디렉토리는 path_manager에서 자동 생성됨
         cache = get_cache()
         
         # 캐시 사용 시 자동 업데이트 실행 (강화된 에러 처리)

@@ -77,12 +77,15 @@ class StockAnalysisLogger:
         }
         
     def _get_log_directory(self, log_dir: Optional[str]) -> str:
-        """로그 디렉토리 경로 설정"""
+        """로그 디렉토리 경로 설정 (통일된 경로 사용)"""
         if log_dir is None:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            if os.path.basename(current_dir) == 'run':
-                return os.path.join(current_dir, '..', 'logs')
-            else:
+            # path_manager를 사용하여 통일된 경로 사용
+            try:
+                from path_manager import get_logs_dir
+                return str(get_logs_dir())
+            except ImportError:
+                # path_manager가 없는 경우 기본 경로 사용
+                current_dir = os.path.dirname(os.path.abspath(__file__))
                 return os.path.join(current_dir, 'logs')
         return log_dir
     

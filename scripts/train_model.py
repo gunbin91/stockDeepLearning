@@ -22,6 +22,7 @@ import psutil
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import data_cacher
+from path_manager import path_manager
 from logger import log_info, log_warning, log_error 
 
 warnings.filterwarnings('ignore', category=FutureWarning)
@@ -153,10 +154,14 @@ def create_training_data():
     log_info("✅ 학습 데이터 생성 완료!")
     return X, y, features, imputation_values
 
-def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_iter, max_depth_list, model_path=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'stock_prediction_model_rf_upgraded.joblib')):
+def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_iter, max_depth_list, model_path=None):
     if X is None or y is None or X.empty or y.empty:
         log_error("학습 데이터가 없어 모델링을 건너뜁니다.")
         return
+
+    # 통일된 경로 사용
+    if model_path is None:
+        model_path = str(path_manager.get_model_path())
 
     log_info("🤖 모델 학습 및 평가를 시작합니다...")
     log_memory_usage("모델 학습 시작")
@@ -326,9 +331,8 @@ def main():
     # ==============================================================================
     # ✨ 핵심 수정: 임시 폴더 생성 및 자동 삭제 로직 추가 ✨
     # ==============================================================================
-    # 1. 프로젝트 루트 경로를 기준으로 임시 폴더 경로 설정
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    temp_folder_path = os.path.join(project_root, '.joblib_temp')
+    # 1. 통일된 경로로 임시 폴더 경로 설정
+    temp_folder_path = str(path_manager.get_temp_dir('joblib_temp'))
 
     try:
         # 2. 임시 폴더 생성 및 환경 변수 설정
@@ -348,13 +352,12 @@ def main():
 
     finally:
         # 4. 학습 성공/실패 여부와 관계없이 항상 임시 폴더 삭제
-        if os.path.exists(temp_folder_path):
-            log_info(f"\n🧹 학습 완료 후 임시 폴더 삭제 중: {temp_folder_path}")
-            try:
-                shutil.rmtree(temp_folder_path)
-                log_info("✅ 임시 폴더가 성공적으로 삭제되었습니다.")
-            except Exception as e:
-                log_warning(f"⚠️ 임시 폴더를 삭제하는 중 오류가 발생했습니다: {e}")
+        log_info(f"\n🧹 학습 완료 후 임시 폴더 삭제 중: {temp_folder_path}")
+        try:
+            path_manager.cleanup_temp_dir('joblib_temp')
+            log_info("✅ 임시 폴더가 성공적으로 삭제되었습니다.")
+        except Exception as e:
+            log_warning(f"⚠️ 임시 폴더를 삭제하는 중 오류가 발생했습니다: {e}")
         
         # 최종 메모리 사용량 로그
         log_memory_usage("프로그램 종료")

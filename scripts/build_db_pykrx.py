@@ -17,9 +17,9 @@ sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
 # --- ✨ 핵심 수정: 데이터 수집 시작 기간 변경 ✨ ---
 START_DATE = "20150101"
 END_DATE = datetime.now().strftime("%Y%m%d")
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
-OUTPUT_PATH = os.path.join(DATA_DIR, 'financial_data_pykrx_pit.parquet')
+from path_manager import path_manager
+DATA_DIR = str(path_manager.data_dir)
+OUTPUT_PATH = str(path_manager.get_financial_db_path())
 
 def build_point_in_time_db_pykrx():
     """

@@ -33,6 +33,7 @@ import ml_model
 import ensemble
 from logger import log_info, log_warning, log_error, log_critical
 from exceptions import DataFetchError, ModelPredictionError, AnalysisError
+from path_manager import path_manager, ensure_all_directories
 
 # Flask 앱 초기화
 app = Flask(__name__)
@@ -53,9 +54,9 @@ def moment_filter(value, format_string='YYYY-MM-DD'):
         return value
     return value.strftime('%Y-%m-%d')
 
-# 설정
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'data', 'stock_prediction_model_rf_upgraded.joblib')
-CACHE_DIR = os.path.join(os.path.dirname(__file__), 'cache')
+# 설정 (통일된 경로 사용)
+MODEL_PATH = str(path_manager.get_model_path())
+CACHE_DIR = str(path_manager.cache_dir)
 
 # 전역 변수
 analysis_processes = {}  # 진행 중인 분석 프로세스 추적
@@ -912,10 +913,8 @@ if __name__ == '__main__':
     # 플래그 초기화
     reset_flags()
     
-    # 템플릿과 정적 파일 디렉토리 생성
-    os.makedirs('templates', exist_ok=True)
-    os.makedirs('static/css', exist_ok=True)
-    os.makedirs('static/js', exist_ok=True)
+    # 통일된 경로로 필요한 디렉토리 생성
+    ensure_all_directories()
     
     # 포트 결정
     if args.port:
