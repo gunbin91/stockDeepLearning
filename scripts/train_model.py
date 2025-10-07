@@ -21,7 +21,7 @@ import psutil
 # 크로스 플랫폼 인코딩 설정
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import data_cacher
+import data_processor
 from path_manager import path_manager
 from logger import log_info, log_warning, log_error 
 
@@ -58,22 +58,22 @@ def check_memory_and_cleanup(threshold_mb=8000):
     return False
 
 def create_training_data():
-    log_info("🚀 캐시 관리 모듈을 통해 학습 데이터 생성을 시작합니다...")
+    log_info("🚀 실시간 데이터 수집을 통해 학습 데이터 생성을 시작합니다...")
     log_memory_usage("학습 데이터 생성 시작")
     
     start_date_for_cacher = '2015-01-01'
     end_date_for_cacher = datetime.now().strftime('%Y-%m-%d')
     
     try:
-        # 자동 업데이트 활성화하여 데이터 로딩 (2015년부터 현재까지)
-        final_df = data_cacher.get_preprocessed_data(start_date_for_cacher, end_date_for_cacher, use_cache=True, auto_update=True)
+        # 실시간 데이터 수집 (2015년부터 현재까지)
+        final_df = data_processor.get_preprocessed_data(start_date_for_cacher, end_date_for_cacher)
         log_memory_usage("데이터 로딩 완료")
         check_memory_and_cleanup()
     except MemoryError as e:
         log_error(f"메모리 부족으로 데이터 로딩 실패: {e}")
         log_info("   🔄 메모리 정리 후 재시도합니다...")
         safe_memory_cleanup()
-        final_df = data_cacher.get_preprocessed_data(start_date_for_cacher, end_date_for_cacher, use_cache=True, auto_update=True)
+        final_df = data_processor.get_preprocessed_data(start_date_for_cacher, end_date_for_cacher)
         log_memory_usage("재시도 후 데이터 로딩 완료")
     
     if final_df is None or final_df.empty:

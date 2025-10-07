@@ -43,9 +43,8 @@ from logger import (log_info, log_warning, log_error, log_critical, log_step, lo
                    log_performance_info, log_saved_files, complete_analysis_report)
 from exceptions import DataFetchError, ModelPredictionError, AnalysisError
 
-# 통일된 경로 사용 (중복 생성 제거)
-from path_manager import get_cache_dir
-CACHE_DIR = str(get_cache_dir())
+# 캐시 디렉토리 사용 안함 - 실시간 데이터 수집으로 전환
+from path_manager import path_manager
 
 def run_analysis(analysis_date_str):
     """주어진 날짜를 기준으로 주식 데이터를 분석하고 결과를 파일에 저장합니다."""
@@ -76,8 +75,17 @@ def run_analysis(analysis_date_str):
         log_info("재무/가격 데이터 수집 및 기술적 지표 계산 중... (시간이 다소 소요될 수 있습니다)")
         data_start_time = time.time()
         try:
+            # 메모리 정리
+            import gc
+            gc.collect()
+            
             # 주식추천 페이지에서는 캐시를 사용하지 않고 실시간 데이터 수집
             feature_df, actual_analysis_date = data_fetcher.fetch_all_data(stock_list_df, analysis_date, use_cache=False)
+            
+            # 데이터 수집 후 메모리 정리
+            gc.collect()
+            log_info("   🧹 데이터 수집 후 메모리 정리 완료")
+            
         except DataFetchError as e:
             log_error(f"데이터 수집 실패: {e}")
             raise AnalysisError(f"데이터 수집 실패: {e.message}", step="data_fetch")
@@ -90,7 +98,7 @@ def run_analysis(analysis_date_str):
         if '종목코드' in feature_df_for_json.columns:
             feature_df_for_json['종목코드'] = feature_df_for_json['종목코드'].astype(str).str.zfill(6)
             
-        feature_df_path = os.path.join(CACHE_DIR, 'cached_features.json')
+        feature_df_path = os.path.join(str(path_manager.data_dir), 'cached_features.json')
         feature_df_for_json.to_json(feature_df_path, orient='records', force_ascii=False, indent=4)
         log_info(f"피처 데이터를 '{feature_df_path}'에 저장했습니다.")
         
@@ -112,77 +120,173 @@ def run_analysis(analysis_date_str):
         else:
             log_warning("   ⚠️ 일부 거시경제 지표 데이터가 누락되었습니다.")
         
-        market_condition_path = os.path.join(CACHE_DIR, 'market_condition.json')
+        market_condition_path = os.path.join(str(path_manager.data_dir), 'market_condition.json')
         with open(market_condition_path, 'w', encoding='utf-8') as f:
             json.dump(market_condition, f, ensure_ascii=False, indent=4)
         log_info(f"   💾 시장 현황 데이터를 '{market_condition_path}'에 저장했습니다.")
 
         log_info("📊 팩터별 점수 계산을 시작합니다...")
-        scored_df = scoring.calculate_factor_scores(feature_df)
+        try:
+            # 메모리 정리
+            import gc
+            gc.collect()
+            
+            scored_df = scoring.calculate_factor_scores(feature_df)
+            
+            if scored_df is None or scored_df.empty:
+                error_msg = "팩터 점수 계산 결과가 비어있습니다."
+                log_error(error_msg)
+                raise AnalysisError(error_msg, step="factor_scoring")
+                
+            log_info(f"   ✅ 팩터 점수 계산 완료: {len(scored_df):,}개 종목")
+            
+            # 메모리 정리
+            gc.collect()
+            
+        except Exception as e:
+            log_error(f"팩터 점수 계산 중 오류: {e}")
+            raise AnalysisError(f"팩터 점수 계산 중 오류: {e}", step="factor_scoring")
 
         log_info("머신러닝 모델 예측 중...")
         try:
+            # 메모리 정리
+            import gc
+            gc.collect()
+            log_info("   🧹 메모리 정리 완료")
+            
+            # 모델 예측 시도
+            log_info("   🤖 ML 모델 로딩 중...")
             ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
+            
             if ml_predicted_df is None:
-                error_msg = "머신러닝 모델 예측에 실패했습니다."
+                error_msg = "머신러닝 모델 예측 결과가 None입니다."
                 log_error(error_msg)
                 raise AnalysisError(error_msg, step="ml_prediction")
+            
+            if ml_predicted_df.empty:
+                error_msg = "머신러닝 모델 예측 결과가 비어있습니다."
+                log_error(error_msg)
+                raise AnalysisError(error_msg, step="ml_prediction")
+                
+            log_info(f"   ✅ ML 모델 예측 완료: {len(ml_predicted_df):,}개 종목")
+            
         except ModelPredictionError as e:
             log_error(f"머신러닝 모델 예측 실패: {e}")
             raise AnalysisError(f"머신러닝 모델 예측 실패: {e.message}", step="ml_prediction")
+        except MemoryError as e:
+            log_error(f"메모리 부족으로 인한 ML 모델 예측 실패: {e}")
+            raise AnalysisError(f"메모리 부족으로 인한 ML 모델 예측 실패: {e}", step="ml_prediction")
+        except Exception as e:
+            log_error(f"ML 모델 예측 중 예상치 못한 오류: {e}")
+            raise AnalysisError(f"ML 모델 예측 중 예상치 못한 오류: {e}", step="ml_prediction")
 
         log_info("🎯 앙상블 최종 점수 계산을 시작합니다...")
-        merged_df = pd.merge(scored_df, ml_predicted_df, on='종목코드', how='left')
-        log_info(f"   📊 머신러닝 예측 결과 병합 완료: {len(merged_df):,}개 종목")
-        
-        log_info("   ✅ 팩터 점수 계산 완료")
-        
-        final_ranked_df = ensemble.calculate_final_score(merged_df)
+        try:
+            # 메모리 정리
+            import gc
+            gc.collect()
+            
+            merged_df = pd.merge(scored_df, ml_predicted_df, on='종목코드', how='left')
+            log_info(f"   📊 머신러닝 예측 결과 병합 완료: {len(merged_df):,}개 종목")
+            
+            if merged_df.empty:
+                error_msg = "병합된 데이터가 비어있습니다."
+                log_error(error_msg)
+                raise AnalysisError(error_msg, step="data_merge")
+            
+            log_info("   ✅ 팩터 점수 계산 완료")
+            
+            # 앙상블 계산
+            log_info("   🎯 앙상블 점수 계산 중...")
+            final_ranked_df = ensemble.calculate_final_score(merged_df)
+            
+            if final_ranked_df is None or final_ranked_df.empty:
+                error_msg = "앙상블 점수 계산 결과가 비어있습니다."
+                log_error(error_msg)
+                raise AnalysisError(error_msg, step="ensemble_calculation")
+                
+            log_info(f"   ✅ 앙상블 점수 계산 완료: {len(final_ranked_df):,}개 종목")
+            
+        except Exception as e:
+            log_error(f"앙상블 계산 중 오류: {e}")
+            raise AnalysisError(f"앙상블 계산 중 오류: {e}", step="ensemble_calculation")
 
         # 최종 결과에 종목명, 현재가 등 추가 정보 병합
         log_info("📋 최종 결과 데이터 정리 중...")
-        if '종목코드' not in final_ranked_df.columns:
-            final_ranked_df.reset_index(inplace=True)
-        
-        # 종목코드 6자리 패딩 보장
-        final_ranked_df['종목코드'] = final_ranked_df['종목코드'].astype(str).str.zfill(6)
-        stock_list_df['종목코드'] = stock_list_df['종목코드'].astype(str).str.zfill(6)
-        
-        final_df_with_names = pd.merge(final_ranked_df, stock_list_df[['종목코드', '종목명']].drop_duplicates(), on='종목코드', how='left')
-        log_info(f"   📊 종목명 병합 완료: {len(final_df_with_names):,}개 종목")
-        
-        # [FIX] 병합 시 종목명 컬럼 충돌 해결 로직 추가
-        if '종목명_x' in final_df_with_names.columns:
-            final_df_with_names['종목명'] = final_df_with_names['종목명_y'].fillna(final_df_with_names['종목명_x'])
-            final_df_with_names.drop(columns=['종목명_x', '종목명_y'], inplace=True)
+        try:
+            # 메모리 정리
+            import gc
+            gc.collect()
+            
+            if '종목코드' not in final_ranked_df.columns:
+                final_ranked_df.reset_index(inplace=True)
+            
+            # 종목코드 6자리 패딩 보장
+            final_ranked_df['종목코드'] = final_ranked_df['종목코드'].astype(str).str.zfill(6)
+            stock_list_df['종목코드'] = stock_list_df['종목코드'].astype(str).str.zfill(6)
+            
+            final_df_with_names = pd.merge(final_ranked_df, stock_list_df[['종목코드', '종목명']].drop_duplicates(), on='종목코드', how='left')
+            log_info(f"   📊 종목명 병합 완료: {len(final_df_with_names):,}개 종목")
+            
+            if final_df_with_names.empty:
+                error_msg = "최종 결과 데이터가 비어있습니다."
+                log_error(error_msg)
+                raise AnalysisError(error_msg, step="final_data_merge")
+            
+            # [FIX] 병합 시 종목명 컬럼 충돌 해결 로직 추가
+            if '종목명_x' in final_df_with_names.columns:
+                final_df_with_names['종목명'] = final_df_with_names['종목명_y'].fillna(final_df_with_names['종목명_x'])
+                final_df_with_names.drop(columns=['종목명_x', '종목명_y'], inplace=True)
 
-        log_info("   💰 가격 정보 병합 중...")
-        price_map = feature_df.set_index('종목코드')[['현재가', '기준일가']].to_dict(orient='index')
-        final_df_with_names['현재가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('현재가'))
-        final_df_with_names['기준일가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('기준일가'))
+            log_info("   💰 가격 정보 병합 중...")
+            price_map = feature_df.set_index('종목코드')[['현재가', '기준일가']].to_dict(orient='index')
+            final_df_with_names['현재가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('현재가'))
+            final_df_with_names['기준일가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('기준일가'))
 
-        # [FIX] 최종 데이터프레임에 분석 기준일 컬럼 추가
-        final_df_with_names['date'] = actual_analysis_date
+            # [FIX] 최종 데이터프레임에 분석 기준일 컬럼 추가
+            final_df_with_names['date'] = actual_analysis_date
 
-        # 결과 파일로 저장
-        log_info("💾 최종 분석 결과 저장 중...")
-        result_path = os.path.join(CACHE_DIR, 'analysis_result.json')
-        # 날짜 필드를 문자열로 변환 (JSON 직렬화 위함)
-        final_df_with_names['date'] = final_df_with_names['date'].dt.strftime('%Y-%m-%d')
-        final_df_with_names.to_json(result_path, orient='records', force_ascii=False, indent=4)
-        log_info(f"   ✅ 최종 분석 결과를 '{result_path}'에 저장했습니다.")
-        
-        # 최종 결과 통계
-        top_10_count = len(final_df_with_names[final_df_with_names['최종순위'] <= 10])
-        avg_score = final_df_with_names['final_score'].mean()
-        log_info(f"   📈 분석 결과: 상위 10위 종목 {top_10_count}개, 평균 점수 {avg_score:.2f}")
+            # 결과 파일로 저장
+            log_info("💾 최종 분석 결과 저장 중...")
+            result_path = os.path.join(str(path_manager.data_dir), 'analysis_result.json')
+            
+            # 날짜 필드를 문자열로 변환 (JSON 직렬화 위함)
+            final_df_with_names['date'] = final_df_with_names['date'].dt.strftime('%Y-%m-%d')
+            
+            # JSON 저장 시도
+            try:
+                final_df_with_names.to_json(result_path, orient='records', force_ascii=False, indent=4)
+                log_info(f"   ✅ 최종 분석 결과를 '{result_path}'에 저장했습니다.")
+            except Exception as e:
+                log_error(f"결과 파일 저장 실패: {e}")
+                raise AnalysisError(f"결과 파일 저장 실패: {e}", step="file_save")
+            
+            # 최종 결과 통계
+            top_10_count = len(final_df_with_names[final_df_with_names['최종순위'] <= 10])
+            avg_score = final_df_with_names['final_score'].mean()
+            log_info(f"   📈 분석 결과: 상위 10위 종목 {top_10_count}개, 평균 점수 {avg_score:.2f}")
 
-        log_info("🎉 주식 분석이 성공적으로 완료되었습니다!")
+            log_info("🎉 주식 분석이 성공적으로 완료되었습니다!")
+            
+        except Exception as e:
+            log_error(f"최종 결과 처리 중 오류: {e}")
+            raise AnalysisError(f"최종 결과 처리 중 오류: {e}", step="final_processing")
 
     except AnalysisError as e:
         log_error(f"분석 프로세스 중 오류 발생: {e}", exception=e, context={'function': 'main'})
+        # 메모리 정리
+        import gc
+        gc.collect()
     except Exception as e:
         log_critical(f"분석 프로세스 중 예상치 못한 예외 발생: {e}", exception=e, context={'function': 'main'})
+        # 메모리 정리
+        import gc
+        gc.collect()
+    finally:
+        # 최종 메모리 정리
+        import gc
+        gc.collect()
+        log_info("🧹 최종 메모리 정리 완료")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='주식 분석 스크립트')

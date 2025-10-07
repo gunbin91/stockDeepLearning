@@ -183,6 +183,8 @@ $(document).ready(function() {
             $('#stock_table').DataTable({
                 pageLength: 25,
                 order: [[0, 'asc']],
+                autoWidth: false,
+                tableWidth: '100%',
                 language: {
                     "lengthMenu": "페이지당 _MENU_ 개씩 보기",
                     "zeroRecords": "데이터가 없습니다",
@@ -198,13 +200,13 @@ $(document).ready(function() {
                     }
                 },
                 columnDefs: [
-                    { targets: [0], width: '80px' },
-                    { targets: [1], width: '120px' },
-                    { targets: [2], width: '100px' },
-                    { targets: [3, 4], width: '120px', className: 'text-end' },
-                    { targets: [5], width: '120px', className: 'text-end' },
-                    { targets: [6, 7, 8], width: '100px', className: 'text-end' },
-                    { targets: [9], width: '120px', className: 'text-end' }
+                    { targets: [0], width: '8%' },      // 최종순위
+                    { targets: [1], width: '15%' },     // 종목명
+                    { targets: [2], width: '10%' },     // 종목코드
+                    { targets: [3, 4], width: '12%', className: 'text-end' },  // 현재가, 등락율
+                    { targets: [5], width: '12%', className: 'text-end' },      // 기준일가
+                    { targets: [6, 7, 8], width: '10%', className: 'text-end' }, // 최종점수, 상승확률, 변동성
+                    { targets: [9], width: '11%', className: 'text-end' }       // 시가총액
                 ],
                 responsive: true,
                 scrollX: true,

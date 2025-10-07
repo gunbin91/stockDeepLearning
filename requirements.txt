@@ -13,11 +13,8 @@ lxml==4.9.4
 html5lib==1.1
 pandas-ta==0.4.67b0
 finance-datareader
+psutil>=5.9.0
 setuptools==80.0.0
-
-# Parquet 파일 지원을 위한 의존성
-fastparquet>=0.8.3
-pyarrow>=10.0.0
 
 # Flask 관련 패키지
 flask>=2.3.0

@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import json
 import os
-from smart_cache import get_cache
+# smart_cache 사용 안함 - 실시간 데이터 수집으로 전환
 from logger import log_info, log_warning, log_error, log_step, log_success, log_start, log_complete
 
 def calculate_final_score(df):
@@ -40,43 +40,30 @@ def calculate_final_score(df):
         final_df['최종순위'] = 1
         return final_df
 
-    # 캐시된 정규화 값 사용
-    cache = get_cache()
-    cache_key = f"normalization_{hash(str(active_factors.keys()))}"
-    
-    # 정규화 값 캐시 확인
-    cached_norms = cache.get('normalization', {'key': cache_key}, ttl_seconds=1800)
-    
-    if cached_norms is None:
-        log_info("   📊 정규화 값 계산 중...")
-        cached_norms = {}
-        for factor in active_factors.keys():
-            if factor == 'ml_pred_proba':
-                source_series = final_df[factor] * 100
-            else:
-                source_series = final_df[factor]
-                
-            min_val = source_series.min()
-            max_val = source_series.max()
+    # 실시간 정규화 값 계산 (캐시 사용 안함)
+    log_info("   📊 정규화 값 계산 중...")
+    cached_norms = {}
+    for factor in active_factors.keys():
+        if factor == 'ml_pred_proba':
+            source_series = final_df[factor] * 100
+        else:
+            source_series = final_df[factor]
             
-            if (max_val - min_val) > 0:
-                cached_norms[factor] = {
-                    'min': min_val,
-                    'max': max_val,
-                    'range': max_val - min_val
-                }
-            else:
-                cached_norms[factor] = {
-                    'min': 0,
-                    'max': 1,
-                    'range': 1
-                }
+        min_val = source_series.min()
+        max_val = source_series.max()
         
-        # 캐시 저장
-        cache.set('normalization', {'key': cache_key}, cached_norms, ttl_seconds=1800)
-        log_info("   💾 정규화 값 캐시 저장")
-    else:
-        log_info("   ✅ 캐시된 정규화 값 사용")
+        if (max_val - min_val) > 0:
+            cached_norms[factor] = {
+                'min': min_val,
+                'max': max_val,
+                'range': max_val - min_val
+            }
+        else:
+            cached_norms[factor] = {
+                'min': 0,
+                'max': 1,
+                'range': 1
+            }
     
     # 벡터화된 정규화 계산
     for factor in active_factors.keys():

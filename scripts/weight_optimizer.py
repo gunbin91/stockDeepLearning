@@ -22,7 +22,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 내부 모듈 임포트
 import ensemble
-import data_cacher
+import data_processor
 from path_manager import path_manager
 
 # --- 설정 변수 ---
@@ -38,7 +38,7 @@ WEIGHT_GRID = {
 
 def get_model_and_data():
     print("1. 최적화를 위한 데이터 준비 및 모델 학습 시작...")
-    full_data_df = data_cacher.get_preprocessed_data(TRAIN_START_DATE, VALIDATION_END_DATE)
+    full_data_df = data_processor.get_preprocessed_data(TRAIN_START_DATE, VALIDATION_END_DATE)
     
     train_df = full_data_df[full_data_df['date'] <= pd.to_datetime(TRAIN_END_DATE)].copy()
     validation_df = full_data_df[full_data_df['date'] >= pd.to_datetime(VALIDATION_START_DATE)].copy()

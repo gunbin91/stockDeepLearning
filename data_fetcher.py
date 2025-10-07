@@ -9,17 +9,29 @@ import concurrent.futures
 from tqdm import tqdm
 import os
 import sys
+import locale
+import platform
 from datetime import datetime, timedelta
 import time
 import gc
+
+# Windows 환경에서 로케일 설정 (FinanceDataReader 내부 오류 방지)
+if platform.system() == 'Windows':
+    try:
+        os.environ['LC_ALL'] = 'en_US.UTF-8'
+        os.environ['LANG'] = 'en_US.UTF-8'
+        locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+    except:
+        # 로케일 설정 실패 시 기본값 유지
+        pass
 from logger import (log_info, log_warning, log_error, log_critical, log_progress, log_step, log_success, log_start, log_complete,
                    log_data_collection_status)
 from exceptions import DataFetchError, DataValidationError
-from smart_cache import get_cache, cached
+# smart_cache 사용 안함 - 실시간 데이터 수집으로 전환, cached
 
 from path_manager import path_manager
 PROJECT_ROOT = str(path_manager.project_root)
-FINANCIAL_DB_PATH = str(path_manager.get_financial_db_path())
+# FINANCIAL_DB_PATH 제거 - 실시간 데이터 수집으로 전환
 
 def get_actual_trading_date(selected_analysis_date):
     """실제 거래일을 확인하는 공통 함수"""
@@ -48,34 +60,26 @@ def get_actual_trading_date(selected_analysis_date):
         return selected_date
 
 def get_fs_data_from_pit(stock_list, selected_analysis_date, use_cache=True):
-    # 공통 함수를 사용하여 실제 거래일 확인
-    actual_trading_date = get_actual_trading_date(selected_analysis_date)
-    today = datetime.now().date()
-    is_today_analysis = actual_trading_date == today
-    
-    if not use_cache:
-        log_step("실시간 재무데이터 수집", "START", {"모드": "주식추천 페이지"})
-        return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
-    elif is_today_analysis:
-        log_step("실시간 재무데이터 수집", "START", {"모드": "오늘 날짜 분석"})
-        return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
-    else:
-        log_step("과거 재무데이터 수집", "START", {"모드": "정적 데이터베이스"})
-        return _get_historical_financial_data(stock_list, selected_analysis_date)
+    # 항상 실시간 재무데이터 수집 (캐시 사용 안함)
+    log_step("실시간 재무데이터 수집", "START", {"모드": "실시간 수집"})
+    return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
 
 def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
     """실시간 재무데이터 수집"""
     try:
-        log_info("[NET] pykrx API를 통해 실시간 재무데이터를 수집합니다...")
+        log_info("📊 재무데이터 수집 중...")
         
-        # 분석 기준일을 YYYYMMDD 형식으로 변환
-        analysis_date_str = selected_analysis_date.strftime('%Y%m%d')
+        # 실제 거래일 확인
+        actual_trading_date = get_actual_trading_date(selected_analysis_date)
+        analysis_date_str = actual_trading_date.strftime('%Y%m%d')
+        
+        log_info(f"📅 거래일 기준 재무데이터 수집: {actual_trading_date} ({analysis_date_str})")
         
         # pykrx API로 재무데이터 수집
         df_fundamental = stock.get_market_fundamental(analysis_date_str, market="ALL")
         
         if df_fundamental.empty:
-            log_warning("[WARN] 실시간 재무데이터를 가져올 수 없습니다. 정적 데이터베이스를 시도합니다.")
+            log_warning("재무데이터를 가져올 수 없습니다. 재시도합니다.")
             return _get_historical_financial_data(stock_list, selected_analysis_date)
         
         # 데이터 정제
@@ -83,7 +87,7 @@ def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
             df_fundamental = df_fundamental[df_fundamental['PBR'] > 0]
         
         if df_fundamental.empty:
-            log_warning("[WARN] 유효한 재무데이터가 없습니다. 정적 데이터베이스를 시도합니다.")
+            log_warning("유효한 재무데이터가 없습니다. 재시도합니다.")
             return _get_historical_financial_data(stock_list, selected_analysis_date)
         
         # 컬럼명 정리
@@ -98,88 +102,17 @@ def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
         # stock_list와 병합
         result_df = pd.merge(stock_list[['종목코드']], df_fundamental, on='종목코드', how='left')
         
-        log_success(f"실시간 재무데이터 수집 완료: {len(result_df.dropna())}개 종목")
+        log_success(f"재무데이터 수집 완료: {len(result_df.dropna())}개 종목")
         return result_df
         
     except Exception as e:
-        log_error(f"실시간 재무데이터 수집 실패: {e}")
-        log_info("정적 데이터베이스를 시도합니다.")
+        log_error(f"재무데이터 수집 실패: {e}")
+        log_info("재무데이터 수집을 재시도합니다.")
         return _get_historical_financial_data(stock_list, selected_analysis_date)
 
 def _get_historical_financial_data(stock_list, selected_analysis_date):
-    """정적 재무데이터베이스에서 데이터 조회"""
-    try:
-        log_info(f"재무 지표 데이터베이스 로딩 시작: {FINANCIAL_DB_PATH}")
-        funda_df = pd.read_parquet(FINANCIAL_DB_PATH)
-        log_info("재무 지표 데이터베이스 로딩 완료")
-    except FileNotFoundError:
-        error_msg = f"재무 지표 데이터베이스 파일({FINANCIAL_DB_PATH})을 찾을 수 없습니다."
-        log_critical(error_msg)
-        log_info("실시간 재무데이터 수집을 시도합니다.")
-        return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
-    except Exception as e:
-        import traceback
-        error_msg = f"재무 지표 데이터베이스 로딩 중 오류 발생: {e}"
-        log_error(error_msg, exception=e, context={'function': 'get_fs_data_from_pit'})
-        log_info("실시간 재무데이터 수집을 시도합니다.")
-        return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
-    
-    log_info(f"분석 기준일({selected_analysis_date.strftime('%Y-%m-%d')}): pykrx DB에서 최신 재무 지표 조회.")
-    analysis_date_ts = pd.to_datetime(selected_analysis_date)
-    
-    available_funda = funda_df[funda_df['date'] <= analysis_date_ts].copy()
-    if available_funda.empty:
-        warning_msg = f"{analysis_date_ts.strftime('%Y-%m-%d')} 이전에 집계된 재무 지표 데이터가 없습니다."
-        log_warning(warning_msg)
-        log_info("실시간 재무데이터 수집을 시도합니다.")
-        return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
-    
-    latest_funda = available_funda.sort_values('date').drop_duplicates(subset=['종목코드'], keep='last')
-    
-    result_df = pd.merge(stock_list[['종목코드']], latest_funda, on='종목코드', how='left')
-    
-    # 누락된 재무데이터가 있는지 확인하고 실시간으로 보완
-    missing_data_count = result_df['PER'].isna().sum()
-    if missing_data_count > 0:
-        log_info(f"⚠️ {missing_data_count}개 종목의 재무데이터가 누락되었습니다. 실시간으로 보완합니다.")
-        
-        # 누락된 종목들만 실시간으로 수집
-        missing_tickers = result_df[result_df['PER'].isna()]['종목코드'].tolist()
-        if missing_tickers:
-            try:
-                log_info("🌐 누락된 종목들의 실시간 재무데이터를 수집합니다...")
-                analysis_date_str = selected_analysis_date.strftime('%Y%m%d')
-                df_fundamental = stock.get_market_fundamental(analysis_date_str, market="ALL")
-                
-                if not df_fundamental.empty and 'PBR' in df_fundamental.columns:
-                    df_fundamental = df_fundamental[df_fundamental['PBR'] > 0]
-                    df_fundamental.reset_index(inplace=True)
-                    df_fundamental.rename(columns={'티커': '종목코드'}, inplace=True)
-                    df_fundamental['date'] = pd.to_datetime(analysis_date_str, format='%Y%m%d')
-                    
-                    # 누락된 종목들만 필터링
-                    missing_tickers_str = [str(ticker) for ticker in missing_tickers]
-                    df_fundamental = df_fundamental[df_fundamental['종목코드'].astype(str).isin(missing_tickers_str)]
-                    
-                    if not df_fundamental.empty:
-                        # 누락된 데이터를 실시간 데이터로 업데이트
-                        for idx, row in df_fundamental.iterrows():
-                            mask = result_df['종목코드'] == row['종목코드']
-                            if mask.any():
-                                for col in ['PER', 'PBR', 'EPS', 'BPS']:
-                                    if col in row and pd.notna(row[col]):
-                                        result_df.loc[mask, col] = row[col]
-                        
-                        log_info(f"✅ {len(df_fundamental)}개 종목의 누락된 재무데이터를 실시간으로 보완했습니다.")
-                    else:
-                        log_warning("⚠️ 누락된 종목들의 실시간 재무데이터를 가져올 수 없습니다.")
-                else:
-                    log_warning("⚠️ 실시간 재무데이터 수집에 실패했습니다.")
-            except Exception as e:
-                log_warning(f"⚠️ 누락된 재무데이터 보완 중 오류 발생: {e}")
-    
-    log_info(f"✅ 사용 가능한 재무 지표 처리 완료: {len(result_df.dropna())}개 기업")
-    return result_df
+    """실시간 재무데이터 수집"""
+    return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
 
 def _apply_common_stock_filters(df):
     """공통 주식 필터링 로직"""
@@ -237,20 +170,58 @@ def fetch_stock_list_for_date(analysis_date):
 def _fetch_macro_data(start_date, end_date):
     log_info(f"거시 경제 지표 데이터 수집 중 ({start_date} ~ {end_date})...")
     try:
-        kospi = fdr.DataReader('KS11', start_date, end_date)
-        usdkrw = fdr.DataReader('USD/KRW', start_date, end_date)
-        vix = fdr.DataReader('^VIX', start_date, end_date)
-        macro_df = pd.concat([kospi['Close'].rename('KOSPI'), usdkrw['Close'].rename('USDKRW'), vix['Close'].rename('VIX')], axis=1).ffill()
-        for col in ['KOSPI', 'USDKRW', 'VIX']:
-            if col in macro_df.columns: 
+        # 날짜 형식을 명시적으로 변환
+        start_date_str = pd.to_datetime(start_date).strftime('%Y-%m-%d')
+        end_date_str = pd.to_datetime(end_date).strftime('%Y-%m-%d')
+        
+        # 각 데이터 소스별로 개별 처리 (오류 방지)
+        macro_data = {}
+        
+        try:
+            kospi = fdr.DataReader('KS11', start_date_str, end_date_str)
+            if not kospi.empty:
+                # 날짜 인덱스를 안전하게 처리 (format='mixed' 사용)
+                kospi_copy = kospi.copy()
+                kospi_copy.index = pd.to_datetime(kospi_copy.index, format='mixed', errors='coerce')
+                macro_data['KOSPI'] = kospi_copy['Close']
+        except Exception as e:
+            log_warning(f"KOSPI 데이터 수집 실패: {e}")
+        
+        try:
+            usdkrw = fdr.DataReader('USD/KRW', start_date_str, end_date_str)
+            if not usdkrw.empty:
+                # 날짜 인덱스를 안전하게 처리 (format='mixed' 사용)
+                usdkrw_copy = usdkrw.copy()
+                usdkrw_copy.index = pd.to_datetime(usdkrw_copy.index, format='mixed', errors='coerce')
+                macro_data['USDKRW'] = usdkrw_copy['Close']
+        except Exception as e:
+            log_warning(f"USD/KRW 데이터 수집 실패: {e}")
+        
+        try:
+            vix = fdr.DataReader('^VIX', start_date_str, end_date_str)
+            if not vix.empty:
+                # 날짜 인덱스를 안전하게 처리 (format='mixed' 사용)
+                vix_copy = vix.copy()
+                vix_copy.index = pd.to_datetime(vix_copy.index, format='mixed', errors='coerce')
+                macro_data['VIX'] = vix_copy['Close']
+        except Exception as e:
+            log_warning(f"VIX 데이터 수집 실패: {e}")
+            
+        if macro_data:
+            macro_df = pd.concat(macro_data.values(), axis=1, keys=macro_data.keys()).ffill()
+            for col in macro_df.columns:
                 macro_df[f'{col}_pct_1d'] = macro_df[col].pct_change(1)
                 macro_df[f'{col}_pct_5d'] = macro_df[col].pct_change(5)
-        log_info("✅ 거시 경제 지표 수집 완료.")
-        return macro_df
+            log_info("✅ 거시 경제 지표 수집 완료.")
+            return macro_df
+        else:
+            log_warning("거시 경제 지표 데이터를 가져올 수 없습니다.")
+            return pd.DataFrame()
     except Exception as e:
         error_msg = f"거시 경제 지표 수집 실패: {e}"
         log_error(error_msg)
-        raise DataFetchError(error_msg, source="macro_economic_data")
+        # 오류 발생 시 빈 DataFrame 반환 (분석 중단 방지)
+        return pd.DataFrame()
 
 def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for_fetch, selected_analysis_date, latest_fs_df):
     ticker = stock_info['종목코드']; shares = stock_info['상장주식수']
@@ -305,16 +276,31 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         
         bbands = df_for_indicators.ta.bbands(close='종가', length=20, std=2)
         # <<< ✨ 핵심 수정: pandas-ta 버전업에 따른 볼린저밴드 컬럼명 변경 대응 ✨ >>>
-        if bbands is not None and all(col in bbands.columns for col in ['BBL_20_2.0_2.0', 'BBU_20_2.0_2.0', 'BBM_20_2.0_2.0']):
-             latest_data['BBW_20_2'] = ((bbands['BBU_20_2.0_2.0'] - bbands['BBL_20_2.0_2.0']) / bbands['BBM_20_2.0_2.0']).iloc[-1]
-             # BB_Position 계산: (현재가 - 하단밴드) / (상단밴드 - 하단밴드)
-             current_price = df_for_indicators['종가'].iloc[-1]
-             bb_lower = bbands['BBL_20_2.0_2.0'].iloc[-1]
-             bb_upper = bbands['BBU_20_2.0_2.0'].iloc[-1]
-             if bb_upper != bb_lower:
-                 latest_data['BB_Position'] = (current_price - bb_lower) / (bb_upper - bb_lower)
-             else:
-                 latest_data['BB_Position'] = 0.5  # 중앙값
+        if bbands is not None and not bbands.empty:
+            # 새로운 컬럼명 형식 확인
+            if all(col in bbands.columns for col in ['BBL_20_2.0_2.0', 'BBU_20_2.0_2.0', 'BBM_20_2.0_2.0']):
+                latest_data['BBW_20_2'] = ((bbands['BBU_20_2.0_2.0'] - bbands['BBL_20_2.0_2.0']) / bbands['BBM_20_2.0_2.0']).iloc[-1]
+                # BB_Position 계산: (현재가 - 하단밴드) / (상단밴드 - 하단밴드)
+                current_price = df_for_indicators['종가'].iloc[-1]
+                bb_lower = bbands['BBL_20_2.0_2.0'].iloc[-1]
+                bb_upper = bbands['BBU_20_2.0_2.0'].iloc[-1]
+                if bb_upper != bb_lower:
+                    latest_data['BB_Position'] = (current_price - bb_lower) / (bb_upper - bb_lower)
+                else:
+                    latest_data['BB_Position'] = 0.5  # 중앙값
+            elif all(col in bbands.columns for col in ['BBL_20_2.0', 'BBU_20_2.0', 'BBM_20_2.0']):
+                latest_data['BBW_20_2'] = ((bbands['BBU_20_2.0'] - bbands['BBL_20_2.0']) / bbands['BBM_20_2.0']).iloc[-1]
+                # BB_Position 계산: (현재가 - 하단밴드) / (상단밴드 - 하단밴드)
+                current_price = df_for_indicators['종가'].iloc[-1]
+                bb_lower = bbands['BBL_20_2.0'].iloc[-1]
+                bb_upper = bbands['BBU_20_2.0'].iloc[-1]
+                if bb_upper != bb_lower:
+                    latest_data['BB_Position'] = (current_price - bb_lower) / (bb_upper - bb_lower)
+                else:
+                    latest_data['BB_Position'] = 0.5  # 중앙값
+            else:
+                latest_data['BBW_20_2'] = np.nan
+                latest_data['BB_Position'] = np.nan
         else:
              latest_data['BBW_20_2'] = np.nan
              latest_data['BB_Position'] = np.nan
@@ -378,33 +364,12 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     today = datetime.now().date()
     is_today_analysis = actual_trading_date == today
     
-    # 캐시 사용 여부에 따른 거시경제 데이터 수집
-    if not use_cache:
-        log_info("🔄 주식추천 페이지: 정합성 있는 실시간 거시경제 데이터를 수집합니다")
-        macro_df = _fetch_macro_data(start_date_for_fetch, end_date_for_fetch)
-    elif is_today_analysis:
-        log_info("🔄 오늘 날짜 분석: 거시경제 데이터를 실시간으로 수집합니다")
-        macro_df = _fetch_macro_data(start_date_for_fetch, end_date_for_fetch)
-    else:
-        # 과거 날짜 분석 시에만 캐시 사용
-        cache = get_cache()
-        cache_params = {
-            'start_date': start_date_for_fetch,
-            'end_date': end_date_for_fetch,
-            'function': 'macro_data'
-        }
-        cached_macro = cache.get('macro_data', cache_params, ttl_seconds=3600)
-        if cached_macro is not None:
-            log_info("✅ 캐시된 거시경제 데이터 로딩")
-            macro_df = cached_macro
-        else:
-            log_info("⚠️ 거시경제 데이터 캐시 미스, 새로 수집합니다")
-            macro_df = _fetch_macro_data(start_date_for_fetch, end_date_for_fetch)
-            # 캐시에 저장
-            cache.set('macro_data', cache_params, macro_df, ttl_seconds=3600)
+    # 실시간 거시경제 데이터 수집 (캐시 사용 안함)
+    log_info("🔄 실시간 거시경제 데이터를 수집합니다")
+    macro_df = _fetch_macro_data(start_date_for_fetch, end_date_for_fetch)
     if macro_df.empty:
-        log_warning("거시 경제 데이터 수집에 실패하여 분석을 중단합니다.")
-        return pd.DataFrame(), None
+        log_warning("거시 경제 데이터 수집에 실패했지만 분석을 계속합니다.")
+        # 거시경제 데이터 없이도 분석 계속
     all_feature_data, all_actual_dates = [], []
     stock_records = stock_list.to_dict('records')
     
@@ -450,9 +415,10 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
                     progress_percent = (completed_count / total_count) * 100
                     
                     # 매번 진행률 업데이트 (같은 줄에서) - PROGRESS 접두사 유지
-                    log_progress(f"그룹 {current_batch}/{total_batches} 처리 중", 
-                               completed_count, total_count,
-                               context={'batch': current_batch, 'total_batches': total_batches})
+                    if completed_count % 10 == 0 or completed_count == total_count:
+                        log_progress(f"그룹 {current_batch}/{total_batches} 처리 중", 
+                                   completed_count, total_count,
+                                   context={'batch': current_batch, 'total_batches': total_batches})
                     
                 except Exception as e: 
                     completed_count += 1

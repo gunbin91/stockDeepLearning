@@ -287,7 +287,7 @@ class StockAnalysisLogger:
         self._queue_log("CRITICAL", message, exception, context)
     
     def progress(self, message: str, current: int, total: int, context: Optional[Dict[str, Any]] = None):
-        """진행률 로그 - 스레드 안전 버전 (tqdm과 충돌 방지)"""
+        """진행률 로그 - 스레드 안전 버전 (주식추천 페이지 방식)"""
         percentage = (current / total * 100) if total > 0 else 0
         progress_message = f"[PROGRESS] {message} ({current:,}/{total:,} - {percentage:.1f}%)"
         
@@ -297,13 +297,21 @@ class StockAnalysisLogger:
         
         try:
             with self._lock:
-                # 같은 줄에서 업데이트 (tqdm 스타일)
-                print(f"\r{progress_message}", end='', flush=True)
-                # 완료 시에만 개행
+                # 주식추천 페이지 방식: \r 사용으로 덮어쓰기 (완전히 동일한 방식)
+                sys.stdout.write(progress_message + '\r')
+                sys.stdout.flush()
+                
+                # 완료 시 개행 추가 (주식추천 페이지 방식)
                 if current == total:
-                    print()  # 개행 추가
+                    sys.stdout.write('\n')
+                    sys.stdout.flush()
         except Exception:
-            print(f"[PROGRESS] {progress_message}")
+            # 예외 발생 시에도 동일한 방식 적용
+            sys.stdout.write(progress_message + '\r')
+            sys.stdout.flush()
+            if current == total:
+                sys.stdout.write('\n')
+                sys.stdout.flush()
     
     def log_step(self, step_name: str, status: str = "START", context: Optional[Dict[str, Any]] = None):
         """단계별 로그 - 사용자 친화적"""
@@ -514,7 +522,13 @@ def log_progress(message: str, current: int, total: int, context: Optional[Dict[
         _get_logger().progress(message, current, total, context)
     except Exception as e:
         percentage = (current / total * 100) if total > 0 else 0
-        print(f"[PROGRESS] {message} ({current:,}/{total:,} - {percentage:.1f}%) | Logger Error: {e}")
+        # [PROGRESS] 접두사 제거 - progress() 메서드에서 이미 추가됨
+        # print() 대신 sys.stdout.write() 사용으로 덮어쓰기 가능
+        sys.stdout.write(f"{message} ({current:,}/{total:,} - {percentage:.1f}%) | Logger Error: {e}\r")
+        sys.stdout.flush()
+        if current == total:
+            sys.stdout.write('\n')
+            sys.stdout.flush()
 
 def log_step(step_name: str, status: str = "START", context: Optional[Dict[str, Any]] = None):
     """단계별 로그 편의 함수 - 사용자 친화적"""

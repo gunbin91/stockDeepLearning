@@ -23,11 +23,11 @@ stockDeepLearning/
 │
 ├── 🔧 핵심 모듈
 │   ├── data_fetcher.py           # 데이터 수집 및 피처 계산
-│   ├── data_cacher.py            # 대용량 데이터 캐싱 시스템
+│   ├── data_processor.py         # 실시간 데이터 처리 시스템
 │   ├── scoring.py                # 팩터 점수 계산
 │   ├── ml_model.py               # 머신러닝 모델 예측
 │   ├── ensemble.py               # 앙상블 최종 점수 계산
-│   ├── smart_cache.py            # 스마트 캐싱 시스템
+│   ├── path_manager.py           # 통일된 경로 관리 시스템
 │   ├── logger.py                 # 로깅 시스템
 │   └── exceptions.py             # 예외 처리
 │
@@ -42,10 +42,11 @@ stockDeepLearning/
 │
 ├── 💾 데이터 저장소
 │   ├── data/
-│   │   ├── financial_data_pykrx_pit.parquet  # 재무 데이터베이스
 │   │   ├── stock_prediction_model_rf_upgraded.joblib  # ML 모델
-│   │   └── optimal_weights.json               # 최적 가중치
-│   └── cache/                     # 캐시 파일들
+│   │   ├── optimal_weights.json               # 최적 가중치
+│   │   ├── analysis_result.json              # 분석 결과
+│   │   ├── market_condition.json             # 시장 현황
+│   │   └── cached_features.json              # 피처 데이터
 │
 └── 📊 결과물
     ├── backtest_report.html       # 백테스팅 보고서
@@ -182,13 +183,10 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2️⃣ **데이터베이스 구축 (최초 1회 필수)**
+### 2️⃣ **데이터베이스 구축 (불필요 - 실시간 수집으로 전환)**
 ```bash
-# 재무 데이터베이스 구축
-python scripts/build_db_pykrx.py
-# 또는
-run/build_db_pykrx.command  # macOS
-run/build_db_pykrx.bat      # Windows
+# 캐시 시스템 제거로 인해 데이터베이스 구축 단계 불필요
+# 모든 데이터는 실시간으로 수집됩니다.
 ```
 
 ### 3️⃣ **모델 학습**
@@ -244,28 +242,25 @@ run/start_app.bat      # Windows
 
 ---
 
-## 💾 캐싱 시스템
+## 💾 실시간 데이터 수집 시스템
 
-### 🗂️ **캐시 파일 구조**
+### 🗂️ **데이터 파일 구조**
 ```
-cache/
-├── data/
-│   ├── no/
-│   │   └── normalization_*.parquet    # 정규화 값 캐시
-│   └── historical_data_up_to_*.parquet  # 과거 주식 데이터
-├── metadata/
-│   └── cache_metadata.json           # 캐시 메타데이터
-├── cached_features.json              # 피처 데이터 캐시
-├── analysis_result.json              # 분석 결과 캐시
-└── market_condition.json             # 시장 상황 캐시
+data/
+├── stock_prediction_model_rf_upgraded.joblib  # ML 모델
+├── optimal_weights.json               # 최적 가중치
+├── analysis_result.json              # 분석 결과
+├── market_condition.json             # 시장 현황
+└── cached_features.json              # 피처 데이터
 ```
 
-### ⚡ **성능 최적화 전략**
-- **TTL 기반 캐시**: 시간 기반 자동 만료
-- **LRU 정책**: 최근 사용하지 않은 캐시 우선 삭제
-- **청크 단위 처리**: 대용량 데이터 메모리 효율적 처리
+### ⚡ **효율성 최적화 전략**
+- **월초 수집**: 시가총액/재무 데이터는 월초 거래일만 수집
+- **일별 분배**: 월초 데이터를 해당 월의 모든 거래일에 분배
+- **실시간 수집**: 가격/거래량 데이터는 실시간 수집
 - **병렬 처리**: 16개 워커로 동시 데이터 수집
-- **자동 업데이트**: 캐시 자동 갱신 시스템
+- **메모리 관리**: 자동 가비지 컬렉션으로 메모리 효율성
+- **API 최적화**: 하이브리드 데이터 소스로 안정성 확보
 
 ---
 
@@ -374,7 +369,7 @@ cache/
 4. **캐시 고려**: 성능을 위해 캐시 활용 고려
 
 ### 🔄 **데이터 업데이트**
-- **일별 업데이트**: `data_cacher.py`의 자동 업데이트 기능 활용
+- **실시간 수집**: `data_processor.py`의 실시간 데이터 수집 기능 활용
 - **수동 업데이트**: 캐시 삭제 후 재실행
 - **데이터 검증**: 수집된 데이터 품질 확인
 

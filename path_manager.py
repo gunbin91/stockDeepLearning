@@ -40,10 +40,7 @@ class PathManager:
         """데이터 디렉토리"""
         return self.project_root / 'data'
     
-    @property
-    def cache_dir(self) -> Path:
-        """캐시 디렉토리"""
-        return self.project_root / 'cache'
+    # 캐시 디렉토리 제거 - 실시간 데이터 수집으로 전환
     
     @property
     def logs_dir(self) -> Path:
@@ -65,9 +62,7 @@ class PathManager:
         """실행 스크립트 디렉토리"""
         return self.project_root / 'run'
     
-    def get_financial_db_path(self) -> Path:
-        """재무 데이터베이스 파일 경로"""
-        return self.data_dir / 'financial_data_pykrx_pit.parquet'
+    # get_financial_db_path 제거 - 실시간 데이터 수집으로 전환
     
     def get_model_path(self) -> Path:
         """모델 파일 경로"""
@@ -81,15 +76,12 @@ class PathManager:
         """백테스팅 리포트 파일 경로"""
         return self.project_root / 'backtest_report.html'
     
-    def get_cache_file_path(self, filename: str) -> Path:
-        """캐시 파일 경로"""
-        return self.cache_dir / filename
+    # 캐시 파일 경로 메서드 제거 - 실시간 데이터 수집으로 전환
     
     def ensure_directories(self):
         """필요한 디렉토리들을 생성 (중복 생성 방지)"""
         directories = [
             self.data_dir,
-            self.cache_dir,
             self.logs_dir,
             self.templates_dir,
             self.static_dir,
@@ -125,9 +117,7 @@ def get_data_dir() -> Path:
     """데이터 디렉토리 반환"""
     return path_manager.data_dir
 
-def get_cache_dir() -> Path:
-    """캐시 디렉토리 반환"""
-    return path_manager.cache_dir
+# get_cache_dir 함수 제거 - 캐시 사용 안함
 
 def get_logs_dir() -> Path:
     """로그 디렉토리 반환"""

@@ -56,7 +56,6 @@ def moment_filter(value, format_string='YYYY-MM-DD'):
 
 # 설정 (통일된 경로 사용)
 MODEL_PATH = str(path_manager.get_model_path())
-CACHE_DIR = str(path_manager.cache_dir)
 
 # 전역 변수
 analysis_processes = {}  # 진행 중인 분석 프로세스 추적
@@ -149,9 +148,10 @@ def format_change_rate(change_percent):
     return f"{sign}{change_percent:.2f}%"
 
 def load_cached_analysis_result():
-    """캐시된 분석 결과 로드"""
-    result_path = os.path.join(CACHE_DIR, 'analysis_result.json')
-    market_path = os.path.join(CACHE_DIR, 'market_condition.json')
+    """분석 결과 로드 (캐시 없이)"""
+    # 분석 결과 파일 경로 (data 디렉토리 사용)
+    result_path = os.path.join(str(path_manager.data_dir), 'analysis_result.json')
+    market_path = os.path.join(str(path_manager.data_dir), 'market_condition.json')
     
     if os.path.exists(result_path) and os.path.exists(market_path):
         try:
@@ -466,12 +466,13 @@ def start_analysis():
                 current_analysis_process = process
                 
                 # 실시간 로그 전송
-                TQDM_REGEX = re.compile(r'\s*\d{1,3}%|.*')
                 PROGRESS_REGEX = re.compile(r'\[PROGRESS\].*\(\d+/\d+ - \d+\.\d+%\)')
                 last_line_was_tqdm = False
                 
                 for line in iter(process.stdout.readline, ''):
-                    if TQDM_REGEX.search(line):
+                    # 터미널 출력 (진행률 메시지만 특별 처리)
+                    if PROGRESS_REGEX.search(line):
+                        # 진행률 메시지만 덮어쓰기 처리
                         sys.stdout.write(line.strip() + '\r')
                         last_line_was_tqdm = True
                     else:
@@ -510,14 +511,13 @@ def start_analysis():
                     for emoji, replacement in emoji_replacements.items():
                         processed_line = processed_line.replace(emoji, replacement)
                     
-                    # 진행률 메시지 감지 및 접두사 추가 (기존 로직 유지)
+                    # 진행률 메시지 감지 및 접두사 추가
                     if PROGRESS_REGEX.search(line):
-                        # 진행률 메시지에 [PROGRESS] 접두사 추가
                         message = f"[PROGRESS] {processed_line}"
                     else:
                         message = processed_line
                     
-                    # WebSocket으로 로그 전송
+                    # WebSocket으로 로그 전송 (터미널과 동시)
                     socketio.emit('analysis_log', {'message': message})
                     
                     # 실행 양보 (이벤트 루프가 블로킹되지 않도록)
@@ -642,12 +642,13 @@ def start_backtest():
                 current_backtest_process = process
                 
                 # 실시간 로그 전송
-                TQDM_REGEX = re.compile(r'\s*\d{1,3}%|.*')
                 PROGRESS_REGEX = re.compile(r'\[PROGRESS\].*\(\d+/\d+ - \d+\.\d+%\)')
                 last_line_was_tqdm = False
                 
                 for line in iter(process.stdout.readline, ''):
-                    if TQDM_REGEX.search(line):
+                    # 터미널 출력 (진행률 메시지만 특별 처리)
+                    if PROGRESS_REGEX.search(line):
+                        # 진행률 메시지만 덮어쓰기 처리
                         sys.stdout.write(line.strip() + '\r')
                         last_line_was_tqdm = True
                     else:
@@ -686,14 +687,13 @@ def start_backtest():
                     for emoji, replacement in emoji_replacements.items():
                         processed_line = processed_line.replace(emoji, replacement)
                     
-                    # 진행률 메시지 감지 및 접두사 추가 (기존 로직 유지)
+                    # 진행률 메시지 감지 및 접두사 추가
                     if PROGRESS_REGEX.search(line):
-                        # 진행률 메시지에 [PROGRESS] 접두사 추가
                         message = f"[PROGRESS] {processed_line}"
                     else:
                         message = processed_line
                     
-                    # WebSocket으로 로그 전송
+                    # WebSocket으로 로그 전송 (터미널과 동시)
                     socketio.emit('backtest_log', {'message': message})
                     
                     # 실행 양보 (이벤트 루프가 블로킹되지 않도록)
@@ -786,7 +786,7 @@ def get_stock_chart(ticker_code):
 def get_stock_features(ticker_code):
     """종목 피처 데이터 API"""
     try:
-        cached_features_path = os.path.join(CACHE_DIR, 'cached_features.json')
+        cached_features_path = os.path.join(str(path_manager.data_dir), 'cached_features.json')
         if not os.path.exists(cached_features_path):
             return jsonify({'error': '피처 데이터를 찾을 수 없습니다.'}), 404
         

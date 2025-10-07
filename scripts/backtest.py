@@ -28,10 +28,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 내부 모듈 임포트
 import ensemble
-import data_cacher
+import data_processor
 from logger import (log_info, log_error, log_critical, log_warning, shutdown_logger,
                    start_analysis_report, log_data_collection_status, log_processing_status, 
-                   log_final_results, log_performance_info, log_saved_files, complete_analysis_report)
+                   log_final_results, log_performance_info, log_saved_files, complete_analysis_report,
+                   log_progress)
 from path_manager import path_manager
 
 # --- 설정 변수 (통일된 경로 사용) ---
@@ -56,7 +57,11 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         data_reset = data.reset_index()
         
         # 일별 최종 점수 계산 (에러 처리 강화)
-        for date, daily_data in tqdm(data_reset.groupby('date'), desc="일별 최종 점수 계산"):
+        total_dates = len(data_reset.groupby('date'))
+        for i, (date, daily_data) in enumerate(tqdm(data_reset.groupby('date'), desc="일별 최종 점수 계산", total=total_dates)):
+            # 진행률 로그 메시지 처리
+            if i % 10 == 0 or i == total_dates - 1:  # 10개마다 또는 마지막에 로그
+                log_progress("일별 최종 점수 계산", i + 1, total_dates)
             try:
                 temp_df = ensemble.calculate_final_score(daily_data.copy())
                 temp_df['date'] = date
@@ -99,7 +104,11 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
     take_profit_multiplier = 1 + (take_profit_pct / 100)
     stop_loss_multiplier = 1 - (stop_loss_pct / 100)
 
-    for date in tqdm(daily_dates, desc="상세 백테스팅 중"):
+    total_dates = len(daily_dates)
+    for i, date in enumerate(tqdm(daily_dates, desc="상세 백테스팅 중")):
+        # 진행률 로그 메시지 처리
+        if i % 50 == 0 or i == total_dates - 1:  # 50개마다 또는 마지막에 로그
+            log_progress("상세 백테스팅", i + 1, total_dates)
         try:
             # 로그: 현재 처리 중인 날짜 (9월 17일 이후만)
             if date >= pd.to_datetime('2025-09-17'):
@@ -316,7 +325,7 @@ def create_html_report(results, output_path=REPORT_FILE):
     sell_log = results['trade_log'].copy()
     if not sell_log.empty:
         # 백테스팅용 주식 목록 (캐시 없이 최신 데이터 사용)
-        stock_list = data_cacher.fetch_stock_list()
+        stock_list = data_processor.fetch_stock_list()
         sell_log = pd.merge(sell_log, stock_list, left_on='ticker', right_on='종목코드', how='left')
         
         sell_log['holding_period'] = (sell_log['sell_date'] - sell_log['buy_date']).dt.days
@@ -490,10 +499,31 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                 "end_date": TEST_END_DATE
             })
             
-            test_data = data_cacher.get_preprocessed_data(backtest_start_date_with_warmup, TEST_END_DATE, use_cache=True, auto_update=True)
+            test_data = data_processor.get_preprocessed_data(backtest_start_date_with_warmup, TEST_END_DATE)
             
             if test_data is None or test_data.empty:
+                log_critical("백테스팅 데이터가 비어있습니다", context={
+                    "start_date": backtest_start_date_with_warmup,
+                    "end_date": TEST_END_DATE
+                })
                 raise ValueError("백테스팅 데이터가 비어있습니다")
+            
+            # 데이터 품질 검증 추가
+            total_rows = len(test_data)
+            valid_rows = len(test_data.dropna(subset=['종목코드', 'date']))
+            data_quality = valid_rows / total_rows * 100 if total_rows > 0 else 0
+            
+            log_info(f"📊 백테스팅 데이터 품질: {valid_rows:,}/{total_rows:,}개 유효 행 ({data_quality:.1f}%)")
+            
+            if data_quality < 50:
+                log_critical("백테스팅 데이터 품질이 너무 낮습니다", context={
+                    "data_quality": data_quality,
+                    "valid_rows": valid_rows,
+                    "total_rows": total_rows
+                })
+                raise ValueError(f"백테스팅 데이터 품질이 너무 낮습니다: {data_quality:.1f}%")
+            elif data_quality < 80:
+                log_warning(f"⚠️ 백테스팅 데이터 품질이 낮습니다: {data_quality:.1f}% (권장: 90% 이상)")
                 
             log_info("백테스팅 데이터 로딩 완료", context={
                 "data_rows": len(test_data),

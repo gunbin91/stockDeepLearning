@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from smart_cache import get_cache
+# smart_cache 사용 안함 - 실시간 데이터 수집으로 전환
 from logger import log_info, log_warning, log_error, log_step, log_success, log_start, log_complete
 
 def calculate_factor_scores(df):
