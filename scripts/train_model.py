@@ -1,4 +1,16 @@
-# train_model.py
+"""
+머신러닝 모델 훈련 스크립트
+========================
+
+이 파일은 주식 상승 예측을 위한 머신러닝 모델을 훈련합니다.
+RandomForest 알고리즘을 사용하여 15일 후 5% 이상 상승할 확률을 예측합니다.
+
+주요 기능:
+- 대용량 데이터 처리 및 메모리 최적화
+- 하이퍼파라미터 자동 튜닝
+- 교차 검증을 통한 모델 성능 평가
+- 훈련된 모델 및 전처리기 저장
+"""
 
 import pandas as pd
 import numpy as np
@@ -17,6 +29,18 @@ import io
 import shutil # 폴더 삭제를 위해 shutil 라이브러리 임포트
 import gc
 import psutil
+import locale
+import platform
+
+# Windows 환경에서 로케일 설정 (FinanceDataReader 내부 오류 방지)
+if platform.system() == 'Windows':
+    try:
+        os.environ['LC_ALL'] = 'en_US.UTF-8'
+        os.environ['LANG'] = 'en_US.UTF-8'
+        locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+    except:
+        # 로케일 설정 실패 시 기본값 유지
+        pass
 
 # 크로스 플랫폼 인코딩 설정
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

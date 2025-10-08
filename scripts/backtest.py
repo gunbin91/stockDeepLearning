@@ -1,3 +1,17 @@
+"""
+백테스팅 실행 스크립트
+====================
+
+이 파일은 주식 투자 전략의 성과를 검증하기 위한 백테스팅을 수행합니다.
+과거 데이터를 사용하여 투자 전략의 수익률과 위험을 분석합니다.
+
+주요 기능:
+- 과거 데이터 기반 전략 검증
+- 수익률 및 위험 지표 계산
+- 거래 비용 및 세금 고려
+- 시각화된 결과 보고서 생성
+"""
+
 import pandas as pd
 import numpy as np
 import json
@@ -14,6 +28,18 @@ import io
 import traceback
 import threading
 import time
+import locale
+import platform
+
+# Windows 환경에서 로케일 설정 (FinanceDataReader 내부 오류 방지)
+if platform.system() == 'Windows':
+    try:
+        os.environ['LC_ALL'] = 'en_US.UTF-8'
+        os.environ['LANG'] = 'en_US.UTF-8'
+        locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+    except:
+        # 로케일 설정 실패 시 기본값 유지
+        pass
 
 # 증권거래세율 (0.15%)
 SECURITIES_TRANSACTION_TAX_RATE = 0.15

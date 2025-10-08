@@ -1,3 +1,17 @@
+"""
+가중치 최적화 스크립트
+===================
+
+이 파일은 팩터 점수와 머신러닝 예측 결과의 최적 가중치를 찾습니다.
+샤프 지수를 최대화하는 가중치 조합을 탐색하여 투자 성과를 극대화합니다.
+
+주요 기능:
+- 다양한 가중치 조합 탐색
+- 샤프 지수 기반 성과 평가
+- 병렬 처리를 통한 빠른 최적화
+- 최적 가중치 저장
+"""
+
 import pandas as pd
 import numpy as np
 import joblib
@@ -11,6 +25,18 @@ import os
 import sys
 import io
 import argparse
+import locale
+import platform
+
+# Windows 환경에서 로케일 설정 (FinanceDataReader 내부 오류 방지)
+if platform.system() == 'Windows':
+    try:
+        os.environ['LC_ALL'] = 'en_US.UTF-8'
+        os.environ['LANG'] = 'en_US.UTF-8'
+        locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+    except:
+        # 로케일 설정 실패 시 기본값 유지
+        pass
 
 # stdout/stderr를 UTF-8로 설정
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')

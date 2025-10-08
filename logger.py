@@ -1,4 +1,17 @@
-# logger.py
+"""
+통합 로깅 시스템
+===============
+
+이 파일은 프로젝트 전반에 걸쳐 일관된 로깅을 제공합니다.
+다양한 로그 레벨과 이모지를 사용하여 가독성을 높입니다.
+
+주요 기능:
+- 구조화된 로그 메시지
+- 이모지와 색상을 통한 시각적 구분
+- 스레드 안전 로깅
+- 로그 파일 자동 관리
+- 분석 보고서 생성
+"""
 
 import logging
 import os
@@ -12,7 +25,13 @@ import time
 from typing import Optional, Dict, Any
 
 class StockAnalysisLogger:
-    """보고서 형식 주식 분석 로거 - 엑셀 스타일 깔끔한 로그 시스템"""
+    """
+    주식 분석 전용 로거 클래스
+    
+    주식 분석 프로세스에 특화된 로깅 기능을 제공합니다.
+    이모지와 색상을 사용하여 로그의 가독성을 높이고,
+    분석 진행 상황을 실시간으로 추적할 수 있습니다.
+    """
     
     def __init__(self, name="stock_analysis", log_dir=None):
         self.name = name

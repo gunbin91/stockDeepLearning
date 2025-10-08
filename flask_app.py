@@ -1,6 +1,19 @@
-# flask_app.py - Flask 기반 주식 분석 시스템
+"""
+AI 기반 주식 분석 시스템 - 웹 애플리케이션
+===============================================
+
+이 파일은 주식 분석 시스템의 웹 인터페이스를 제공합니다.
+사용자가 웹 브라우저를 통해 주식 분석을 요청하고 결과를 확인할 수 있습니다.
+
+주요 기능:
+- 주식 분석 요청 및 결과 표시
+- 실시간 분석 진행 상황 모니터링
+- 백테스팅 기능
+- 종목별 상세 차트 및 데이터 조회
+"""
 
 # Eventlet 몽키 패치 (최상단에 위치해야 함)
+# 웹소켓 통신을 위한 비동기 처리 라이브러리
 import eventlet
 eventlet.monkey_patch()
 
@@ -12,8 +25,6 @@ import numpy as np
 from datetime import datetime, timedelta
 import subprocess
 import re
-import threading
-import time
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_from_directory
 from flask_socketio import SocketIO, emit
 import plotly.graph_objects as go
@@ -35,13 +46,20 @@ from logger import log_info, log_warning, log_error, log_critical
 from exceptions import DataFetchError, ModelPredictionError, AnalysisError
 from path_manager import path_manager, ensure_all_directories
 
-# Flask 앱 초기화
+# =============================================================================
+# 웹 애플리케이션 초기화
+# =============================================================================
+
+# Flask 웹 애플리케이션 생성
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'stock_analysis_secret_key_2024'
+
+# 실시간 통신을 위한 WebSocket 설정
+# 사용자에게 분석 진행 상황을 실시간으로 전달하기 위함
 socketio = SocketIO(app, 
-                   cors_allowed_origins="*",
-                   ping_timeout=60,      # 핑 타임아웃 60초 (기본 25초)
-                   ping_interval=25      # 핑 간격 25초 (기본 25초)
+                   cors_allowed_origins="*",  # 모든 도메인에서 접근 허용
+                   ping_timeout=60,           # 연결 유지 시간 60초
+                   ping_interval=25           # 연결 확인 간격 25초
 )
 
 # Jinja2 필터 추가
@@ -57,10 +75,13 @@ def moment_filter(value, format_string='YYYY-MM-DD'):
 # 설정 (통일된 경로 사용)
 MODEL_PATH = str(path_manager.get_model_path())
 
-# 전역 변수
-analysis_processes = {}  # 진행 중인 분석 프로세스 추적
-current_analysis_process = None  # 현재 분석 프로세스
-current_backtest_process = None  # 현재 백테스팅 프로세스
+# =============================================================================
+# 전역 변수 관리
+# =============================================================================
+
+# 현재 실행 중인 프로세스들을 추적하는 변수들
+current_analysis_process = None  # 주식 분석 프로세스
+current_backtest_process = None  # 백테스팅 프로세스
 
 # 플래그를 함수로 관리하여 더 안전하게 처리
 def get_analysis_running():
@@ -127,7 +148,7 @@ def cleanup_backtest_process():
     current_backtest_process = None
 
 # =============================================================================
-# 유틸리티 함수들 (기존 app.py에서 가져옴)
+# 유틸리티 함수들 - 데이터 포맷팅 및 처리
 # =============================================================================
 
 def format_price_with_change(row):
@@ -352,7 +373,7 @@ def create_stock_chart(ticker_code, stock_name):
         return None
 
 # =============================================================================
-# 라우트 정의
+# 웹 페이지 라우트 정의 - 사용자가 접근할 수 있는 페이지들
 # =============================================================================
 
 @app.route('/')
@@ -409,7 +430,7 @@ def backtest():
     return render_template('backtest.html', has_report=has_report)
 
 # =============================================================================
-# API 엔드포인트들
+# API 엔드포인트들 - 웹 페이지와 백엔드 간의 데이터 통신
 # =============================================================================
 
 @app.route('/api/start_analysis', methods=['POST'])
@@ -864,7 +885,7 @@ def get_backtest_status():
 
 
 # =============================================================================
-# WebSocket 이벤트 핸들러
+# WebSocket 이벤트 핸들러 - 실시간 통신 처리
 # =============================================================================
 
 @socketio.on('connect')
@@ -878,7 +899,7 @@ def handle_disconnect():
     pass
 
 # =============================================================================
-# 포트 찾기 함수
+# 포트 찾기 함수 - 사용 가능한 포트 자동 검색
 # =============================================================================
 
 def find_available_port(start_port=5000, max_port=5100):
@@ -897,7 +918,7 @@ def find_available_port(start_port=5000, max_port=5100):
     raise RuntimeError(f"포트 {start_port}-{max_port} 범위에서 사용 가능한 포트를 찾을 수 없습니다.")
 
 # =============================================================================
-# 메인 실행
+# 메인 실행 - 웹 서버 시작
 # =============================================================================
 
 if __name__ == '__main__':

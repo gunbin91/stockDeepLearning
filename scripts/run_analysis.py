@@ -1,11 +1,24 @@
+"""
+주식 분석 실행 스크립트
+====================
+
+이 파일은 주식 분석의 전체 프로세스를 실행하는 메인 스크립트입니다.
+데이터 수집부터 최종 결과 저장까지 모든 과정을 자동화합니다.
+
+주요 기능:
+- 종목 데이터 수집 및 전처리
+- 팩터 점수 계산
+- 머신러닝 예측
+- 앙상블 점수 계산
+- 결과 저장 및 보고서 생성
+"""
+
 import pandas as pd
 from datetime import datetime
 import argparse
 import json
 import os
 import sys
-import io
-import numpy as np # numpy 임포트 추가
 import time
 
 # 크로스 플랫폼 인코딩 설정
@@ -43,11 +56,21 @@ from logger import (log_info, log_warning, log_error, log_critical, log_step, lo
                    log_performance_info, log_saved_files, complete_analysis_report)
 from exceptions import DataFetchError, ModelPredictionError, AnalysisError
 
-# 캐시 디렉토리 사용 안함 - 실시간 데이터 수집으로 전환
 from path_manager import path_manager
 
 def run_analysis(analysis_date_str):
-    """주어진 날짜를 기준으로 주식 데이터를 분석하고 결과를 파일에 저장합니다."""
+    """
+    주식 분석 메인 실행 함수
+    
+    지정된 날짜를 기준으로 전체 주식 분석 프로세스를 실행합니다.
+    데이터 수집, 전처리, 팩터 계산, ML 예측, 앙상블 점수 계산을 순차적으로 수행합니다.
+    
+    Args:
+        analysis_date_str: 분석 기준일 (YYYY-MM-DD 형식)
+        
+    Returns:
+        bool: 분석 성공 여부
+    """
     start_time = time.time()
     data_start_time = None
     analysis_start_time = None
@@ -90,7 +113,7 @@ def run_analysis(analysis_date_str):
             log_error(f"데이터 수집 실패: {e}")
             raise AnalysisError(f"데이터 수집 실패: {e.message}", step="data_fetch")
         
-        # <<< ✨ 핵심 수정: JSON 저장 전 NaN 값을 None으로 명시적 변환하여 데이터 유실 방지 ✨ >>>
+        # JSON 저장 전 NaN 값을 None으로 명시적 변환하여 데이터 유실 방지
         feature_df_for_json = feature_df.copy()
         # pandas 2.0 이상에서는 replace(np.nan, None)이 권장되지 않으므로, where/mask를 사용
         feature_df_for_json = feature_df_for_json.where(pd.notna(feature_df_for_json), None)
@@ -233,7 +256,7 @@ def run_analysis(analysis_date_str):
                 log_error(error_msg)
                 raise AnalysisError(error_msg, step="final_data_merge")
             
-            # [FIX] 병합 시 종목명 컬럼 충돌 해결 로직 추가
+            # 병합 시 종목명 컬럼 충돌 해결
             if '종목명_x' in final_df_with_names.columns:
                 final_df_with_names['종목명'] = final_df_with_names['종목명_y'].fillna(final_df_with_names['종목명_x'])
                 final_df_with_names.drop(columns=['종목명_x', '종목명_y'], inplace=True)
@@ -243,7 +266,7 @@ def run_analysis(analysis_date_str):
             final_df_with_names['현재가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('현재가'))
             final_df_with_names['기준일가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('기준일가'))
 
-            # [FIX] 최종 데이터프레임에 분석 기준일 컬럼 추가
+            # 최종 데이터프레임에 분석 기준일 컬럼 추가
             final_df_with_names['date'] = actual_analysis_date
 
             # 결과 파일로 저장

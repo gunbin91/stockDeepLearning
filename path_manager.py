@@ -1,4 +1,16 @@
-# path_manager.py - 통일된 경로 관리 시스템
+"""
+경로 관리 시스템
+===============
+
+이 파일은 프로젝트의 모든 파일 경로를 중앙에서 관리합니다.
+개발 환경과 운영 환경에서 일관된 경로를 사용할 수 있도록 합니다.
+
+주요 기능:
+- 프로젝트 루트 경로 관리
+- 데이터, 로그, 모델 파일 경로 관리
+- 필요한 디렉토리 자동 생성
+- 크로스 플랫폼 경로 처리
+"""
 
 import os
 import shutil
@@ -6,7 +18,12 @@ from pathlib import Path
 from typing import Optional
 
 class PathManager:
-    """프로젝트 전반의 경로를 통일된 방식으로 관리하는 클래스"""
+    """
+    프로젝트 경로 관리 클래스 (싱글톤 패턴)
+    
+    프로젝트의 모든 파일 경로를 중앙에서 관리합니다.
+    싱글톤 패턴을 사용하여 어디서든 동일한 경로를 참조할 수 있습니다.
+    """
     
     _instance = None
     _project_root = None
@@ -40,7 +57,6 @@ class PathManager:
         """데이터 디렉토리"""
         return self.project_root / 'data'
     
-    # 캐시 디렉토리 제거 - 실시간 데이터 수집으로 전환
     
     @property
     def logs_dir(self) -> Path:
@@ -62,7 +78,6 @@ class PathManager:
         """실행 스크립트 디렉토리"""
         return self.project_root / 'run'
     
-    # get_financial_db_path 제거 - 실시간 데이터 수집으로 전환
     
     def get_model_path(self) -> Path:
         """모델 파일 경로"""
@@ -76,7 +91,6 @@ class PathManager:
         """백테스팅 리포트 파일 경로"""
         return self.project_root / 'backtest_report.html'
     
-    # 캐시 파일 경로 메서드 제거 - 실시간 데이터 수집으로 전환
     
     def ensure_directories(self):
         """필요한 디렉토리들을 생성 (중복 생성 방지)"""
@@ -117,7 +131,6 @@ def get_data_dir() -> Path:
     """데이터 디렉토리 반환"""
     return path_manager.data_dir
 
-# get_cache_dir 함수 제거 - 캐시 사용 안함
 
 def get_logs_dir() -> Path:
     """로그 디렉토리 반환"""

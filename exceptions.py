@@ -1,7 +1,25 @@
-# exceptions.py
+"""
+예외 처리 모듈
+=============
+
+이 파일은 주식 분석 시스템에서 발생할 수 있는 다양한 오류 상황을
+체계적으로 처리하기 위한 커스텀 예외 클래스들을 정의합니다.
+
+주요 예외 클래스:
+- StockAnalysisError: 기본 예외 클래스
+- DataFetchError: 데이터 수집 오류
+- DataValidationError: 데이터 검증 오류
+- ModelPredictionError: 모델 예측 오류
+- AnalysisError: 분석 프로세스 오류
+"""
 
 class StockAnalysisError(Exception):
-    """주식 분석 관련 기본 예외 클래스"""
+    """
+    주식 분석 시스템의 기본 예외 클래스
+    
+    모든 주식 분석 관련 오류의 기본 클래스입니다.
+    오류 코드와 상세 정보를 포함하여 디버깅을 용이하게 합니다.
+    """
     
     def __init__(self, message, error_code=None, details=None):
         super().__init__(message)

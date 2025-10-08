@@ -1,4 +1,16 @@
-# ml_model.py
+"""
+머신러닝 모델 모듈
+=================
+
+이 파일은 훈련된 머신러닝 모델을 사용하여 주식의 상승 확률을 예측합니다.
+RandomForest 모델을 사용하여 15일 후 5% 이상 상승할 확률을 계산합니다.
+
+주요 기능:
+- 훈련된 모델 로드 (RandomForest)
+- 데이터 전처리 (스케일링, 결측값 처리)
+- 상승 확률 예측
+- 예측 결과 반환
+"""
 
 import pandas as pd
 import numpy as np
@@ -11,7 +23,16 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), 'data', 'stock_prediction_m
 
 def predict_with_ml_model(df):
     """
-    학습된 RandomForest 모델과 Scaler, Imputation 값을 사용하여 상승 확률을 예측합니다.
+    머신러닝 모델을 사용한 상승 확률 예측 함수
+    
+    훈련된 RandomForest 모델을 사용하여 각 종목의 15일 후 5% 이상 상승할 확률을 예측합니다.
+    데이터 전처리(스케일링, 결측값 처리)를 자동으로 수행합니다.
+    
+    Args:
+        df: 분석할 종목 데이터가 포함된 데이터프레임
+        
+    Returns:
+        pandas.DataFrame: 종목코드와 예측 확률이 포함된 데이터프레임
     """
     if df.empty:
         log_warning("입력 데이터프레임이 비어있습니다.")

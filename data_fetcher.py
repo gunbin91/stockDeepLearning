@@ -1,4 +1,18 @@
-# data_fetcher.py
+"""
+주식 데이터 수집 모듈
+====================
+
+이 파일은 주식 분석에 필요한 모든 데이터를 수집합니다.
+- 종목 목록 수집 (KOSPI, KOSDAQ)
+- 재무 데이터 수집 (PER, PBR, ROE 등)
+- 주가 데이터 수집 (가격, 거래량, 기술적 지표)
+- 거시경제 데이터 수집 (KOSPI 지수, 환율, VIX 등)
+
+주요 기능:
+- 실시간 데이터 수집
+- 기술적 지표 자동 계산
+- 데이터 품질 검증 및 정제
+"""
 
 import pandas as pd
 import numpy as np
@@ -8,12 +22,11 @@ import pandas_ta as ta
 import concurrent.futures
 from tqdm import tqdm
 import os
-import sys
-import locale
-import platform
 from datetime import datetime, timedelta
 import time
 import gc
+import locale
+import platform
 
 # Windows 환경에서 로케일 설정 (FinanceDataReader 내부 오류 방지)
 if platform.system() == 'Windows':
@@ -24,17 +37,26 @@ if platform.system() == 'Windows':
     except:
         # 로케일 설정 실패 시 기본값 유지
         pass
+
 from logger import (log_info, log_warning, log_error, log_critical, log_progress, log_step, log_success, log_start, log_complete,
                    log_data_collection_status)
 from exceptions import DataFetchError, DataValidationError
-# smart_cache 사용 안함 - 실시간 데이터 수집으로 전환, cached
 
 from path_manager import path_manager
-PROJECT_ROOT = str(path_manager.project_root)
-# FINANCIAL_DB_PATH 제거 - 실시간 데이터 수집으로 전환
 
 def get_actual_trading_date(selected_analysis_date):
-    """실제 거래일을 확인하는 공통 함수"""
+    """
+    실제 거래일을 확인하는 함수
+    
+    주말이나 공휴일을 선택한 경우, 가장 가까운 실제 거래일을 찾아줍니다.
+    삼성전자(005930) 주가 데이터를 기준으로 실제 거래일을 확인합니다.
+    
+    Args:
+        selected_analysis_date: 사용자가 선택한 분석 기준일
+        
+    Returns:
+        datetime.date: 실제 거래일
+    """
     today = datetime.now().date()
     selected_date = selected_analysis_date.date()
     
@@ -60,6 +82,20 @@ def get_actual_trading_date(selected_analysis_date):
         return selected_date
 
 def get_fs_data_from_pit(stock_list, selected_analysis_date, use_cache=True):
+    """
+    재무 데이터 수집 함수
+    
+    기업의 재무 정보(PER, PBR, ROE 등)를 실시간으로 수집합니다.
+    이 데이터는 주식의 가치를 평가하는 데 사용됩니다.
+    
+    Args:
+        stock_list: 분석할 종목 목록
+        selected_analysis_date: 분석 기준일
+        use_cache: 캐시 사용 여부 (현재는 실시간 수집만 지원)
+        
+    Returns:
+        pandas.DataFrame: 재무 데이터가 포함된 데이터프레임
+    """
     # 항상 실시간 재무데이터 수집 (캐시 사용 안함)
     log_step("실시간 재무데이터 수집", "START", {"모드": "실시간 수집"})
     return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
@@ -108,25 +144,9 @@ def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
     except Exception as e:
         log_error(f"재무데이터 수집 실패: {e}")
         log_info("재무데이터 수집을 재시도합니다.")
-        return _get_historical_financial_data(stock_list, selected_analysis_date)
+        return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
 
-def _get_historical_financial_data(stock_list, selected_analysis_date):
-    """실시간 재무데이터 수집"""
-    return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
 
-def _apply_common_stock_filters(df):
-    """공통 주식 필터링 로직"""
-    if df.empty:
-        return df
-    
-    # 스팩, 리츠 제외
-    df = df[~df['Name'].str.contains('스팩|리츠', na=False)].copy()
-    
-    # 상장주식수가 있는 경우만 필터링
-    if 'Stocks' in df.columns:
-        df = df[df['Stocks'] > 0]
-    
-    return df
 
 def _get_stock_list_from_marcap(analysis_date=None):
     """KRX-MARCAP에서 주식 목록 가져오기 (통일된 함수)"""
@@ -141,8 +161,12 @@ def _get_stock_list_from_marcap(analysis_date=None):
             log_info("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보 수집 (KRX-MARCAP)...")
             df_marcap = fdr.StockListing('KRX-MARCAP')
         
-        # 공통 필터링 적용
-        df_marcap = _apply_common_stock_filters(df_marcap)
+        # 스팩, 리츠 제외
+        df_marcap = df_marcap[~df_marcap['Name'].str.contains('스팩|리츠', na=False)].copy()
+        
+        # 상장주식수가 있는 경우만 필터링
+        if 'Stocks' in df_marcap.columns:
+            df_marcap = df_marcap[df_marcap['Stocks'] > 0]
         
         # 컬럼명 정리 및 종목코드 6자리 패딩
         stock_list = df_marcap[['Code', 'Name', 'Stocks']].copy()
@@ -275,7 +299,7 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         df_for_indicators.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
         
         bbands = df_for_indicators.ta.bbands(close='종가', length=20, std=2)
-        # <<< ✨ 핵심 수정: pandas-ta 버전업에 따른 볼린저밴드 컬럼명 변경 대응 ✨ >>>
+        # pandas-ta 버전업에 따른 볼린저밴드 컬럼명 변경 대응
         if bbands is not None and not bbands.empty:
             # 새로운 컬럼명 형식 확인
             if all(col in bbands.columns for col in ['BBL_20_2.0_2.0', 'BBU_20_2.0_2.0', 'BBM_20_2.0_2.0']):
@@ -332,6 +356,23 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         return None, None
 
 def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
+    """
+    전체 데이터 수집 메인 함수
+    
+    주식 분석에 필요한 모든 데이터를 수집하고 처리합니다:
+    1. 재무 데이터 수집 (PER, PBR, ROE 등)
+    2. 주가 데이터 수집 및 기술적 지표 계산
+    3. 거시경제 데이터 수집 (KOSPI, 환율, VIX 등)
+    4. 데이터 정제 및 병합
+    
+    Args:
+        stock_list: 분석할 종목 목록
+        selected_analysis_date: 분석 기준일
+        use_cache: 캐시 사용 여부
+        
+    Returns:
+        tuple: (처리된 데이터프레임, 실제 분석일)
+    """
     today = datetime.now()
     end_date_for_fetch = today.strftime('%Y-%m-%d')
     start_date_for_fetch = (today - timedelta(days=450)).strftime('%Y-%m-%d')

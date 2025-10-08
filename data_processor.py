@@ -1,16 +1,41 @@
-# data_processor.py - 실시간 데이터 처리 시스템
+"""
+실시간 데이터 처리 시스템
+========================
+
+이 파일은 주식 분석을 위한 데이터를 실시간으로 수집하고 처리합니다.
+대용량 데이터를 효율적으로 처리하기 위해 병렬 처리와 메모리 최적화를 사용합니다.
+
+주요 기능:
+- 종목 목록 수집 (KOSPI, KOSDAQ)
+- 시가총액 데이터 수집 및 일별 분배
+- 재무 데이터 수집 (월초 데이터를 일별로 분배)
+- 거시경제 데이터 수집
+- 기술적 지표 계산
+- 데이터 품질 검증 및 정제
+"""
 
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
 from pykrx import stock
-import time
 from datetime import datetime, timedelta
 import pandas_ta as ta
 import concurrent.futures
 from tqdm import tqdm
 import os
 import gc
+import locale
+import platform
+
+# Windows 환경에서 로케일 설정 (FinanceDataReader 내부 오류 방지)
+if platform.system() == 'Windows':
+    try:
+        os.environ['LC_ALL'] = 'en_US.UTF-8'
+        os.environ['LANG'] = 'en_US.UTF-8'
+        locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+    except:
+        # 로케일 설정 실패 시 기본값 유지
+        pass
 
 from scoring import calculate_factor_scores
 from path_manager import path_manager
@@ -21,7 +46,15 @@ PROJECT_ROOT = str(path_manager.project_root)
 DATA_DIR = str(path_manager.data_dir)
 
 def fetch_stock_list():
-    """통일된 주식 목록 가져오기"""
+    """
+    주식 목록 수집 함수
+    
+    KOSPI와 KOSDAQ에 상장된 모든 종목의 목록을 수집합니다.
+    스팩, 리츠 등은 제외하고 일반 주식만 수집합니다.
+    
+    Returns:
+        pandas.DataFrame: 종목코드, 종목명, 시장구분이 포함된 데이터프레임
+    """
     try:
         # KRX에서 주식 목록 가져오기
         stock_list = fdr.StockListing('KRX')
@@ -304,22 +337,54 @@ def _fetch_macro_data(start_date, end_date):
         return pd.DataFrame()
 
 def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long, df_financial_long, pbar_lock):
-    """단일 종목 데이터 처리 - 메모리 최적화 및 강화된 오류 처리"""
+    """
+    단일 종목 데이터 처리 함수
+    
+    하나의 종목에 대해 다음 작업을 수행합니다:
+    1. 주가 데이터 수집 (하이브리드 방식: Yahoo → KRX → NAVER)
+    2. 시가총액 데이터 병합
+    3. 재무 데이터 병합
+    4. 기술적 지표 계산 (ATR, OBV, ADX, 볼린저 밴드 등)
+    5. 수익률 및 변동성 계산
+    6. 타겟 변수 생성 (15일 후 5% 상승 여부)
+    
+    Args:
+        stock_info: 종목 정보 (종목코드, 종목명 등)
+        start_date: 데이터 수집 시작일
+        end_date: 데이터 수집 종료일
+        df_marcap_long: 시가총액 데이터
+        df_financial_long: 재무 데이터
+        pbar_lock: 진행률 표시용 락
+        
+    Returns:
+        pandas.DataFrame: 처리된 종목 데이터
+    """
     ticker = stock_info['종목코드']
     try:
-        # 하이브리드 방식으로 주가 데이터 수집 (Yahoo Finance → KRX → NAVER)
+        # =================================================================
+        # 하이브리드 데이터 수집 방식 (3단계 폴백 시스템)
+        # =================================================================
+        # 1단계: Yahoo Finance (가장 빠르고 안정적)
+        # 2단계: KRX (한국 거래소 공식 데이터)
+        # 3단계: NAVER (최후의 수단)
+        # 이렇게 하는 이유: 일부 종목은 특정 데이터 소스에서만 제공되기 때문
         df_price = None
         try:
+            # 1차 시도: Yahoo Finance (가장 빠름)
             df_price = fdr.DataReader(ticker, start_date, end_date)
         except:
             try:
+                # 2차 시도: KRX (한국 거래소 공식 데이터)
                 df_price = fdr.DataReader(f'KRX:{ticker}', start_date, end_date)
             except:
                 try:
+                    # 3차 시도: NAVER (최후의 수단)
                     df_price = fdr.DataReader(f'NAVER:{ticker}', start_date, end_date)
                 except:
                     df_price = None
         
+        # 데이터 품질 검증: 충분한 데이터가 있는지 확인
+        # 251일(1년) + 60일(추가 버퍼) = 311일 이상의 데이터 필요
         if df_price is None or df_price.empty or len(df_price) < 251 + 60: 
             return None
             
@@ -327,7 +392,8 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         df = df_price[['시가', '종가', '고가', '저가', '거래량']].copy()
         df.sort_index(inplace=True)
         
-        # 원본 데이터프레임 메모리 해제
+        # 메모리 최적화: 원본 데이터프레임 해제
+        # 대용량 데이터 처리 시 메모리 부족을 방지하기 위함
         del df_price
         import gc
         gc.collect()
@@ -506,50 +572,18 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
             pass
         return None
 
-def distribute_monthly_data_to_daily(monthly_data, start_date, end_date):
-    """월초 데이터를 일별로 분배하여 기존 데이터 구조와 호환성 유지"""
-    try:
-        start_date_obj = pd.to_datetime(start_date)
-        end_date_obj = pd.to_datetime(end_date)
-        
-        # 모든 거래일 생성
-        all_dates = pd.date_range(start=start_date_obj, end=end_date_obj, freq='D')
-        trading_dates = all_dates[all_dates.weekday < 5]
-        
-        distributed_data = []
-        
-        for date in trading_dates:
-            # 해당 월의 첫 거래일 찾기
-            month_start = date.replace(day=1)
-            month_dates = pd.date_range(start=month_start, end=month_start + pd.DateOffset(months=1) - pd.DateOffset(days=1), freq='D')
-            month_trading_dates = month_dates[month_dates.weekday < 5]
-            
-            if not month_trading_dates.empty:
-                month_first_trading_day = month_trading_dates[0]
-                
-                # 해당 월의 첫 거래일 데이터를 현재 날짜에 복사
-                monthly_data_for_date = monthly_data[monthly_data['date'] == month_first_trading_day].copy()
-                if not monthly_data_for_date.empty:
-                    monthly_data_for_date['date'] = date
-                    distributed_data.append(monthly_data_for_date)
-        
-        if not distributed_data:
-            log_warning("분배할 월초 데이터가 없습니다.")
-            return monthly_data
-        
-        result_df = pd.concat(distributed_data, ignore_index=True)
-        result_df.sort_values(by=['Code', 'date'], inplace=True)
-        
-        log_info(f"월초 데이터 일별 분배 완료: {len(result_df)}개 레코드")
-        return result_df
-        
-    except Exception as e:
-        log_error(f"월초 데이터 일별 분배 실패: {e}")
-        return monthly_data
 
-def get_marcap_dates(start_date, end_date):
-    """월초 거래일만 수집하여 효율성 극대화"""
+
+def _fetch_and_prepare_data(start_date, end_date):
+    """실시간 데이터 수집 및 전처리"""
+    log_info(f"실시간 데이터 수집 시작 ({start_date} ~ {end_date})...")
+    
+    stock_list = fetch_stock_list()
+    if stock_list.empty: 
+        raise ValueError("종목 리스트를 가져올 수 없습니다.")
+    
     try:
+        # 월초 거래일만 수집하여 효율성 극대화
         start_date_obj = pd.to_datetime(start_date)
         end_date_obj = pd.to_datetime(end_date)
         
@@ -571,25 +605,6 @@ def get_marcap_dates(start_date, end_date):
         
         # 문자열로 변환
         marcap_dates = [date.strftime('%Y%m%d') for date in monthly_first_dates]
-        
-        log_info(f"월초 거래일 수집: {len(marcap_dates)}개 날짜 (기존 대비 {len(pd.date_range(start_date_obj, end_date_obj, freq='D')[pd.date_range(start_date_obj, end_date_obj, freq='D').weekday < 5]) - len(marcap_dates)}개 절약)")
-        return marcap_dates
-        
-    except Exception as e:
-        log_error(f"월초 거래일 수집 실패: {e}")
-        return []
-
-def _fetch_and_prepare_data(start_date, end_date):
-    """실시간 데이터 수집 및 전처리"""
-    log_info(f"실시간 데이터 수집 시작 ({start_date} ~ {end_date})...")
-    
-    stock_list = fetch_stock_list()
-    if stock_list.empty: 
-        raise ValueError("종목 리스트를 가져올 수 없습니다.")
-    
-    try:
-        # 시가총액 데이터 수집 날짜 생성
-        marcap_dates = get_marcap_dates(start_date, end_date)
         
         if not marcap_dates:
             raise Exception("수집할 시가총액 데이터 날짜가 없습니다.")
@@ -626,7 +641,34 @@ def _fetch_and_prepare_data(start_date, end_date):
         gc.collect()
         
         # 월초 데이터를 일별로 분배
-        df_marcap_long = distribute_monthly_data_to_daily(df_marcap_long, start_date, end_date)
+        start_date_obj = pd.to_datetime(start_date)
+        end_date_obj = pd.to_datetime(end_date)
+        
+        all_dates = pd.date_range(start=start_date_obj, end=end_date_obj, freq='D')
+        trading_dates = all_dates[all_dates.weekday < 5]
+        
+        distributed_data = []
+        
+        for date in trading_dates:
+            # 해당 월의 첫 거래일 찾기
+            month_start = date.replace(day=1)
+            month_dates = pd.date_range(start=month_start, end=month_start + pd.DateOffset(months=1) - pd.DateOffset(days=1), freq='D')
+            month_trading_dates = month_dates[month_dates.weekday < 5]
+            
+            if not month_trading_dates.empty:
+                month_first_trading_day = month_trading_dates[0]
+                
+                # 해당 월의 첫 거래일 데이터를 현재 날짜에 복사
+                monthly_data_for_date = df_marcap_long[df_marcap_long['date'] == month_first_trading_day].copy()
+                if not monthly_data_for_date.empty:
+                    monthly_data_for_date['date'] = date
+                    distributed_data.append(monthly_data_for_date)
+        
+        if not distributed_data:
+            log_warning("분배할 월초 데이터가 없습니다.")
+        else:
+            df_marcap_long = pd.concat(distributed_data, ignore_index=True)
+            df_marcap_long.sort_values(by=['Code', 'date'], inplace=True)
         
         log_info(f"✅ 시가총액 데이터 수집 및 일별 분배 완료: {len(df_marcap_long)}개 레코드")
         
