@@ -59,7 +59,6 @@ stockDeepLearning/
 
 ### 1️⃣ **데이터 수집 단계**
 ```python
-# data_fetcher.py
 def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     # 1. 종목 리스트 수집 (KOSPI, KOSDAQ)
     # 2. 재무 데이터 수집 (Point-in-Time)
@@ -69,7 +68,6 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
 
 ### 2️⃣ **피처 계산 단계**
 ```python
-# data_fetcher.py - process_single_ticker_data()
 def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long, pbar_lock):
     # 기술적 지표 계산
     df['수익률(1M)'] = df['종가'].pct_change(20)
@@ -110,7 +108,6 @@ def calculate_factor_scores(df):
 ```python
 # ml_model.py
 def predict_with_ml_model(df):
-    # 학습된 RandomForest 모델로 15일 내 5% 상승 확률 예측
     model = joblib.load(MODEL_PATH)
     y_pred_proba = model.predict_proba(X_pred_scaled)[:, 1]
 ```
@@ -155,7 +152,6 @@ def calculate_final_score(df):
 def find_optimal_weights(top_n_stocks, data):
     # 그리드 서치로 모든 가중치 조합 테스트
     # 샤프 지수 최대화하는 최적 조합 탐색
-    # optimal_weights.json 파일로 저장
 ```
 
 ### 📊 **백테스팅 시스템**
@@ -229,16 +225,6 @@ run/start_flask_app.bat      # Windows
 - **URL**: http://localhost:5000
 - **특징**: 현대적인 웹 UI, 실시간 WebSocket 통신, 반응형 디자인
 
-#### **Streamlit 버전 (기존)**
-```bash
-# Streamlit 앱 실행
-streamlit run app.py
-# 또는
-run/start_app.command  # macOS
-run/start_app.bat      # Windows
-```
-- **URL**: http://localhost:8501
-- **특징**: 기존 Streamlit 기반 UI
 
 ---
 
@@ -315,7 +301,6 @@ data/
 - **등락율 색상 표시**: 상승(빨간색), 하락(파란색) 자동 색상 적용
 - **실시간 로그**: 분석 과정의 모든 로그를 실시간으로 표시
 
-### 📱 **Streamlit 버전 (기존) - 단순한 UI**
 
 #### **주요 페이지**
 1. **홈**: 프로젝트 개요 및 시스템 상태

@@ -81,7 +81,7 @@ def _fetch_financial_data(start_date, end_date):
     try:
         log_info(f"월초 재무데이터 수집 시작: {start_date} ~ {end_date}")
         
-        # 삼성전자 주가 데이터로 실제 거래일 확인 (backupProject 방식)
+        # 삼성전자 주가 데이터로 실제 거래일 확인
         try:
             from pykrx import stock
             trading_days = pd.to_datetime(stock.get_market_ohlcv(start_date, end_date, "005930").index).strftime('%Y%m%d').tolist()
@@ -147,7 +147,7 @@ def _fetch_financial_data(start_date, end_date):
                     date_str = future_to_date[future]
                     result_df = future.result()
                     if not result_df.empty: 
-                        result_df['date'] = pd.to_datetime(date_str)  # Date → date로 변경
+                        result_df['date'] = pd.to_datetime(date_str)
                         financial_dfs.append(result_df)
                         completed_count += 1
                     else:
@@ -172,7 +172,7 @@ def _fetch_financial_data(start_date, end_date):
             log_warning(f"재무데이터 수집 성공률이 낮습니다: {success_rate:.1f}%")
             
         df_financial_long = pd.concat(financial_dfs, ignore_index=True)
-        df_financial_long.sort_values(by=['Code', 'date'], inplace=True)  # Date → date로 변경
+        df_financial_long.sort_values(by=['Code', 'date'], inplace=True)
         
         # 월초 데이터를 일별로 분배 (데이터 정합성 검증 포함)
         df_financial_long = distribute_monthly_financial_data_to_daily(df_financial_long, start_date, end_date)
@@ -181,7 +181,7 @@ def _fetch_financial_data(start_date, end_date):
         if not df_financial_long.empty:
             total_records = len(df_financial_long)
             unique_codes = df_financial_long['Code'].nunique()
-            date_range = df_financial_long['date'].nunique()  # Date → date로 변경
+            date_range = df_financial_long['date'].nunique()
             
             log_info(f"✅ 월초 재무데이터 수집 및 일별 분배 완료: {total_records}개 레코드")
             log_info(f"데이터 정합성 검증: 종목수 {unique_codes}개, 거래일수 {date_range}개")
@@ -195,22 +195,22 @@ def _fetch_financial_data(start_date, end_date):
         return pd.DataFrame()
 
 def _fetch_monthly_financial_data(date):
-    """특정 날짜의 재무데이터 수집 (backupProject와 동일한 방식)"""
+    """특정 날짜의 재무데이터 수집"""
     try:
-        # pykrx를 사용한 재무데이터 수집 (backupProject와 동일한 API 호출 방식)
+        # pykrx를 사용한 재무데이터 수집
         from pykrx import stock
         
-        date_str = date.strftime('%Y%m%d')  # backupProject와 동일한 날짜 형식
+        date_str = date.strftime('%Y%m%d')
         
         try:
-            # backupProject와 동일한 전체 시장 일괄 호출 방식
+            # 전체 시장 일괄 호출 방식
             df_fundamental = stock.get_market_fundamental(date_str, market="ALL")
             
             if df_fundamental.empty:
                 log_warning(f"재무데이터가 비어있음 ({date_str})")
                 return pd.DataFrame()
             
-            # backupProject와 동일한 데이터 처리
+            # 데이터 처리
             if 'PBR' in df_fundamental.columns:
                 df_fundamental = df_fundamental[df_fundamental['PBR'] > 0]
                 
@@ -218,12 +218,12 @@ def _fetch_monthly_financial_data(date):
                     df_fundamental.reset_index(inplace=True)
                     df_fundamental.rename(columns={'티커': 'Code'}, inplace=True)  # Code 컬럼명으로 통일
                     
-                    # backupProject와 동일한 컬럼 선택
+                    # 컬럼 선택
                     required_cols = ['Code', 'PBR', 'PER', 'EPS', 'BPS', 'DIV', 'DPS']
                     available_cols = [col for col in required_cols if col in df_fundamental.columns]
                     df_fundamental = df_fundamental[available_cols]
                     
-                    # ROE 계산 (backupProject와 동일한 방식)
+                    # ROE 계산
                     if 'PBR' in df_fundamental.columns and 'PER' in df_fundamental.columns:
                         df_fundamental['ROE'] = np.where(df_fundamental['PER'] != 0, 
                                                        df_fundamental['PBR'] / df_fundamental['PER'], 
@@ -415,9 +415,9 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         if not df_financial_long.empty:
             df_financial_ticker = df_financial_long[df_financial_long['Code'] == ticker].copy()
             if not df_financial_ticker.empty:
-                df_financial_ticker.sort_values(by='date', inplace=True)  # Date → date로 변경
+                df_financial_ticker.sort_values(by='date', inplace=True)
                 df = pd.merge_asof(left=df, right=df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], 
-                                   left_index=True, right_on='date', direction='backward')  # Date → date로 변경
+                                   left_index=True, right_on='date', direction='backward')
                 
                 # 재무데이터가 없는 경우 기본값 설정
                 if 'PER' not in df.columns or df['PER'].isnull().all():
@@ -464,7 +464,7 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
             log_warning(f"ADX 계산 실패 ({ticker}): {e}")
             df['ADX_14'] = np.nan
         
-        # 볼린저 밴드 계산 (backupProject와 동일한 안전한 처리)
+        # 볼린저 밴드 계산
         try:
             bbands = df.ta.bbands(close='종가', length=20, std=2)
             if bbands is not None and not bbands.empty:
@@ -513,16 +513,16 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         gc.collect()
         # 기존 방식과 동일한 기본 지표들만 사용 (과도한 기술적 지표 제거)
         
-        # 수익률 계산 (backupProject와 동일한 방식)
+        # 수익률 계산
         df['수익률(1M)'] = df['종가'].pct_change(20)
         df['수익률(3M)'] = df['종가'].pct_change(60)
         
-        # 변동성 계산 (backupProject와 동일한 방식)
+        # 변동성 계산
         df['변동성(1W)'] = df['종가'].rolling(5).std() / df['종가'].rolling(5).mean()
         df['변동성(1M)'] = df['종가'].rolling(20).std() / df['종가'].rolling(20).mean()
         df['변동성(3M)'] = df['종가'].rolling(60).std() / df['종가'].rolling(60).mean()
         
-        # 거래대금 계산 (backupProject와 동일한 방식)
+        # 거래대금 계산
         df['거래대금'] = df['종가'] * df['거래량']
         df['거래대금_MA5'] = df['거래대금'].rolling(5).mean()
         df['거래대금_MA20'] = df['거래대금'].rolling(20).mean()
@@ -539,7 +539,7 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         if 'PBR' not in df.columns or df['PBR'].isnull().all():
             df['PBR'] = df['종가'] / (df['시가총액'] / df['거래량'])  # 간단한 PBR 계산
         
-        # backupProject와 동일한 핵심 피처 추가
+        # 핵심 피처 추가
         # 1. log_mktcap (시가총액 로그 변환)
         df['log_mktcap'] = np.log(df['시가총액'])
         
@@ -552,11 +552,11 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         df['52주_최고가'] = df['종가'].rolling(250).max()
         df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
         
-        # target 변수 생성 (backupProject와 동일)
+        # target 변수 생성
         df['target'] = (df['종가'].shift(-15) / df['종가'] > 1.05).astype(int)
         df['종목코드'] = ticker
         
-        # 데이터 구조를 backupProject와 동일하게 설정
+        # 데이터 구조 설정
         # merge_asof 후 date 컬럼이 제거되므로 다시 추가
         df['date'] = df.index
         df.set_index('date', inplace=True)
@@ -729,9 +729,8 @@ def _fetch_and_prepare_data(start_date, end_date):
     elif success_rate < 80:
         log_warning(f"⚠️ 종목 처리 성공률이 다소 낮습니다: {success_rate:.1f}% (권장: 80% 이상)")
     
-    # backupProject와 동일한 방식으로 처리
+    # 동일한 방식으로 처리
     raw_feature_df = pd.concat(all_data).reset_index()
-    # date 컬럼명은 이미 통일되어 있으므로 rename 불필요
     
     raw_feature_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     raw_feature_df.dropna(subset=['date', '종목코드'], inplace=True)

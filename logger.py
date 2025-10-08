@@ -108,18 +108,6 @@ class StockAnalysisLogger:
                 return os.path.join(current_dir, 'logs')
         return log_dir
     
-    def _is_streamlit_environment(self):
-        """Streamlit 환경인지 확인"""
-        try:
-            # Streamlit이 실행 중인지 확인
-            import streamlit as st
-            # Streamlit이 실행 중이면 True 반환
-            return hasattr(st, '_is_running_with_streamlit')
-        except ImportError:
-            return False
-        except Exception:
-            # 다른 예외가 발생해도 Streamlit 환경으로 간주
-            return True
     
     def _setup_logger(self):
         """로거 설정 - 최적화된 버전"""
@@ -161,12 +149,9 @@ class StockAnalysisLogger:
         self.logger.addHandler(file_handler)
         self.logger.addHandler(console_handler)
         
-        # 중복 로그 방지 및 Streamlit 환경에서의 안정성 향상
+        # 중복 로그 방지
         self.logger.propagate = False
         
-        # Streamlit 환경에서 로깅 안정성을 위한 추가 설정
-        if self._is_streamlit_environment():
-            self.logger.disabled = False
     
     def _start_background_logging(self):
         """백그라운드 로깅 스레드 시작"""

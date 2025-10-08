@@ -477,7 +477,6 @@ def create_html_report(results, output_path=REPORT_FILE):
     if not sell_log.empty:
         fig.add_annotation(text="<b>상세 매매 기록 (매도 완료 기준)</b>", xref="paper", yref="paper", x=0.0, y=0.34, showarrow=False, font=dict(size=16))
     
-    # Streamlit과의 호환성을 위해 full_html=False, include_plotlyjs='cdn' 사용
     html_content = fig.to_html(full_html=False, include_plotlyjs='cdn')
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(html_content)
@@ -498,7 +497,6 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         log_info(f"   └─ 손절 기준: -{stop_loss_pct}%")
         log_info(f"   └─ 거래 수수료: {transaction_fee_rate}%")
         
-        # print 문 제거하여 중복 방지
         log_info("1. 최종 백테스트 시작...")
         
         # 가중치 파일 확인 및 로딩
@@ -511,7 +509,6 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             with open(WEIGHTS_FILE, 'r') as f:
                 optimal_weights = json.load(f)
             log_info("최적 가중치 로딩 완료", context={"weights_file": WEIGHTS_FILE})
-            # print 문 제거하여 중복 방지
             log_info(f"  - 최적 가중치를 {WEIGHTS_FILE}에서 불러왔습니다.")
         except Exception as e:
             log_critical("가중치 파일 로딩 실패", exception=e, context={"weights_file": WEIGHTS_FILE})
@@ -627,7 +624,6 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             })
             
             # <<< 팩터 점수 계산 루프가 필요 없어짐 >>>
-            # data_cacher에서 이미 모든 _score 컬럼들을 계산해왔기 때문입니다.
             log_info("  - 팩터 점수는 데이터 로딩 시 이미 계산되었습니다.")
             
             test_data.set_index(['date', '종목코드'], inplace=True)
