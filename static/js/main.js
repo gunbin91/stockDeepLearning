@@ -581,10 +581,53 @@ $(document).ready(function() {
     }
     
     function setupBacktestEvents() {
-        // 백테스팅 폼 제출
-        $('#backtest_form').on('submit', function(e) {
-            e.preventDefault();
-            startBacktest();
+        // 백테스팅 실행 버튼 (모달 내부)
+        $('#execute_backtest_btn').on('click', function() {
+            executeBacktest();
+        });
+        
+        // 백테스팅 중단 버튼 (모달 내부)
+        $('#stop_backtest_btn_modal').on('click', function() {
+            stopBacktest();
+        });
+        
+        // 모달이 열릴 때 서버 상태 확인
+        $('#backtest_modal').on('show.bs.modal', function() {
+            checkBacktestServerStatus().then(function(serverRunning) {
+                if (serverRunning) {
+                    // 서버에서 백테스팅이 실행 중이면 실행 중 상태로 표시
+                    showBacktestRunningState();
+                    window.backtestRunning = true;
+                } else {
+                    // 서버에서 백테스팅이 실행 중이 아니면 준비 상태로 표시
+                    showBacktestReadyState();
+                    window.backtestRunning = false;
+                }
+            }).catch(function(error) {
+                console.error('서버 상태 확인 실패:', error);
+                // 서버 상태 확인 실패 시 준비 상태로 표시
+                showBacktestReadyState();
+            });
+        });
+        
+        // 모달이 닫힐 때 백테스팅 종료 (서버 상태 확인 후)
+        $('#backtest_modal').on('hidden.bs.modal', function() {
+            if (window.backtestRunning) {
+                // 서버 상태 확인 후 처리
+                checkBacktestServerStatus().then(function(serverRunning) {
+                    if (serverRunning && window.backtestRunning) {
+                        // 서버와 클라이언트 모두 실행 중이면 중지 요청
+                        stopBacktest();
+                    } else {
+                        // 상태 불일치 시 클라이언트 상태만 초기화
+                        resetBacktestState();
+                    }
+                }).catch(function(error) {
+                    console.error('서버 상태 확인 실패:', error);
+                    // 서버 상태 확인 실패 시 안전하게 중지
+                    stopBacktest();
+                });
+            }
         });
         
         // 백테스팅 로그 수신
@@ -599,39 +642,52 @@ $(document).ready(function() {
         }
     }
     
-    function startBacktest() {
-        // 모달 닫기
-        $('#backtest_modal').modal('hide');
-        
-        // 진행 모달 표시
-        $('#backtest_progress_modal').modal('show');
-        
+    function executeBacktest() {
         // 폼 데이터 수집
         const formData = {
-            capital: parseInt($('#capital').val()),
-            max_hold: parseInt($('#max_hold').val()),
-            take_profit: parseFloat($('#take_profit').val()),
-            stop_loss: parseFloat($('#stop_loss').val()),
-            top_n: parseInt($('#top_n').val()),
-            buy_universe: parseInt($('#buy_universe').val()),
-            transaction_fee: parseFloat($('#transaction_fee').val())
+            capital: parseInt($('#modal_capital').val()),
+            max_hold: parseInt($('#modal_max_hold').val()),
+            take_profit: parseFloat($('#modal_take_profit').val()),
+            stop_loss: parseFloat($('#modal_stop_loss').val()),
+            top_n: parseInt($('#modal_top_n').val()),
+            buy_universe: parseInt($('#modal_buy_universe').val()),
+            transaction_fee: parseFloat($('#modal_transaction_fee').val())
         };
         
-        // 백테스팅 시작
-        $.ajax({
-            url: '/api/start_backtest',
-            method: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify(formData),
-            success: function(response) {
-                console.log('백테스팅 시작:', response);
-                showToast('백테스팅이 시작되었습니다.', 'info');
-            },
-            error: function(xhr) {
-                const error = JSON.parse(xhr.responseText);
-                showToast('백테스팅 시작 중 오류: ' + error.error, 'danger');
-                $('#backtest_progress_modal').modal('hide');
+        // 서버 상태 확인 후 진행
+        checkBacktestServerStatus().then(function(serverRunning) {
+            if (serverRunning || window.backtestRunning) {
+                showToast('이미 백테스팅이 실행 중입니다.', 'warning');
+                return;
             }
+            
+            // 백테스팅 실행 중 상태로 변경
+            showBacktestRunningState();
+            
+            // 즉시 플래그 설정 (중복 실행 방지)
+            window.backtestRunning = true;
+            
+            // 백테스팅 시작 요청
+            $.ajax({
+                url: '/api/start_backtest',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify(formData),
+                success: function(response) {
+                    console.log('백테스팅 시작:', response);
+                    showToast('백테스팅이 시작되었습니다.', 'info');
+                },
+                error: function(xhr) {
+                    // 오류 발생 시 상태 복구
+                    resetBacktestState();
+                    
+                    const error = JSON.parse(xhr.responseText);
+                    showToast('백테스팅 시작 중 오류: ' + error.error, 'danger');
+                }
+            });
+        }).catch(function(error) {
+            console.error('서버 상태 확인 실패:', error);
+            showToast('서버 상태를 확인할 수 없습니다.', 'warning');
         });
     }
     
@@ -664,17 +720,72 @@ $(document).ready(function() {
         logContainer.scrollTop(logContainer[0].scrollHeight);
     }
     
+    function checkBacktestServerStatus() {
+        return $.get('/api/backtest_status').then(function(data) {
+            return data.backtest_running;
+        }).catch(function() {
+            return false; // 서버 오류 시 false로 가정
+        });
+    }
+    
+    function showBacktestReadyState() {
+        // 백테스팅 준비 상태 표시
+        $('#backtest_ready_section').show();
+        $('#backtest_running_section').hide();
+        
+        // 백테스팅 실행 버튼 활성화
+        $('#execute_backtest_btn').prop('disabled', false).html('<i class="fas fa-play me-1"></i>백테스팅 실행');
+    }
+    
+    function showBacktestRunningState() {
+        // 백테스팅 실행 중 상태 표시
+        $('#backtest_ready_section').hide();
+        $('#backtest_running_section').show();
+        
+        // 로그 초기화
+        $('#backtest_log').text('');
+    }
+    
+    function stopBacktest() {
+        if (confirm('실행 중인 백테스팅을 중단하시겠습니까?')) {
+            $.ajax({
+                url: '/api/stop_backtest',
+                method: 'POST',
+                success: function(response) {
+                    showToast('백테스팅이 중단되었습니다.', 'warning');
+                    // 상태 복구
+                    resetBacktestState();
+                },
+                error: function(xhr) {
+                    const error = JSON.parse(xhr.responseText);
+                    showToast('백테스팅 중단 중 오류: ' + error.error, 'danger');
+                }
+            });
+        }
+    }
+    
+    function resetBacktestState() {
+        // 백테스팅 실행 중 플래그 해제
+        window.backtestRunning = false;
+        
+        // 모달 상태를 준비 상태로 변경
+        showBacktestReadyState();
+    }
+    
     function handleBacktestComplete(data) {
         if (data.success) {
-            $('#backtest_progress_modal').modal('hide');
             showToast('백테스팅이 완료되었습니다.', 'success');
-            // 페이지 새로고침하여 새로운 리포트 표시
             setTimeout(function() {
+                $('#backtest_modal').modal('hide');
                 location.reload();
-            }, 1000);
+            }, 2000);
         } else {
             showToast('백테스팅 중 오류가 발생했습니다: ' + data.error, 'danger');
-            $('#backtest_progress_modal').modal('hide');
+            setTimeout(function() {
+                $('#backtest_modal').modal('hide');
+                // 오류 발생 시 상태 복구
+                resetBacktestState();
+            }, 3000);
         }
     }
     
@@ -775,4 +886,5 @@ $(document).ready(function() {
     // 전역 함수로 노출
     window.showStockDetails = showStockDetails;
     window.showToast = showToast;
+    window.loadBacktestReport = loadBacktestReport;
 });

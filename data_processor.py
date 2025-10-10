@@ -157,6 +157,7 @@ def _fetch_financial_data(start_date, end_date):
                     failed_count += 1
                     log_error(f"재무데이터 수집 오류 ({date_str.strftime('%Y-%m-%d')}): {e}")
                 
+                # 진행률 로그 메시지 - 매번 출력하되 같은 줄에서 덮어쓰기
                 log_progress("월초 재무데이터 수집", completed_count + failed_count, total_dates)
         
         # 수집 결과 검증
@@ -626,7 +627,7 @@ def _fetch_and_prepare_data(start_date, end_date):
                     continue
                 
                 completed_count += 1
-                # PROGRESS 접두사로 진행률 로그 출력
+                # PROGRESS 접두사로 진행률 로그 출력 - 매번 출력하되 같은 줄에서 덮어쓰기
                 log_progress("시가총액 데이터 수집", completed_count, total_dates)
         
         if not marcap_dfs: 
@@ -708,7 +709,7 @@ def _fetch_and_prepare_data(start_date, end_date):
                 pass
             
             completed_count += 1
-            # 진행률 로그 메시지 (PROGRESS 접두사 자동 추가됨) - 1개마다 출력
+            # 진행률 로그 메시지 (PROGRESS 접두사 자동 추가됨) - 매번 출력하되 같은 줄에서 덮어쓰기
             log_progress("개별 종목 피처 데이터 생성", completed_count, total_count)
             # 주기적 메모리 정리 (10개마다)
             if completed_count % 10 == 0:
