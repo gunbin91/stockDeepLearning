@@ -906,16 +906,30 @@ def find_available_port(start_port=5000, max_port=5100):
     """사용 가능한 포트를 찾는 함수"""
     import socket
     
+    # 첫 번째 시도: 기본 범위 (5000-5100)
     for port in range(start_port, max_port):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(('localhost', port))
+                # Windows와 macOS 호환성을 위해 0.0.0.0으로 바인딩 테스트
+                s.bind(('0.0.0.0', port))
+                return port
+        except OSError:
+            continue
+    
+    # 두 번째 시도: 확장 범위 (8000-8100)
+    print("⚠️  기본 포트 범위(5000-5100)에서 사용 가능한 포트를 찾을 수 없습니다.")
+    print("🔍 확장 범위(8000-8100)에서 포트를 검색합니다...")
+    
+    for port in range(8000, 8100):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('0.0.0.0', port))
                 return port
         except OSError:
             continue
     
     # 모든 포트가 사용 중인 경우
-    raise RuntimeError(f"포트 {start_port}-{max_port} 범위에서 사용 가능한 포트를 찾을 수 없습니다.")
+    raise RuntimeError(f"포트 {start_port}-{max_port} 및 8000-8100 범위에서 사용 가능한 포트를 찾을 수 없습니다.")
 
 # =============================================================================
 # 메인 실행 - 웹 서버 시작
@@ -952,6 +966,7 @@ if __name__ == '__main__':
             print("💡 해결 방법:")
             print("   1. 다른 Flask 앱을 종료하세요")
             print("   2. 또는 수동으로 포트를 지정하세요: python flask_app.py --port 5001")
+            print("   3. 더 넓은 범위의 포트를 시도해보세요: python flask_app.py --port 8000")
             sys.exit(1)
     
     print(f"🌐 브라우저에서 http://localhost:{port} 으로 접속하세요.")
