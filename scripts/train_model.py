@@ -323,12 +323,41 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
     log_info("💾 모델 저장 중...")
     log_memory_usage("모델 저장 시작")
     
+    # 추가 정보 준비
+    training_config = {
+        'n_iter': n_iter,
+        'n_jobs': n_jobs,
+        'max_depth_candidates': max_depth_list,
+        'cv_folds': 3,
+        'test_size': 0.3,
+        'scoring': 'roc_auc',
+        'search_method': 'RandomizedSearchCV'
+    }
+    
+    optimization_results = {
+        'best_score': random_search.best_score_,
+        'best_params': random_search.best_params_,
+        'total_combinations_tested': n_iter
+    }
+    
+    parameter_explanations = {
+        'n_estimators': 'RandomForest가 만들 트리의 개수 (100-500)',
+        'max_depth': '각 트리의 최대 깊이 (과적합 방지)',
+        'min_samples_split': '노드 분할에 필요한 최소 샘플 수',
+        'min_samples_leaf': '리프 노드의 최소 샘플 수',
+        'max_samples': '각 트리가 사용할 샘플 비율',
+        'class_weight': '클래스 불균형 처리 방법'
+    }
+    
     try:
         joblib.dump({
             'model': best_model, 
             'features': features, 
             'scaler': scaler,
-            'imputation_values': imputation_values 
+            'imputation_values': imputation_values,
+            'training_config': training_config,
+            'optimization_results': optimization_results,
+            'parameter_explanations': parameter_explanations
         }, model_path, compress=3)  # 압축 저장으로 메모리 절약
         log_info(f"\n✅ 새로운 데이터로 학습된 최적 모델, 스케일러, 중앙값을 '{model_path}' 경로에 저장했습니다.")
         log_memory_usage("모델 저장 완료")
@@ -340,7 +369,10 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
             'model': best_model, 
             'features': features, 
             'scaler': scaler,
-            'imputation_values': imputation_values 
+            'imputation_values': imputation_values,
+            'training_config': training_config,
+            'optimization_results': optimization_results,
+            'parameter_explanations': parameter_explanations
         }, model_path, compress=3)  # 압축 저장으로 메모리 절약
         log_info(f"\n✅ 재시도 후 모델 저장 완료: '{model_path}'")
         log_memory_usage("재시도 후 모델 저장 완료")

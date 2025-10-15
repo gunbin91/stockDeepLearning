@@ -1,283 +1,525 @@
-{% extends "base.html" %}
-
-{% block title %}학습 모델 분석 - AI 주식 분석 시스템{% endblock %}
-
-{% block content %}
+{% extends "base.html" %} {% block title %}학습 모델 분석 - AI 주식 분석
+시스템{% endblock %} {% block content %}
 <div class="row">
-    <div class="col-12">
-        <h1 class="mb-4">
-            <i class="fas fa-brain text-primary me-2"></i>학습 모델 분석 리포트
-        </h1>
-    </div>
+  <div class="col-12">
+    <h1 class="mb-4">
+      <i class="fas fa-brain text-primary me-2"></i>학습 모델 분석 리포트
+    </h1>
+  </div>
 </div>
 
 {% if error %}
 <div class="alert alert-danger" role="alert">
-    <i class="fas fa-exclamation-triangle me-2"></i>{{ error }}
+  <i class="fas fa-exclamation-triangle me-2"></i>{{ error }}
+  <hr />
+  <h6>해결 방법:</h6>
+  <ul class="mb-0">
+    {% if "메모리" in error %}
+    <li>다른 프로그램을 종료하여 메모리를 확보하세요</li>
+    <li>컴퓨터를 재시작한 후 다시 시도하세요</li>
+    {% elif "파일을 찾을 수 없습니다" in error %}
+    <li>
+      먼저 <a href="/" class="alert-link">주식 추천 페이지</a>에서 모델을
+      학습하세요
+    </li>
+    <li><code>run/train_model.bat</code> 파일을 실행하여 모델을 학습하세요</li>
+    {% else %}
+    <li>페이지를 새로고침해보세요</li>
+    <li>문제가 지속되면 관리자에게 문의하세요</li>
+    {% endif %}
+  </ul>
 </div>
 {% else %}
 
+<!-- 학습 설정 정보 -->
+{% if model_info.training_config %}
+<div class="card mb-4">
+  <div class="card-header">
+    <h5 class="mb-0">
+      <i class="fas fa-cogs text-primary me-2"></i>학습 설정 정보
+    </h5>
+  </div>
+  <div class="card-body">
+    <div class="row">
+      <div class="col-md-4">
+        <div class="card bg-light">
+          <div class="card-body">
+            <h6 class="card-title">
+              <i class="fas fa-search text-info me-2"></i>하이퍼파라미터 튜닝
+            </h6>
+            <ul class="list-unstyled mb-0">
+              <li>
+                <strong>탐색 방법:</strong> {{
+                model_info.training_config.search_method or 'N/A' }}
+              </li>
+              <li>
+                <strong>테스트 조합 수:</strong> {{
+                model_info.training_config.n_iter or 'N/A' }}개
+              </li>
+              <li>
+                <strong>교차검증:</strong> {{
+                model_info.training_config.cv_folds or 'N/A' }}-fold
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="card bg-light">
+          <div class="card-body">
+            <h6 class="card-title">
+              <i class="fas fa-microchip text-warning me-2"></i>시스템 설정
+            </h6>
+            <ul class="list-unstyled mb-0">
+              <li>
+                <strong>CPU 코어:</strong> {{ model_info.training_config.n_jobs
+                or 'N/A' }}개
+              </li>
+              <li>
+                <strong>테스트 비율:</strong> {{
+                (model_info.training_config.test_size * 100) | round(0) if
+                model_info.training_config.test_size else 'N/A' }}%
+              </li>
+              <li>
+                <strong>평가 지표:</strong> {{
+                model_info.training_config.scoring or 'N/A' }}
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="card bg-light">
+          <div class="card-body">
+            <h6 class="card-title">
+              <i class="fas fa-sitemap text-success me-2"></i>트리 깊이 후보
+            </h6>
+            <ul class="list-unstyled mb-0">
+              {% for depth in model_info.training_config.max_depth_candidates or
+              [] %}
+              <li><span class="badge bg-secondary me-1">{{ depth }}</span></li>
+              {% endfor %} {% if not
+              model_info.training_config.max_depth_candidates %}
+              <li class="text-muted">N/A</li>
+              {% endif %}
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- 최적화 결과 -->
+{% if model_info.optimization_results %}
+<div class="card mb-4">
+  <div class="card-header">
+    <h5 class="mb-0">
+      <i class="fas fa-trophy text-warning me-2"></i>최적화 결과
+    </h5>
+  </div>
+  <div class="card-body">
+    <div class="row">
+      <div class="col-md-6">
+        <div class="alert alert-success">
+          <h6 class="alert-heading">
+            <i class="fas fa-star me-2"></i>최고 성능
+          </h6>
+          <h3 class="mb-1">
+            {{ (model_info.optimization_results.best_score | round(4)) if
+            model_info.optimization_results.best_score else 'N/A' }}
+          </h3>
+          <small class="text-muted">ROC-AUC 점수</small>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="alert alert-info">
+          <h6 class="alert-heading">
+            <i class="fas fa-list me-2"></i>탐색 범위
+          </h6>
+          <h3 class="mb-1">
+            {{ model_info.optimization_results.total_combinations_tested or
+            'N/A' }}개
+          </h3>
+          <small class="text-muted">테스트한 조합 수</small>
+        </div>
+      </div>
+    </div>
+    {% if model_info.optimization_results.best_params %}
+    <div class="mt-3">
+      <h6><i class="fas fa-cog me-2"></i>최적 파라미터</h6>
+      <div class="row">
+        {% for param, value in
+        model_info.optimization_results.best_params.items() %}
+        <div class="col-md-4 mb-2">
+          <div class="d-flex justify-content-between align-items-center">
+            <span class="fw-bold">{{ param }}:</span>
+            <span class="badge bg-primary">{{ value }}</span>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
 <!-- 모델 개요 -->
 <div class="card mb-4">
-    <div class="card-header">
-        <h5 class="mb-0">
-            <i class="fas fa-info-circle text-info me-2"></i>모델 개요
-        </h5>
-    </div>
-    <div class="card-body">
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card bg-light">
-                    <div class="card-body">
-                        <h6 class="card-title">
-                            <i class="fas fa-bullseye text-success me-2"></i>모델 목표
-                        </h6>
-                        <p class="card-text">15영업일 후 주가가 5% 이상 상승할 확률 예측</p>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card bg-light">
-                    <div class="card-body">
-                        <h6 class="card-title">
-                            <i class="fas fa-cogs text-primary me-2"></i>모델 종류
-                        </h6>
-                        <p class="card-text">{{ model_info.model_type }}</p>
-                    </div>
-                </div>
-            </div>
+  <div class="card-header">
+    <h5 class="mb-0">
+      <i class="fas fa-info-circle text-info me-2"></i>모델 개요
+    </h5>
+  </div>
+  <div class="card-body">
+    <div class="row">
+      <div class="col-md-6">
+        <div class="card bg-light">
+          <div class="card-body">
+            <h6 class="card-title">
+              <i class="fas fa-bullseye text-success me-2"></i>모델 목표
+            </h6>
+            <p class="card-text">15영업일 후 주가가 5% 이상 상승할 확률 예측</p>
+          </div>
         </div>
-        
-        <div class="row mt-3">
-            <div class="col-md-6">
-                <div class="card bg-light">
-                    <div class="card-body">
-                        <h6 class="card-title">
-                            <i class="fas fa-file-code text-warning me-2"></i>모델 파일
-                        </h6>
-                        <code>{{ model_info.model_path }}</code>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card bg-light">
-                    <div class="card-body">
-                        <h6 class="card-title">
-                            <i class="fas fa-calendar text-info me-2"></i>최종 학습일
-                        </h6>
-                        <p class="card-text">{{ model_info.last_modified }}</p>
-                    </div>
-                </div>
-            </div>
+      </div>
+      <div class="col-md-6">
+        <div class="card bg-light">
+          <div class="card-body">
+            <h6 class="card-title">
+              <i class="fas fa-cogs text-primary me-2"></i>모델 종류
+            </h6>
+            <p class="card-text">{{ model_info.model_type }}</p>
+          </div>
         </div>
+      </div>
     </div>
+
+    <div class="row mt-3">
+      <div class="col-md-6">
+        <div class="card bg-light">
+          <div class="card-body">
+            <h6 class="card-title">
+              <i class="fas fa-file-code text-warning me-2"></i>모델 파일
+            </h6>
+            <code>{{ model_info.model_path }}</code>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="card bg-light">
+          <div class="card-body">
+            <h6 class="card-title">
+              <i class="fas fa-calendar text-info me-2"></i>최종 학습일
+            </h6>
+            <p class="card-text">{{ model_info.last_modified }}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- 모델 성능 -->
 {% if model_info.oob_score %}
 <div class="card mb-4">
-    <div class="card-header">
-        <h5 class="mb-0">
-            <i class="fas fa-chart-line text-success me-2"></i>모델 성능
-        </h5>
-    </div>
-    <div class="card-body">
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card bg-light">
-                    <div class="card-body text-center">
-                        <h6 class="card-title">OOB 점수 (자체 검증 정확도)</h6>
-                        <h3 class="text-primary">{{ "{:.4f}".format(model_info.oob_score) }}</h3>
-                        <small class="text-muted">모델이 학습에 사용하지 않은 데이터를 가지고 자체적으로 검증한 정확도입니다. 0.5 이상이면 일반적으로 유의미한 성능으로 봅니다.</small>
-                    </div>
-                </div>
-            </div>
+  <div class="card-header">
+    <h5 class="mb-0">
+      <i class="fas fa-chart-line text-success me-2"></i>모델 성능
+    </h5>
+  </div>
+  <div class="card-body">
+    <div class="row">
+      <div class="col-md-6">
+        <div class="card bg-light">
+          <div class="card-body text-center">
+            <h6 class="card-title">OOB 점수 (자체 검증 정확도)</h6>
+            <h3 class="text-primary">
+              {{ "{:.4f}".format(model_info.oob_score) }}
+            </h3>
+            <small class="text-muted"
+              >모델이 학습에 사용하지 않은 데이터를 가지고 자체적으로 검증한
+              정확도입니다. 0.5 이상이면 일반적으로 유의미한 성능으로
+              봅니다.</small
+            >
+          </div>
         </div>
+      </div>
     </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- 파라미터 설명 -->
+{% if model_info.parameter_explanations %}
+<div class="card mb-4">
+  <div class="card-header">
+    <h5 class="mb-0">
+      <i class="fas fa-question-circle text-info me-2"></i>파라미터 의미 설명
+    </h5>
+  </div>
+  <div class="card-body">
+    <div class="alert alert-info" role="alert">
+      <i class="fas fa-info-circle me-2"></i>
+      각 파라미터가 모델 학습에 어떤 영향을 미치는지 설명합니다.
+    </div>
+    <div class="accordion" id="paramExplanations">
+      {% for param, explanation in model_info.parameter_explanations.items() %}
+      <div class="accordion-item">
+        <h2 class="accordion-header">
+          <button
+            class="accordion-button collapsed"
+            type="button"
+            data-bs-toggle="collapse"
+            data-bs-target="#param{{ loop.index }}"
+          >
+            <strong>{{ param }}</strong>
+            <span class="badge bg-secondary ms-2"
+              >{{ model_info.params.get(param, 'N/A') }}</span
+            >
+          </button>
+        </h2>
+        <div id="param{{ loop.index }}" class="accordion-collapse collapse">
+          <div class="accordion-body">
+            <p class="mb-0">{{ explanation }}</p>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
 </div>
 {% endif %}
 
 <!-- 피처 중요도 -->
 <div class="card mb-4">
-    <div class="card-header">
-        <h5 class="mb-0">
-            <i class="fas fa-chart-bar text-warning me-2"></i>피처 중요도 (Feature Importances)
-        </h5>
+  <div class="card-header">
+    <h5 class="mb-0">
+      <i class="fas fa-chart-bar text-warning me-2"></i>피처 중요도 (Feature
+      Importances)
+    </h5>
+  </div>
+  <div class="card-body">
+    <div class="alert alert-info" role="alert">
+      <i class="fas fa-info-circle me-2"></i>모델이 어떤 정보를 중요하게
+      생각하여 주가 상승을 예측하는지 보여줍니다.
     </div>
-    <div class="card-body">
-        <div class="alert alert-info" role="alert">
-            <i class="fas fa-info-circle me-2"></i>모델이 어떤 정보를 중요하게 생각하여 주가 상승을 예측하는지 보여줍니다.
-        </div>
-        
-        <!-- 차트 -->
-        <div class="mb-4">
-            <canvas id="feature_importance_chart" width="400" height="200"></canvas>
-        </div>
-        
-        <!-- 상세 데이터 -->
-        <div class="accordion" id="featureAccordion">
-            <div class="accordion-item">
-                <h2 class="accordion-header">
-                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#featureDetails">
-                        <i class="fas fa-table me-2"></i>피처 중요도 상세 데이터 보기
-                    </button>
-                </h2>
-                <div id="featureDetails" class="accordion-collapse collapse" data-bs-parent="#featureAccordion">
-                    <div class="accordion-body">
-                        <div class="table-responsive">
-                            <table class="table table-striped" id="feature_table">
-                                <thead class="table-dark">
-                                    <tr>
-                                        <th>피처 (Feature)</th>
-                                        <th>중요도 (Importance)</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {% for feature, importance in model_info.feature_importances %}
-                                    <tr>
-                                        <td>{{ feature }}</td>
-                                        <td>{{ "{:.6f}".format(importance) }}</td>
-                                    </tr>
-                                    {% endfor %}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="accordion-item">
-                <h2 class="accordion-header">
-                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#modelParams">
-                        <i class="fas fa-cogs me-2"></i>주요 학습 파라미터 보기
-                    </button>
-                </h2>
-                <div id="modelParams" class="accordion-collapse collapse" data-bs-parent="#featureAccordion">
-                    <div class="accordion-body">
-                        <div class="row">
-                            <div class="col-md-6">
-                                <h6>주요 파라미터</h6>
-                                <ul class="list-group">
-                                    <li class="list-group-item d-flex justify-content-between">
-                                        <span>n_estimators</span>
-                                        <span class="badge bg-primary">{{ model_info.params.get('n_estimators', 'N/A') }}</span>
-                                    </li>
-                                    <li class="list-group-item d-flex justify-content-between">
-                                        <span>max_depth</span>
-                                        <span class="badge bg-primary">{{ model_info.params.get('max_depth', 'N/A') }}</span>
-                                    </li>
-                                    <li class="list-group-item d-flex justify-content-between">
-                                        <span>min_samples_split</span>
-                                        <span class="badge bg-primary">{{ model_info.params.get('min_samples_split', 'N/A') }}</span>
-                                    </li>
-                                </ul>
-                            </div>
-                            <div class="col-md-6">
-                                <h6>추가 파라미터</h6>
-                                <ul class="list-group">
-                                    <li class="list-group-item d-flex justify-content-between">
-                                        <span>min_samples_leaf</span>
-                                        <span class="badge bg-secondary">{{ model_info.params.get('min_samples_leaf', 'N/A') }}</span>
-                                    </li>
-                                    <li class="list-group-item d-flex justify-content-between">
-                                        <span>max_samples</span>
-                                        <span class="badge bg-secondary">{{ model_info.params.get('max_samples', 'N/A') }}</span>
-                                    </li>
-                                    <li class="list-group-item d-flex justify-content-between">
-                                        <span>class_weight</span>
-                                        <span class="badge bg-secondary">{{ model_info.params.get('class_weight', 'N/A') }}</span>
-                                    </li>
-                                </ul>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
+
+    <!-- 차트 -->
+    <div class="mb-4">
+      <canvas id="feature_importance_chart" width="400" height="200"></canvas>
     </div>
+
+    <!-- 상세 데이터 -->
+    <div class="accordion" id="featureAccordion">
+      <div class="accordion-item">
+        <h2 class="accordion-header">
+          <button
+            class="accordion-button collapsed"
+            type="button"
+            data-bs-toggle="collapse"
+            data-bs-target="#featureDetails"
+          >
+            <i class="fas fa-table me-2"></i>피처 중요도 상세 데이터 보기
+          </button>
+        </h2>
+        <div
+          id="featureDetails"
+          class="accordion-collapse collapse"
+          data-bs-parent="#featureAccordion"
+        >
+          <div class="accordion-body">
+            <div class="table-responsive">
+              <table class="table table-striped" id="feature_table">
+                <thead class="table-dark">
+                  <tr>
+                    <th>피처 (Feature)</th>
+                    <th>중요도 (Importance)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for feature, importance in model_info.feature_importances
+                  %}
+                  <tr>
+                    <td>{{ feature }}</td>
+                    <td>{{ "{:.6f}".format(importance) }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="accordion-item">
+        <h2 class="accordion-header">
+          <button
+            class="accordion-button collapsed"
+            type="button"
+            data-bs-toggle="collapse"
+            data-bs-target="#modelParams"
+          >
+            <i class="fas fa-cogs me-2"></i>주요 학습 파라미터 보기
+          </button>
+        </h2>
+        <div
+          id="modelParams"
+          class="accordion-collapse collapse"
+          data-bs-parent="#featureAccordion"
+        >
+          <div class="accordion-body">
+            <div class="row">
+              <div class="col-md-6">
+                <h6>주요 파라미터</h6>
+                <ul class="list-group">
+                  <li class="list-group-item d-flex justify-content-between">
+                    <span>n_estimators</span>
+                    <span class="badge bg-primary"
+                      >{{ model_info.params.get('n_estimators', 'N/A') }}</span
+                    >
+                  </li>
+                  <li class="list-group-item d-flex justify-content-between">
+                    <span>max_depth</span>
+                    <span class="badge bg-primary"
+                      >{{ model_info.params.get('max_depth', 'N/A') }}</span
+                    >
+                  </li>
+                  <li class="list-group-item d-flex justify-content-between">
+                    <span>min_samples_split</span>
+                    <span class="badge bg-primary"
+                      >{{ model_info.params.get('min_samples_split', 'N/A')
+                      }}</span
+                    >
+                  </li>
+                </ul>
+              </div>
+              <div class="col-md-6">
+                <h6>추가 파라미터</h6>
+                <ul class="list-group">
+                  <li class="list-group-item d-flex justify-content-between">
+                    <span>min_samples_leaf</span>
+                    <span class="badge bg-secondary"
+                      >{{ model_info.params.get('min_samples_leaf', 'N/A')
+                      }}</span
+                    >
+                  </li>
+                  <li class="list-group-item d-flex justify-content-between">
+                    <span>max_samples</span>
+                    <span class="badge bg-secondary"
+                      >{{ model_info.params.get('max_samples', 'N/A') }}</span
+                    >
+                  </li>
+                  <li class="list-group-item d-flex justify-content-between">
+                    <span>class_weight</span>
+                    <span class="badge bg-secondary"
+                      >{{ model_info.params.get('class_weight', 'N/A') }}</span
+                    >
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
-{% endif %}
-{% endblock %}
-
-{% block extra_scripts %}
+{% endif %} {% endblock %} {% block extra_scripts %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
-$(document).ready(function() {
-    // 피처 중요도 차트 생성
-    const featureImportances = {{ model_info.feature_importances | tojson }};
-    
-    // 상위 20개 피처만 표시
-    const topFeatures = featureImportances.slice(0, 20).map(item => item[0]);
-    const topImportances = featureImportances.slice(0, 20).map(item => item[1]);
-    
-    const ctx = document.getElementById('feature_importance_chart').getContext('2d');
-    new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: topFeatures,
-            datasets: [{
-                label: '중요도',
-                data: topImportances,
-                backgroundColor: 'rgba(54, 162, 235, 0.6)',
-                borderColor: 'rgba(54, 162, 235, 1)',
-                borderWidth: 1
-            }]
-        },
-        options: {
-            responsive: true,
-            plugins: {
-                title: {
-                    display: true,
-                    text: '피처 중요도 (상위 20개)'
-                },
-                legend: {
-                    display: false
-                }
-            },
-            scales: {
-                y: {
-                    beginAtZero: true,
-                    title: {
-                        display: true,
-                        text: '중요도'
-                    }
-                },
-                x: {
-                    title: {
-                        display: true,
-                        text: '피처'
-                    },
-                    ticks: {
-                        maxRotation: 45,
-                        minRotation: 45
-                    }
-                }
-            }
-        }
-    });
-    
-    // 피처 중요도 테이블 초기화 (재초기화 방지)
-    if (!$.fn.DataTable.isDataTable('#feature_table')) {
-        $('#feature_table').DataTable({
-            pageLength: 25,
-            order: [[1, 'desc']],
-            language: {
-                "lengthMenu": "페이지당 _MENU_ 개씩 보기",
-                "zeroRecords": "데이터가 없습니다",
-                "info": "_START_ - _END_ / _TOTAL_ 개",
-                "infoEmpty": "0 개",
-                "infoFiltered": "(전체 _MAX_ 개 중 필터링됨)",
-                "search": "검색:",
-                "paginate": {
-                    "first": "처음",
-                    "last": "마지막",
-                    "next": "다음",
-                    "previous": "이전"
-                }
-            }
-        });
-    }
-});
+  $(document).ready(function() {
+      // 피처 중요도 차트 생성 (model_info가 있을 때만)
+      {% if model_info and model_info.feature_importances %}
+      const featureImportances = {{ model_info.feature_importances | tojson }};
+
+      // 상위 20개 피처만 표시
+      const topFeatures = featureImportances.slice(0, 20).map(item => item[0]);
+      const topImportances = featureImportances.slice(0, 20).map(item => item[1]);
+      {% else %}
+      // model_info가 없을 때 빈 데이터로 처리
+      const featureImportances = [];
+      const topFeatures = [];
+      const topImportances = [];
+      {% endif %}
+
+      // 차트 생성 (데이터가 있을 때만)
+      if (topFeatures.length > 0) {
+          const ctx = document.getElementById('feature_importance_chart').getContext('2d');
+          new Chart(ctx, {
+              type: 'bar',
+              data: {
+                  labels: topFeatures,
+                  datasets: [{
+                  label: '중요도',
+                  data: topImportances,
+                  backgroundColor: 'rgba(54, 162, 235, 0.6)',
+                  borderColor: 'rgba(54, 162, 235, 1)',
+                  borderWidth: 1
+              }]
+          },
+          options: {
+              responsive: true,
+              plugins: {
+                  title: {
+                      display: true,
+                      text: '피처 중요도 (상위 20개)'
+                  },
+                  legend: {
+                      display: false
+                  }
+              },
+              scales: {
+                  y: {
+                      beginAtZero: true,
+                      title: {
+                          display: true,
+                          text: '중요도'
+                      }
+                  },
+                  x: {
+                      title: {
+                          display: true,
+                          text: '피처'
+                      },
+                      ticks: {
+                          maxRotation: 45,
+                          minRotation: 45
+                      }
+                  }
+              }
+          }
+          });
+      } else {
+          // 데이터가 없을 때 메시지 표시
+          document.getElementById('feature_importance_chart').innerHTML =
+              '<div class="text-center text-muted">모델 정보를 불러올 수 없습니다.</div>';
+      }
+
+      // 피처 중요도 테이블 초기화 (재초기화 방지)
+      if (!$.fn.DataTable.isDataTable('#feature_table')) {
+          $('#feature_table').DataTable({
+              pageLength: 25,
+              order: [[1, 'desc']],
+              language: {
+                  "lengthMenu": "페이지당 _MENU_ 개씩 보기",
+                  "zeroRecords": "데이터가 없습니다",
+                  "info": "_START_ - _END_ / _TOTAL_ 개",
+                  "infoEmpty": "0 개",
+                  "infoFiltered": "(전체 _MAX_ 개 중 필터링됨)",
+                  "search": "검색:",
+                  "paginate": {
+                      "first": "처음",
+                      "last": "마지막",
+                      "next": "다음",
+                      "previous": "이전"
+                  }
+              }
+          });
+      }
+  });
 </script>
 {% endblock %}

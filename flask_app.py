@@ -394,7 +394,17 @@ def index():
 @app.route('/model_analysis')
 def model_analysis():
     """학습 모델 분석 페이지"""
+    model_info = None
+    error = None
+    
     try:
+        # 메모리 사용량 확인
+        import psutil
+        memory_usage = psutil.virtual_memory()
+        if memory_usage.percent > 85:
+            raise MemoryError(f"메모리 사용량이 높습니다: {memory_usage.percent:.1f}%")
+        
+        # 모델 로드 시도
         model_data = joblib.load(MODEL_PATH)
         model = model_data['model']
         features = model_data['features']
@@ -402,6 +412,11 @@ def model_analysis():
         # 피처 중요도 데이터 정리
         feature_importances = list(zip(features, model.feature_importances_))
         feature_importances.sort(key=lambda x: x[1], reverse=True)
+        
+        # 추가 정보 로드 (기존 모델과의 호환성을 위해 기본값 설정)
+        training_config = model_data.get('training_config', {})
+        optimization_results = model_data.get('optimization_results', {})
+        parameter_explanations = model_data.get('parameter_explanations', {})
         
         # 모델 정보
         model_info = {
@@ -411,14 +426,20 @@ def model_analysis():
             'oob_score': getattr(model, 'oob_score_', None),
             'features': features,
             'feature_importances': feature_importances,
-            'params': model.get_params()
+            'params': model.get_params(),
+            'training_config': training_config,
+            'optimization_results': optimization_results,
+            'parameter_explanations': parameter_explanations
         }
         
-        return render_template('model_analysis.html', model_info=model_info)
     except FileNotFoundError:
-        return render_template('model_analysis.html', error="모델 파일을 찾을 수 없습니다.")
+        error = "모델 파일을 찾을 수 없습니다. 먼저 모델을 학습해주세요."
+    except MemoryError as e:
+        error = f"메모리 부족으로 모델을 로드할 수 없습니다: {str(e)}"
     except Exception as e:
-        return render_template('model_analysis.html', error=f"모델 로드 중 오류: {str(e)}")
+        error = f"모델 로드 중 오류: {str(e)}"
+    
+    return render_template('model_analysis.html', model_info=model_info, error=error)
 
 @app.route('/backtest')
 def backtest():
