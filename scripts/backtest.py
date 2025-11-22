@@ -65,6 +65,9 @@ from path_manager import path_manager
 TEST_START_DATE = '2024-01-01'
 TEST_END_DATE = datetime.now().strftime('%Y-%m-%d')
 WEIGHTS_FILE = str(path_manager.get_weights_path())
+# cuML 모델 경로 (우선 사용)
+CUML_MODEL_FILE = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
+# 기존 모델 경로 (fallback)
 MODEL_FILE = str(path_manager.get_model_path())
 REPORT_FILE = str(path_manager.get_backtest_report_path())
 TOP_N_STOCKS = 5
@@ -563,25 +566,60 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         # 모델 로딩 (강화된 에러 처리)
         try:
             print("  - 정식 모델 로딩 중...")
-            log_info("ML 모델 로딩 시작", context={"model_file": MODEL_FILE})
             
-            model_data = joblib.load(MODEL_FILE)
-            model = model_data['model']
-            features = model_data['features']
-            scaler = model_data['scaler']
+            # cuML 모델 파일 우선 확인, 없으면 기존 모델 파일 확인
+            model_file_path = None
+            is_cuml_model = False
             
-            log_info("ML 모델 로딩 완료", context={
-                "model_type": type(model).__name__,
-                "features_count": len(features),
-                "scaler_type": type(scaler).__name__
-            })
+            if os.path.exists(CUML_MODEL_FILE):
+                model_file_path = CUML_MODEL_FILE
+                is_cuml_model = True
+                log_info("ML 모델 로딩 시작 (cuML 앙상블)", context={"model_file": model_file_path})
+            elif os.path.exists(MODEL_FILE):
+                model_file_path = MODEL_FILE
+                is_cuml_model = False
+                log_info("ML 모델 로딩 시작 (기존 모델)", context={"model_file": model_file_path})
+            else:
+                error_msg = f"모델 파일을 찾을 수 없습니다. (cuML: {CUML_MODEL_FILE}, 기존: {MODEL_FILE})"
+                log_critical("ML 모델 파일 없음", context={"cuml_file": CUML_MODEL_FILE, "legacy_file": MODEL_FILE})
+                raise FileNotFoundError(error_msg)
+            
+            model_data = joblib.load(model_file_path)
+            
+            # cuML 앙상블 모델인지 확인
+            if is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'mini_batch_ensemble':
+                # cuML 앙상블 모델 처리
+                from ml_model_wrapper import EnsembleModelWrapper
+                models = model_data['models']
+                scaler = model_data['scaler']
+                features = model_data['features']
+                
+                # 앙상블 모델 래퍼 생성
+                model = EnsembleModelWrapper(models, scaler)
+                
+                log_info("ML 모델 로딩 완료 (cuML 앙상블)", context={
+                    "model_type": f"cuML 앙상블 ({len(models)}개 모델)",
+                    "features_count": len(features),
+                    "scaler_type": type(scaler).__name__ if scaler else "None"
+                })
+            else:
+                # 기존 모델 구조 (sklearn)
+                model = model_data['model']
+                features = model_data['features']
+                scaler = model_data['scaler']
+                
+                log_info("ML 모델 로딩 완료 (기존 모델)", context={
+                    "model_type": type(model).__name__,
+                    "features_count": len(features),
+                    "scaler_type": type(scaler).__name__
+                })
             
         except FileNotFoundError as e:
-            error_msg = f"{MODEL_FILE}을 찾을 수 없습니다. train_model.py를 먼저 실행해주세요."
-            log_critical("ML 모델 파일 없음", exception=e, context={"model_file": MODEL_FILE})
+            error_msg = f"모델 파일을 찾을 수 없습니다. train_model.py 또는 train_gpu_main.py를 먼저 실행해주세요."
+            log_critical("ML 모델 파일 없음", exception=e, context={"model_file": model_file_path if 'model_file_path' in locals() else "Unknown"})
             raise FileNotFoundError(error_msg)
         except Exception as e:
-            log_critical("ML 모델 로딩 실패", exception=e, context={"model_file": MODEL_FILE})
+            log_critical("ML 모델 로딩 실패", exception=e, context={"model_file": model_file_path if 'model_file_path' in locals() else "Unknown"})
             raise
         
         # ML 예측 적용 (강화된 에러 처리)
@@ -595,8 +633,42 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             test_data_for_pred = test_data[features].copy()
             test_data_for_pred.fillna(0, inplace=True)
             
-            X_test_scaled = scaler.transform(test_data_for_pred)
-            test_data['ml_pred_proba'] = model.predict_proba(X_test_scaled)[:, 1]
+            # cuML scaler인지 확인
+            if is_cuml_model and scaler and hasattr(scaler, 'transform'):
+                # cuML scaler는 cuDF DataFrame을 받아야 함
+                try:
+                    import cudf
+                    test_data_cudf = cudf.from_pandas(test_data_for_pred)
+                    X_test_scaled_cudf = scaler.transform(test_data_cudf)
+                    # cuDF를 pandas로 변환
+                    if hasattr(X_test_scaled_cudf, 'to_pandas'):
+                        X_test_scaled = X_test_scaled_cudf.to_pandas().values
+                    elif hasattr(X_test_scaled_cudf, 'values'):
+                        X_test_scaled = X_test_scaled_cudf.values
+                    else:
+                        X_test_scaled = X_test_scaled_cudf
+                except ImportError:
+                    log_warning("cuDF를 사용할 수 없습니다. 원본 데이터 사용")
+                    X_test_scaled = test_data_for_pred
+                except Exception as e:
+                    log_warning(f"cuML 스케일링 오류: {e}, 원본 데이터 사용")
+                    X_test_scaled = test_data_for_pred
+            else:
+                # sklearn scaler
+                X_test_scaled = scaler.transform(test_data_for_pred)
+            
+            # 예측 수행
+            pred_proba = model.predict_proba(X_test_scaled)
+            
+            # 반환 형태에 따라 처리
+            if isinstance(pred_proba, np.ndarray):
+                if pred_proba.ndim == 2:
+                    test_data['ml_pred_proba'] = pred_proba[:, 1]
+                else:
+                    test_data['ml_pred_proba'] = pred_proba
+            else:
+                # 기타 형태는 그대로 사용
+                test_data['ml_pred_proba'] = pred_proba[:, 1] if hasattr(pred_proba, '__getitem__') else pred_proba
             
             log_info("ML 예측 적용 완료", context={
                 "predictions_count": len(test_data['ml_pred_proba']),

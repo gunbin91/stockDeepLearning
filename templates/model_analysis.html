@@ -53,8 +53,7 @@
                 model_info.training_config.search_method or 'N/A' }}
               </li>
               <li>
-                <strong>테스트 조합 수:</strong> {{
-                model_info.training_config.n_iter or 'N/A' }}개
+                <strong>테스트 조합 수:</strong> {% if model_info.training_config.n_iter %}{{ model_info.training_config.n_iter }}개{% else %}<span class="text-muted">정보 없음</span>{% endif %}
               </li>
               <li>
                 <strong>교차검증:</strong> {{
@@ -72,13 +71,10 @@
             </h6>
             <ul class="list-unstyled mb-0">
               <li>
-                <strong>CPU 코어:</strong> {{ model_info.training_config.n_jobs
-                or 'N/A' }}개
+                <strong>CPU 코어:</strong> {% if model_info.training_config.n_jobs %}{{ model_info.training_config.n_jobs }}개{% else %}<span class="text-muted">GPU 사용 (CPU 코어 미사용)</span>{% endif %}
               </li>
               <li>
-                <strong>테스트 비율:</strong> {{
-                (model_info.training_config.test_size * 100) | round(0) if
-                model_info.training_config.test_size else 'N/A' }}%
+                <strong>테스트 비율:</strong> {% if model_info.training_config.test_size %}{{ (model_info.training_config.test_size * 100) | round(0) }}%{% else %}<span class="text-muted">교차검증 사용 (테스트 비율 없음)</span>{% endif %}
               </li>
               <li>
                 <strong>평가 지표:</strong> {{
@@ -95,12 +91,12 @@
               <i class="fas fa-sitemap text-success me-2"></i>트리 깊이 후보
             </h6>
             <ul class="list-unstyled mb-0">
-              {% for depth in model_info.training_config.max_depth_candidates or
-              [] %}
-              <li><span class="badge bg-secondary me-1">{{ depth }}</span></li>
-              {% endfor %} {% if not
-              model_info.training_config.max_depth_candidates %}
-              <li class="text-muted">N/A</li>
+              {% if model_info.training_config.max_depth_candidates and model_info.training_config.max_depth_candidates|length > 0 %}
+                {% for depth in model_info.training_config.max_depth_candidates %}
+                <li><span class="badge bg-secondary me-1">{{ depth }}</span></li>
+                {% endfor %}
+              {% else %}
+                <li class="text-muted">정보 없음</li>
               {% endif %}
             </ul>
           </div>
@@ -127,8 +123,7 @@
             <i class="fas fa-star me-2"></i>최고 성능
           </h6>
           <h3 class="mb-1">
-            {{ (model_info.optimization_results.best_score | round(4)) if
-            model_info.optimization_results.best_score else 'N/A' }}
+            {% if model_info.optimization_results.best_score is not none %}{{ model_info.optimization_results.best_score | round(4) }}{% else %}<span class="text-muted">정보 없음</span>{% endif %}
           </h3>
           <small class="text-muted">ROC-AUC 점수</small>
         </div>
@@ -139,8 +134,7 @@
             <i class="fas fa-list me-2"></i>탐색 범위
           </h6>
           <h3 class="mb-1">
-            {{ model_info.optimization_results.total_combinations_tested or
-            'N/A' }}개
+            {% if model_info.optimization_results.total_combinations_tested is not none %}{{ model_info.optimization_results.total_combinations_tested }}개{% else %}<span class="text-muted">정보 없음</span>{% endif %}
           </h3>
           <small class="text-muted">테스트한 조합 수</small>
         </div>
@@ -297,14 +291,12 @@
 <div class="card mb-4">
   <div class="card-header">
     <h5 class="mb-0">
-      <i class="fas fa-chart-bar text-warning me-2"></i>피처 중요도 (Feature
-      Importances)
+      <i class="fas fa-chart-bar text-warning me-2"></i>피처 중요도 (SHAP Values)
     </h5>
   </div>
   <div class="card-body">
     <div class="alert alert-info" role="alert">
-      <i class="fas fa-info-circle me-2"></i>모델이 어떤 정보를 중요하게
-      생각하여 주가 상승을 예측하는지 보여줍니다.
+      <i class="fas fa-info-circle me-2"></i>SHAP 값으로 계산된 피처 중요도입니다. 각 피처가 모델 예측에 기여한 평균 기여도를 보여줍니다. 값이 클수록 해당 피처가 주가 상승 예측에 더 중요한 역할을 합니다.
     </div>
 
     <!-- 차트 -->
@@ -340,13 +332,19 @@
                   </tr>
                 </thead>
                 <tbody>
-                  {% for feature, importance in model_info.feature_importances
-                  %}
-                  <tr>
-                    <td>{{ feature }}</td>
-                    <td>{{ "{:.6f}".format(importance) }}</td>
-                  </tr>
-                  {% endfor %}
+                  {% if model_info.feature_importances %}
+                    {% for feature, importance in model_info.feature_importances %}
+                    <tr>
+                      <td>{{ feature }}</td>
+                      <td>{{ "{:.6f}".format(importance) }}</td>
+                    </tr>
+                    {% endfor %}
+                  {% else %}
+                    <tr>
+                      <td class="text-center text-muted">피처 중요도 정보를 사용할 수 없습니다.</td>
+                      <td class="text-center text-muted">-</td>
+                    </tr>
+                  {% endif %}
                 </tbody>
               </table>
             </div>
@@ -499,7 +497,8 @@
               '<div class="text-center text-muted">모델 정보를 불러올 수 없습니다.</div>';
       }
 
-      // 피처 중요도 테이블 초기화 (재초기화 방지)
+      // 피처 중요도 테이블 초기화 (재초기화 방지, 데이터가 있을 때만)
+      {% if model_info and model_info.feature_importances %}
       if (!$.fn.DataTable.isDataTable('#feature_table')) {
           $('#feature_table').DataTable({
               pageLength: 25,
@@ -520,6 +519,7 @@
               }
           });
       }
+      {% endif %}
   });
 </script>
 {% endblock %}

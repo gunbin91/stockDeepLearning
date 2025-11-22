@@ -80,8 +80,12 @@ class PathManager:
     
     
     def get_model_path(self) -> Path:
-        """모델 파일 경로"""
+        """모델 파일 경로 (기존 모델)"""
         return self.data_dir / 'stock_prediction_model_rf_upgraded.joblib'
+    
+    def get_cuml_model_path(self) -> Path:
+        """cuML 앙상블 모델 파일 경로"""
+        return self.data_dir / 'cuml_ensemble_model.joblib'
     
     def get_weights_path(self) -> Path:
         """가중치 파일 경로"""

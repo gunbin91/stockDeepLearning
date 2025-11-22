@@ -349,7 +349,11 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
         'class_weight': '클래스 불균형 처리 방법'
     }
     
+    # 메타데이터 파일 경로
+    metadata_path = str(path_manager.data_dir / 'model_metadata.joblib')
+    
     try:
+        # 전체 모델 파일 저장 (예측에 사용)
         joblib.dump({
             'model': best_model, 
             'features': features, 
@@ -359,7 +363,18 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
             'optimization_results': optimization_results,
             'parameter_explanations': parameter_explanations
         }, model_path, compress=3)  # 압축 저장으로 메모리 절약
+        
+        # 메타데이터 파일 저장 (모델 분석 페이지용, 메모리 최적화)
+        # 모델 객체는 저장하지 않고 정보만 저장
+        joblib.dump({
+            'features': features,
+            'training_config': training_config,
+            'optimization_results': optimization_results,
+            'parameter_explanations': parameter_explanations
+        }, metadata_path, compress=3)
+        
         log_info(f"\n✅ 새로운 데이터로 학습된 최적 모델, 스케일러, 중앙값을 '{model_path}' 경로에 저장했습니다.")
+        log_info(f"✅ 모델 메타데이터가 '{metadata_path}' 경로에 저장되었습니다 (메모리 최적화).")
         log_memory_usage("모델 저장 완료")
     except MemoryError as e:
         log_error(f"모델 저장 중 메모리 부족: {e}")
@@ -374,6 +389,18 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
             'optimization_results': optimization_results,
             'parameter_explanations': parameter_explanations
         }, model_path, compress=3)  # 압축 저장으로 메모리 절약
+        
+        # 메타데이터도 재시도
+        try:
+            joblib.dump({
+                'features': features,
+                'training_config': training_config,
+                'optimization_results': optimization_results,
+                'parameter_explanations': parameter_explanations
+            }, metadata_path, compress=3)
+        except Exception:
+            log_warning("메타데이터 저장 실패 (선택사항)")
+        
         log_info(f"\n✅ 재시도 후 모델 저장 완료: '{model_path}'")
         log_memory_usage("재시도 후 모델 저장 완료")
 
