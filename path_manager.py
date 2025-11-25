@@ -91,6 +91,10 @@ class PathManager:
         """백테스팅 리포트 파일 경로"""
         return self.project_root / 'backtest_report.html'
     
+    def get_training_data_path(self) -> Path:
+        """학습 데이터 파일 경로"""
+        return self.data_dir / 'training_data.parquet'
+    
     
     def ensure_directories(self):
         """필요한 디렉토리들을 생성 (중복 생성 방지)"""

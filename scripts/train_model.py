@@ -15,11 +15,10 @@ RandomForest 알고리즘을 사용하여 15일 후 5% 이상 상승할 확률�
 import pandas as pd
 import numpy as np
 import joblib
-from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.preprocessing import StandardScaler
-from scipy.stats import randint
 import warnings
 import argparse
 from datetime import datetime
@@ -31,6 +30,8 @@ import gc
 import psutil
 import locale
 import platform
+import optuna
+from optuna.samplers import TPESampler
 
 # Windows 환경에서 로케일 설정 (FinanceDataReader 내부 오류 방지)
 if platform.system() == 'Windows':
@@ -81,39 +82,45 @@ def check_memory_and_cleanup(threshold_mb=8000):
         return True
     return False
 
-def create_training_data():
-    log_info("🚀 실시간 데이터 수집을 통해 학습 데이터 생성을 시작합니다...")
-    log_memory_usage("학습 데이터 생성 시작")
-    
-    start_date_for_cacher = '2015-01-01'
-    end_date_for_cacher = datetime.now().strftime('%Y-%m-%d')
-    
+def load_training_data_from_file(training_data_path):
+    """학습 데이터 파일에서 로드"""
     try:
-        # 실시간 데이터 수집 (2015년부터 현재까지)
-        final_df = data_processor.get_preprocessed_data(start_date_for_cacher, end_date_for_cacher)
-        log_memory_usage("데이터 로딩 완료")
-        check_memory_and_cleanup()
-    except MemoryError as e:
-        log_error(f"메모리 부족으로 데이터 로딩 실패: {e}")
-        log_info("   🔄 메모리 정리 후 재시도합니다...")
-        safe_memory_cleanup()
-        final_df = data_processor.get_preprocessed_data(start_date_for_cacher, end_date_for_cacher)
-        log_memory_usage("재시도 후 데이터 로딩 완료")
-    
-    if final_df is None or final_df.empty:
-        log_error("데이터를 가져오는 데 실패했습니다.")
-        return None, None, None, None
+        log_info(f"📂 학습 데이터 파일에서 로드 중: {training_data_path}")
+        final_df = pd.read_parquet(training_data_path)
+        log_info(f"✅ 학습 데이터 파일 로드 완료: {len(final_df):,} 행")
+        log_memory_usage("학습 데이터 파일 로드 완료")
+        return final_df
+    except Exception as e:
+        log_error(f"학습 데이터 파일 로드 실패: {e}")
+        return None
 
-    log_info(f"\n--- 생성된 학습 데이터 요약 ---")
-    log_info(f"1. 전체 수집 데이터 (Raw): {len(final_df):,} 행")
-    log_memory_usage("원본 데이터 로딩")
-    
-    training_start_date = '2016-01-01'
-    final_df = final_df[final_df['date'] >= pd.to_datetime(training_start_date)]
-    log_info(f"2. 워밍업 기간(2015년) 제외 후 실제 학습 데이터: {len(final_df):,} 행")
-    log_memory_usage("데이터 필터링 완료")
-    check_memory_and_cleanup()
+def save_training_data_to_file(final_df, training_data_path):
+    """학습 데이터를 파일로 저장"""
+    try:
+        log_info(f"💾 학습 데이터를 파일로 저장 중: {training_data_path}")
+        # 디렉토리가 없으면 생성
+        training_data_path.parent.mkdir(parents=True, exist_ok=True)
+        final_df.to_parquet(training_data_path, index=False, compression='snappy')
+        log_info(f"✅ 학습 데이터 파일 저장 완료: {len(final_df):,} 행")
+        log_memory_usage("학습 데이터 파일 저장 완료")
+        return True
+    except Exception as e:
+        log_error(f"학습 데이터 파일 저장 실패: {e}")
+        return False
 
+def create_training_data(years=None):
+    """
+    학습 데이터 생성 함수
+    
+    Args:
+        years: 학습에 사용할 최근 N년치 데이터 (None이면 전체 데이터)
+    
+    Returns:
+        X, y, features, imputation_values
+    """
+    training_data_path = path_manager.get_training_data_path()
+    
+    # 학습에 사용할 피처 정의 (전역으로 사용)
     features = [
         'PBR', 'log_mktcap', '이익수익률', 'BPS',
         '수익률(1M)', '수익률(3M)', '52주_신고가_비율',
@@ -126,6 +133,100 @@ def create_training_data():
     ]
     target = 'target'
     
+    # 학습 데이터 파일이 있는지 확인
+    if training_data_path.exists():
+        log_info("📂 기존 학습 데이터 파일을 발견했습니다.")
+        final_df = load_training_data_from_file(training_data_path)
+        
+        if final_df is not None and not final_df.empty:
+            log_info("✅ 기존 학습 데이터 파일을 사용합니다.")
+        else:
+            log_warning("⚠️ 기존 학습 데이터 파일이 유효하지 않습니다. 새로 수집합니다.")
+            final_df = None
+    else:
+        log_info("📂 학습 데이터 파일이 없습니다. 새로 수집합니다.")
+        final_df = None
+    
+    # 파일이 없거나 유효하지 않으면 새로 수집
+    if final_df is None or final_df.empty:
+        if years is None:
+            log_info("🚀 전체 기간 데이터 수집을 통해 학습 데이터 생성을 시작합니다...")
+            start_date_for_cacher = '2015-01-01'
+        else:
+            # 최근 N년치 데이터 수집
+            from datetime import timedelta
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=years * 365)
+            start_date_for_cacher = start_date.strftime('%Y-%m-%d')
+            log_info(f"🚀 최근 {years}년치 데이터 수집을 통해 학습 데이터 생성을 시작합니다...")
+            log_info(f"   📅 수집 기간: {start_date_for_cacher} ~ {end_date.strftime('%Y-%m-%d')}")
+        
+        end_date_for_cacher = datetime.now().strftime('%Y-%m-%d')
+        log_memory_usage("학습 데이터 생성 시작")
+        
+        try:
+            # 실시간 데이터 수집 (학습용이므로 팩터 점수 계산 건너뛰기)
+            final_df = data_processor.get_preprocessed_data(
+                start_date_for_cacher, 
+                end_date_for_cacher, 
+                calculate_factor_scores=False  # 학습 데이터에는 팩터 점수 불필요
+            )
+            log_memory_usage("데이터 로딩 완료")
+            check_memory_and_cleanup()
+        except MemoryError as e:
+            log_error(f"메모리 부족으로 데이터 로딩 실패: {e}")
+            log_info("   🔄 메모리 정리 후 재시도합니다...")
+            safe_memory_cleanup()
+            final_df = data_processor.get_preprocessed_data(
+                start_date_for_cacher, 
+                end_date_for_cacher, 
+                calculate_factor_scores=False  # 학습 데이터에는 팩터 점수 불필요
+            )
+            log_memory_usage("재시도 후 데이터 로딩 완료")
+        
+        if final_df is None or final_df.empty:
+            log_error("데이터를 가져오는 데 실패했습니다.")
+            return None, None, None, None
+        
+        # 저장할 컬럼: features + target + date, 종목코드 (메타데이터)
+        save_columns = features + [target]
+        if 'date' in final_df.columns:
+            save_columns.append('date')
+        if '종목코드' in final_df.columns:
+            save_columns.append('종목코드')
+        
+        # 실제 존재하는 컬럼만 선택
+        available_columns = [col for col in save_columns if col in final_df.columns]
+        final_df_to_save = final_df[available_columns].copy()
+        
+        # 수집한 데이터를 파일로 저장 (필요한 컬럼만)
+        if save_training_data_to_file(final_df_to_save, training_data_path):
+            log_info("✅ 학습 데이터 파일이 생성되었습니다. 다음 실행부터는 이 파일을 사용합니다.")
+            log_info(f"   📊 저장된 컬럼: {len(available_columns)}개 (학습에 필요한 컬럼만 저장)")
+        else:
+            log_warning("⚠️ 학습 데이터 파일 저장에 실패했지만 계속 진행합니다.")
+
+    log_info(f"\n--- 생성된 학습 데이터 요약 ---")
+    log_info(f"1. 전체 수집 데이터 (Raw): {len(final_df):,} 행")
+    log_memory_usage("원본 데이터 로딩")
+    
+    # 워밍업 기간 제외 (데이터가 2015년부터 시작하는 경우)
+    if 'date' in final_df.columns:
+        final_df['date'] = pd.to_datetime(final_df['date'])
+        min_date = final_df['date'].min()
+        if min_date.year <= 2015:
+            training_start_date = '2016-01-01'
+            final_df = final_df[final_df['date'] >= pd.to_datetime(training_start_date)]
+            log_info(f"2. 워밍업 기간(2015년) 제외 후 실제 학습 데이터: {len(final_df):,} 행")
+        else:
+            log_info(f"2. 실제 학습 데이터: {len(final_df):,} 행")
+    else:
+        log_info(f"2. 실제 학습 데이터: {len(final_df):,} 행")
+    
+    log_memory_usage("데이터 필터링 완료")
+    check_memory_and_cleanup()
+
+    # 필요한 컬럼이 모두 있는지 확인
     for col in features + [target]:
         if col not in final_df.columns:
             log_error(f"오류: 필요한 컬럼 '{col}'이 데이터프레임에 없습니다.")
@@ -227,76 +328,191 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
 
     log_info("\n학습 데이터 타겟 분포:\n" + str(y_train.value_counts(normalize=True)))
 
-    param_dist = {
-        'n_estimators': randint(100, 500),
-        'max_depth': max_depth_list,
-        'min_samples_split': randint(2, 20),
-        'min_samples_leaf': randint(1, 20),
-        'max_samples': [0.7, 0.8, 0.9, None]
-    }
-
-    log_info("🔍 RandomizedSearchCV를 사용하여 최적 파라미터 탐색...")
+    log_info("🔍 Optuna를 사용하여 최적 파라미터 탐색...")
     log_info(f"   ⚙️ 탐색할 파라미터 조합: {n_iter}개")
     log_info(f"   🔄 교차 검증: 3-fold")
     log_info(f"   💻 사용할 CPU 코어: {n_jobs}")
     
-    # 메모리 효율적인 모델 설정
-    model = RandomForestClassifier(
-        random_state=42, 
-        class_weight='balanced', 
-        oob_score=False,  # OOB 점수 비활성화로 메모리 절약
-        n_jobs=1,  # 각 모델은 단일 코어 사용 (메모리 절약)
-        warm_start=False,  # 메모리 절약
-        bootstrap=True  # 기본값 유지
-    )
-    
-    random_search = RandomizedSearchCV(
-        estimator=model, 
-        param_distributions=param_dist,
-        n_iter=n_iter, 
-        cv=3, 
-        n_jobs=n_jobs, 
-        verbose=2, 
-        random_state=42, 
-        scoring='roc_auc',
-        pre_dispatch='2*n_jobs',  # 메모리 효율적 디스패치
-        return_train_score=False  # 훈련 점수 저장 안함 (메모리 절약)
-    )
+    # Optuna objective 함수 정의 (클로저로 데이터 접근)
+    def objective(trial):
+        """Optuna objective 함수: 하이퍼파라미터 튜닝을 위한 목적 함수"""
+        # 하이퍼파라미터 제안
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+            'max_depth': trial.suggest_categorical('max_depth', max_depth_list),
+            'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 20),
+            'max_samples': trial.suggest_categorical('max_samples', [0.7, 0.8, 0.9, None]),
+            'random_state': 42,
+            'class_weight': 'balanced',
+            'oob_score': False,  # OOB 점수 비활성화로 메모리 절약
+            'n_jobs': 1,  # 각 모델은 단일 코어 사용 (메모리 절약)
+            'warm_start': False,  # 메모리 절약
+            'bootstrap': True
+        }
+        
+        # 모델 생성
+        model = RandomForestClassifier(**params)
+        
+        # 교차 검증 수행 (메모리 효율적)
+        try:
+            cv_scores = cross_val_score(
+                model, 
+                X_train_scaled, 
+                y_train, 
+                cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
+                scoring='roc_auc',
+                n_jobs=1  # 단일 코어 사용 (메모리 절약)
+            )
+            mean_score = cv_scores.mean()
+            
+            # 메모리 정리
+            del model
+            gc.collect()
+            
+            return mean_score
+        except Exception as e:
+            # 오류 발생 시 낮은 점수 반환
+            log_warning(f"   ⚠️ Trial {trial.number} 실패: {e}")
+            del model
+            gc.collect()
+            return 0.0
 
     log_memory_usage("하이퍼파라미터 튜닝 시작")
+    
+    # Optuna study 생성
+    study = None
+    best_model = None
+    best_score = 0.0
+    best_params = None
+    
     try:
-        random_search.fit(X_train_scaled, y_train)
+        # TPE 샘플러 사용 (더 효율적인 탐색)
+        sampler = TPESampler(seed=42)
+        study = optuna.create_study(
+            direction='maximize',
+            sampler=sampler,
+            study_name='random_forest_optimization'
+        )
+        
+        # 하이퍼파라미터 최적화 실행
+        # n_jobs 처리: -1이면 None (모든 코어 사용), 0 이하면 1, 그 외는 지정된 값
+        optuna_n_jobs = None if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
+        study.optimize(
+            objective, 
+            n_trials=n_iter,
+            n_jobs=optuna_n_jobs,
+            show_progress_bar=False  # 로그와 충돌 방지
+        )
+        
         log_memory_usage("하이퍼파라미터 튜닝 완료")
+        
+        # 최적 파라미터 추출
+        best_params = study.best_params.copy()
+        best_score = study.best_value
+        
+        # 최적 모델 생성 (전체 훈련 데이터로 학습)
+        log_info("   🔧 최적 파라미터로 최종 모델 학습 중...")
+        best_model = RandomForestClassifier(
+            n_estimators=best_params['n_estimators'],
+            max_depth=best_params['max_depth'],
+            min_samples_split=best_params['min_samples_split'],
+            min_samples_leaf=best_params['min_samples_leaf'],
+            max_samples=best_params['max_samples'],
+            random_state=42,
+            class_weight='balanced',
+            oob_score=False,
+            n_jobs=1,
+            warm_start=False,
+            bootstrap=True
+        )
+        best_model.fit(X_train_scaled, y_train)
+        log_memory_usage("최적 모델 학습 완료")
+        
     except MemoryError as e:
         log_error(f"하이퍼파라미터 튜닝 중 메모리 부족: {e}")
         log_info("   🔄 메모리 정리 후 재시도합니다...")
         safe_memory_cleanup()
-        # 더 작은 파라미터로 재시도
-        param_dist_small = {
-            'n_estimators': randint(50, 200),
-            'max_depth': max_depth_list[:2],  # 처음 2개만 사용
-            'min_samples_split': randint(2, 10),
-            'min_samples_leaf': randint(1, 10),
-            'max_samples': [0.8, 0.9]
-        }
-        random_search = RandomizedSearchCV(
-            estimator=model, 
-            param_distributions=param_dist_small,
-            n_iter=max(5, n_iter//2),  # 반으로 줄임
-            cv=3, 
-            n_jobs=1,  # 단일 코어로 제한
-            verbose=2, 
-            random_state=42, 
-            scoring='roc_auc'
+        
+        # 더 작은 파라미터 범위로 재시도
+        def objective_small(trial):
+            params = {
+                'n_estimators': trial.suggest_int('n_estimators', 50, 200),
+                'max_depth': trial.suggest_categorical('max_depth', max_depth_list[:2]),
+                'min_samples_split': trial.suggest_int('min_samples_split', 2, 10),
+                'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
+                'max_samples': trial.suggest_categorical('max_samples', [0.8, 0.9]),
+                'random_state': 42,
+                'class_weight': 'balanced',
+                'oob_score': False,
+                'n_jobs': 1,
+                'warm_start': False,
+                'bootstrap': True
+            }
+            model = RandomForestClassifier(**params)
+            try:
+                cv_scores = cross_val_score(
+                    model, 
+                    X_train_scaled, 
+                    y_train, 
+                    cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
+                    scoring='roc_auc',
+                    n_jobs=1
+                )
+                mean_score = cv_scores.mean()
+                del model
+                gc.collect()
+                return mean_score
+            except Exception as e:
+                log_warning(f"   ⚠️ Trial {trial.number} 실패: {e}")
+                del model
+                gc.collect()
+                return 0.0
+        
+        sampler = TPESampler(seed=42)
+        study = optuna.create_study(
+            direction='maximize',
+            sampler=sampler,
+            study_name='random_forest_optimization_small'
         )
-        random_search.fit(X_train_scaled, y_train)
+        study.optimize(
+            objective_small, 
+            n_trials=max(5, n_iter//2),
+            n_jobs=1,  # 단일 코어로 제한
+            show_progress_bar=False
+        )
+        
+        best_params = study.best_params.copy()
+        best_score = study.best_value
+        
+        best_model = RandomForestClassifier(
+            n_estimators=best_params['n_estimators'],
+            max_depth=best_params['max_depth'],
+            min_samples_split=best_params['min_samples_split'],
+            min_samples_leaf=best_params['min_samples_leaf'],
+            max_samples=best_params['max_samples'],
+            random_state=42,
+            class_weight='balanced',
+            oob_score=False,
+            n_jobs=1,
+            warm_start=False,
+            bootstrap=True
+        )
+        best_model.fit(X_train_scaled, y_train)
         log_memory_usage("재시도 후 하이퍼파라미터 튜닝 완료")
-
+    
+    except Exception as e:
+        log_error(f"하이퍼파라미터 튜닝 중 오류 발생: {e}")
+        raise
+    
+    # 최적 모델이 생성되었는지 확인
+    if best_model is None or best_params is None:
+        log_error("최적 모델 생성에 실패했습니다.")
+        raise RuntimeError("최적 모델을 생성할 수 없습니다.")
+    
     log_info("\n--- 최적 파라미터 탐색 결과 ---")
-    log_info(f"최고 점수 (ROC-AUC): {random_search.best_score_:.4f}")
-    log_info("최적 파라미터: " + str(random_search.best_params_))
-
-    best_model = random_search.best_estimator_
+    log_info(f"최고 점수 (ROC-AUC): {best_score:.4f}")
+    log_info("최적 파라미터: " + str(best_params))
     
     # OOB 점수는 비활성화되어 있으므로 로그 제거
 
@@ -331,13 +547,14 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
         'cv_folds': 3,
         'test_size': 0.3,
         'scoring': 'roc_auc',
-        'search_method': 'RandomizedSearchCV'
+        'search_method': 'Optuna'
     }
     
     optimization_results = {
-        'best_score': random_search.best_score_,
-        'best_params': random_search.best_params_,
-        'total_combinations_tested': n_iter
+        'best_score': best_score,
+        'best_params': best_params,
+        'total_combinations_tested': len(study.trials) if study else n_iter,
+        'n_trials_completed': len(study.trials) if study else n_iter
     }
     
     parameter_explanations = {
@@ -380,8 +597,9 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
 def main():
     parser = argparse.ArgumentParser(description="RandomForest 모델 학습 및 하이퍼파라미터 튜닝")
     parser.add_argument('--n_jobs', type=int, default=-1, help='사용할 CPU 코어 수 (-1은 모든 코어 사용)')
-    parser.add_argument('--n_iter', type=int, default=10, help='RandomizedSearchCV 반복 횟수')
+    parser.add_argument('--n_iter', type=int, default=10, help='Optuna 최적화 시도 횟수 (trials)')
     parser.add_argument('--max_depth', type=int, nargs='+', default=[10, 20, 30], help='max_depth 후보 리스트')
+    parser.add_argument('--years', type=int, default=None, help='학습에 사용할 최근 N년치 데이터 (None이면 전체 데이터, 파일이 없을 때만 적용)')
     args = parser.parse_args()
     
     # ==============================================================================
@@ -398,7 +616,7 @@ def main():
         log_memory_usage("프로그램 시작")
 
         # 3. 메인 학습 로직 실행
-        X, y, features, imputation_values = create_training_data()
+        X, y, features, imputation_values = create_training_data(years=args.years)
         if X is not None:
             log_info("🎯 모델 학습을 시작합니다...")
             train_evaluate_and_save_model(X, y, features, imputation_values, args.n_jobs, args.n_iter, args.max_depth)

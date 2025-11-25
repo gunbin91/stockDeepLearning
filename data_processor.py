@@ -37,7 +37,7 @@ if platform.system() == 'Windows':
         # 로케일 설정 실패 시 기본값 유지
         pass
 
-from scoring import calculate_factor_scores
+from scoring import calculate_factor_scores as calculate_factor_scores_func
 from path_manager import path_manager
 from logger import log_info, log_critical, log_error, log_warning, log_progress
 
@@ -575,8 +575,15 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
 
 
 
-def _fetch_and_prepare_data(start_date, end_date):
-    """실시간 데이터 수집 및 전처리"""
+def _fetch_and_prepare_data(start_date, end_date, calculate_factor_scores=True):
+    """
+    실시간 데이터 수집 및 전처리
+    
+    Args:
+        start_date: 시작 날짜
+        end_date: 종료 날짜
+        calculate_factor_scores: 팩터 점수 계산 여부 (기본값: True)
+    """
     log_info(f"실시간 데이터 수집 시작 ({start_date} ~ {end_date})...")
     
     stock_list = fetch_stock_list()
@@ -750,8 +757,13 @@ def _fetch_and_prepare_data(start_date, end_date):
     
     raw_feature_df.sort_values(by=['date', '종목코드'], inplace=True)
 
-    log_info("일별 팩터 점수 계산 중...")
-    final_df = raw_feature_df.groupby('date', group_keys=False).apply(calculate_factor_scores).reset_index(drop=True)
+    # 팩터 점수 계산 (옵션)
+    if calculate_factor_scores:
+        log_info("일별 팩터 점수 계산 중...")
+        final_df = raw_feature_df.groupby('date', group_keys=False).apply(calculate_factor_scores_func).reset_index(drop=True)
+    else:
+        log_info("팩터 점수 계산을 건너뜁니다 (학습 데이터 수집 모드)")
+        final_df = raw_feature_df.copy()
     
     # 최종 데이터 검증
     if final_df.empty:
@@ -777,16 +789,25 @@ def _fetch_and_prepare_data(start_date, end_date):
     
     return final_df
 
-def get_preprocessed_data(start_date, end_date):
-    """실시간 데이터 전처리 함수"""
+def get_preprocessed_data(start_date, end_date, calculate_factor_scores=True):
+    """
+    실시간 데이터 전처리 함수
+    
+    Args:
+        start_date: 시작 날짜
+        end_date: 종료 날짜
+        calculate_factor_scores: 팩터 점수 계산 여부 (기본값: True)
+                                학습 데이터 수집 시에는 False로 설정하여 불필요한 연산 방지
+    """
     try:
         log_info("🔄 실시간 데이터 수집 시작", context={
             "start_date": start_date,
             "end_date": end_date,
-            "mode": "realtime"
+            "mode": "realtime",
+            "calculate_factor_scores": calculate_factor_scores
         })
         
-        return _fetch_and_prepare_data(start_date, end_date)
+        return _fetch_and_prepare_data(start_date, end_date, calculate_factor_scores=calculate_factor_scores)
         
     except Exception as e:
         log_critical("실시간 데이터 수집 중 오류", exception=e, context={
