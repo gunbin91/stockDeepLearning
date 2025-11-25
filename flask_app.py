@@ -523,12 +523,18 @@ def model_analysis():
             best_params = model_data.get('best_params', {})
             parameter_explanations = model_data.get('parameter_explanations', {})
             feature_importances = model_data.get('feature_importances', None)  # SHAP 값으로 계산된 피처 중요도
+            permutation_importances = model_data.get('permutation_importances', None)  # 순열 중요도
             
             # 디버깅: 피처 중요도 로드 확인
             if feature_importances is None:
-                log_warning("⚠️ 메타데이터 파일에 피처 중요도가 없습니다. SHAP 계산이 실패했거나 이전 모델일 수 있습니다.")
+                log_warning("⚠️ 메타데이터 파일에 SHAP 피처 중요도가 없습니다. SHAP 계산이 실패했거나 이전 모델일 수 있습니다.")
             else:
-                log_info(f"✅ 피처 중요도 로드 완료: {len(feature_importances)}개 피처")
+                log_info(f"✅ SHAP 피처 중요도 로드 완료: {len(feature_importances)}개 피처")
+            
+            if permutation_importances is None:
+                log_warning("⚠️ 메타데이터 파일에 순열 중요도가 없습니다. 순열 중요도 계산이 실패했거나 이전 모델일 수 있습니다.")
+            else:
+                log_info(f"✅ 순열 중요도 로드 완료: {len(permutation_importances)}개 피처")
             
             # 모델 개수는 training_config에서 가져오거나, 없으면 기본값 사용
             # (model_data['models']에 접근하지 않음 - 메모리 최적화)
@@ -614,6 +620,7 @@ def model_analysis():
                 'oob_score': None,  # cuML은 OOB 지원 안 함
                 'features': features,
                 'feature_importances': feature_importances,  # SHAP 값으로 계산된 피처 중요도 (있을 경우)
+                'permutation_importances': permutation_importances,  # 순열 중요도 (있을 경우)
                 'params': model_params,  # best_params 사용 (모델 객체 접근 없음)
                 'training_config': training_config,
                 'optimization_results': optimization_results,
@@ -631,6 +638,7 @@ def model_analysis():
             optimization_results = model_data.get('optimization_results', {})
             parameter_explanations = model_data.get('parameter_explanations', {})
             feature_importances = model_data.get('feature_importances', None)  # 메타데이터에 저장된 피처 중요도
+            permutation_importances = model_data.get('permutation_importances', None)  # 순열 중요도
             
             # best_params는 optimization_results에서 가져오거나 직접 가져오기
             best_params = model_data.get('best_params', {})
@@ -656,6 +664,7 @@ def model_analysis():
                 'oob_score': None,
                 'features': features,
                 'feature_importances': feature_importances,  # 메타데이터에 저장된 피처 중요도 (있을 경우)
+                'permutation_importances': permutation_importances,  # 순열 중요도 (있을 경우)
                 'params': best_params,
                 'training_config': training_config,
                 'optimization_results': optimization_results,
@@ -719,6 +728,7 @@ def model_analysis():
                 feature_importances = None
             
             # 모델 정보 (메모리 최적화: 필요한 정보만 저장)
+            # 순열 중요도는 모델 파일에서 직접 로드할 수 없으므로 None (메타데이터 파일에만 저장됨)
             model_info = {
                 'model_type': type(model).__name__,
                 'model_path': model_path,
@@ -726,6 +736,7 @@ def model_analysis():
                 'oob_score': getattr(model, 'oob_score_', None),
                 'features': features,
                 'feature_importances': feature_importances,
+                'permutation_importances': None,  # 모델 파일 직접 로드 시에는 순열 중요도 없음 (메타데이터 파일에만 저장)
                 'params': model.get_params() if hasattr(model, 'get_params') else {},
                 'training_config': training_config,
                 'optimization_results': optimization_results,

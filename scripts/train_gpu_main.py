@@ -32,6 +32,7 @@ from cuml.ensemble import RandomForestClassifier as cuRF
 from cuml.preprocessing import StandardScaler as cuStandardScaler
 from cuml.metrics import roc_auc_score
 from sklearn.model_selection import KFold
+from sklearn.inspection import permutation_importance
 import psutil
 from numba import cuda
 
@@ -891,15 +892,20 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
         
         # 6. SHAP를 사용한 피처 중요도 계산
         feature_importances = None
+        permutation_importances = None
+        X_sample_cudf = None
+        y_sample = None
+        
         if SHAP_AVAILABLE:
             log_info("   [SHAP] 피처 중요도 계산 중...")
             shap_start = datetime.now()
-            X_sample_cudf = None
             try:
                 # 샘플링된 데이터의 일부를 사용
                 sample_size = min(1000, max(100, len(X_all_scaled) // 10))
                 sample_indices = cp.random.choice(len(X_all_scaled), sample_size, replace=False)
-                X_sample_cudf = X_all_scaled.iloc[sample_indices.get()]
+                sample_indices_np = sample_indices.get()
+                X_sample_cudf = X_all_scaled.iloc[sample_indices_np]
+                y_sample = y_all.iloc[sample_indices_np]
                 
                 # SHAP는 numpy 배열을 선호
                 X_sample_np = X_sample_cudf.to_numpy()
@@ -923,12 +929,112 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
                 
             except Exception as e:
                 log_warning(f"   [WARN] SHAP 피처 중요도 계산 실패: {e}")
-            finally:
-                if X_sample_cudf is not None:
-                    del X_sample_cudf
-                safe_gpu_memory_cleanup(); gc.collect()
         else:
             log_warning("   [WARN] SHAP 라이브러리가 없어 피처 중요도를 계산할 수 없습니다.")
+        
+        # 6-1. 순열 중요도 계산 (SHAP 계산 후, 같은 샘플 데이터 사용)
+        if X_sample_cudf is not None and y_sample is not None:
+            log_info("   [PERM] 순열 중요도 계산 중...")
+            perm_start = datetime.now()
+            try:
+                # cuML 모델은 sklearn API와 호환되지만, permutation_importance는 numpy 배열을 기대함
+                # 샘플 데이터를 numpy 배열로 명시적 변환 (cuDF의 암묵적 변환 방지)
+                X_sample_np = X_sample_cudf.to_pandas().values
+                y_sample_np = np.array(y_sample.to_pandas()) if hasattr(y_sample, 'to_pandas') else np.array(y_sample.values)
+                
+                # cuML 모델의 classes_ 속성이 cuDF Series일 수 있으므로, 모델 래퍼 생성
+                # permutation_importance가 classes_에 접근할 때 numpy 배열로 변환되도록 함
+                class CuMLModelWrapper:
+                    """cuML 모델을 sklearn 호환 래퍼로 감싸서 classes_ 속성 문제 해결"""
+                    # sklearn이 classifier로 인식하도록 설정
+                    _estimator_type = 'classifier'
+                    
+                    def __init__(self, cuml_model):
+                        self.cuml_model = cuml_model
+                        # classes_를 numpy 배열로 변환하여 저장
+                        if hasattr(cuml_model, 'classes_'):
+                            if hasattr(cuml_model.classes_, 'to_numpy'):
+                                self.classes_ = cuml_model.classes_.to_numpy()
+                            elif hasattr(cuml_model.classes_, 'to_pandas'):
+                                self.classes_ = cuml_model.classes_.to_pandas().values
+                            else:
+                                self.classes_ = np.array(cuml_model.classes_)
+                        else:
+                            # classes_가 없으면 y에서 추론
+                            self.classes_ = np.array([0, 1])
+                    
+                    def fit(self, X, y):
+                        """sklearn 검증을 통과하기 위한 fit 메서드 (실제로는 호출되지 않음)"""
+                        # permutation_importance는 이미 학습된 모델을 사용하므로 fit은 필요 없음
+                        # 하지만 sklearn 검증을 통과하기 위해 필요
+                        return self
+                    
+                    def predict_proba(self, X):
+                        # X가 numpy 배열이면 cuDF DataFrame으로 변환
+                        if isinstance(X, np.ndarray):
+                            X_cudf = cudf.DataFrame(X, columns=features)
+                            probas = self.cuml_model.predict_proba(X_cudf)
+                            # numpy 배열로 반환
+                            return probas.to_pandas().values
+                        else:
+                            # 이미 cuDF나 pandas인 경우
+                            if isinstance(X, pd.DataFrame):
+                                X_cudf = cudf.DataFrame(X)
+                            else:
+                                X_cudf = X
+                            probas = self.cuml_model.predict_proba(X_cudf)
+                            return probas.to_pandas().values
+                    
+                    def predict(self, X):
+                        # X가 numpy 배열이면 cuDF DataFrame으로 변환
+                        if isinstance(X, np.ndarray):
+                            X_cudf = cudf.DataFrame(X, columns=features)
+                            preds = self.cuml_model.predict(X_cudf)
+                            # numpy 배열로 반환
+                            return preds.to_pandas().values if hasattr(preds, 'to_pandas') else np.array(preds)
+                        else:
+                            # 이미 cuDF나 pandas인 경우
+                            if isinstance(X, pd.DataFrame):
+                                X_cudf = cudf.DataFrame(X)
+                            else:
+                                X_cudf = X
+                            preds = self.cuml_model.predict(X_cudf)
+                            return preds.to_pandas().values if hasattr(preds, 'to_pandas') else np.array(preds)
+                
+                # 모델 래퍼 생성
+                wrapped_model = CuMLModelWrapper(final_model)
+                
+                # 순열 중요도 계산 (numpy 배열 사용)
+                # _estimator_type='classifier'로 설정했으므로 자동으로 predict_proba 사용
+                perm_result = permutation_importance(
+                    wrapped_model,
+                    X_sample_np,
+                    y_sample_np,
+                    n_repeats=10,
+                    random_state=42,
+                    scoring='roc_auc',
+                    n_jobs=1  # cuML 모델은 멀티프로세싱 지원 안 함
+                )
+                
+                # 평균 중요도 추출 및 정렬
+                mean_perm_importance = perm_result.importances_mean
+                permutation_importances = sorted(zip(features, mean_perm_importance), key=lambda x: x[1], reverse=True)
+                
+                log_info(f"   [OK] 순열 중요도 계산 완료 ({(datetime.now() - perm_start).total_seconds():.1f}초)")
+                del X_sample_np, y_sample_np, wrapped_model, perm_result, mean_perm_importance
+                
+            except Exception as e:
+                log_warning(f"   [WARN] 순열 중요도 계산 실패: {e}")
+                import traceback
+                log_warning(f"   [WARN] 순열 중요도 계산 실패 상세: {traceback.format_exc()}")
+            finally:
+                # 샘플 데이터 정리
+                if X_sample_cudf is not None:
+                    del X_sample_cudf
+                if y_sample is not None:
+                    del y_sample
+                safe_gpu_memory_cleanup()
+                gc.collect()
 
         # 7. 최종 모델 저장
         if final_model:
@@ -949,7 +1055,8 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
                 'model_type': 'single_model',
                 'optimization_results': optimization_results or {},
                 'training_config': final_training_config,
-                'feature_importances': feature_importances
+                'feature_importances': feature_importances,  # SHAP 값
+                'permutation_importances': permutation_importances  # 순열 중요도
             }, model_path, compress=3)
             log_info(f"   [OK] 최종 모델 저장 완료: {model_path}")
             
@@ -971,7 +1078,8 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
                     'model_type': 'single_model',
                     'optimization_results': optimization_results or {},
                     'training_config': final_training_config,
-                    'feature_importances': feature_importances,
+                    'feature_importances': feature_importances,  # SHAP 값
+                    'permutation_importances': permutation_importances,  # 순열 중요도
                     'parameter_explanations': parameter_explanations
                 }
                 

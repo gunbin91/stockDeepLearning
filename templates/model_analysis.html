@@ -299,66 +299,177 @@
 <div class="card mb-4">
   <div class="card-header">
     <h5 class="mb-0">
-      <i class="fas fa-chart-bar text-warning me-2"></i>피처 중요도 (SHAP Values)
+      <i class="fas fa-chart-bar text-warning me-2"></i>피처 중요도
     </h5>
   </div>
   <div class="card-body">
-    <div class="alert alert-info" role="alert">
-      <i class="fas fa-info-circle me-2"></i>SHAP 값으로 계산된 피처 중요도입니다. 각 피처가 모델 예측에 기여한 평균 기여도를 보여줍니다. 값이 클수록 해당 피처가 주가 상승 예측에 더 중요한 역할을 합니다.
-    </div>
-
-    <!-- 차트 -->
-    <div class="mb-4">
-      <canvas id="feature_importance_chart" width="400" height="200"></canvas>
-    </div>
-
-    <!-- 상세 데이터 -->
-    <div class="accordion" id="featureAccordion">
-      <div class="accordion-item">
-        <h2 class="accordion-header">
-          <button
-            class="accordion-button collapsed"
-            type="button"
-            data-bs-toggle="collapse"
-            data-bs-target="#featureDetails"
-          >
-            <i class="fas fa-table me-2"></i>피처 중요도 상세 데이터 보기
-          </button>
-        </h2>
-        <div
-          id="featureDetails"
-          class="accordion-collapse collapse"
-          data-bs-parent="#featureAccordion"
+    <!-- 탭 네비게이션 -->
+    <ul class="nav nav-tabs mb-4" id="featureImportanceTabs" role="tablist">
+      <li class="nav-item" role="presentation">
+        <button
+          class="nav-link active"
+          id="shap-tab"
+          data-bs-toggle="tab"
+          data-bs-target="#shap-pane"
+          type="button"
+          role="tab"
+          aria-controls="shap-pane"
+          aria-selected="true"
         >
-          <div class="accordion-body">
-            <div class="table-responsive">
-              <table class="table table-striped" id="feature_table">
-                <thead class="table-dark">
-                  <tr>
-                    <th>피처 (Feature)</th>
-                    <th>중요도 (Importance)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {% if model_info.feature_importances %}
-                    {% for feature, importance in model_info.feature_importances %}
-                    <tr>
-                      <td>{{ feature }}</td>
-                      <td>{{ "{:.6f}".format(importance) }}</td>
-                    </tr>
-                    {% endfor %}
-                  {% else %}
-                    <tr>
-                      <td class="text-center text-muted">피처 중요도 정보를 사용할 수 없습니다.</td>
-                      <td class="text-center text-muted">-</td>
-                    </tr>
-                  {% endif %}
-                </tbody>
-              </table>
+          <i class="fas fa-chart-line me-2"></i>SHAP 중요도
+        </button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button
+          class="nav-link"
+          id="permutation-tab"
+          data-bs-toggle="tab"
+          data-bs-target="#permutation-pane"
+          type="button"
+          role="tab"
+          aria-controls="permutation-pane"
+          aria-selected="false"
+        >
+          <i class="fas fa-exchange-alt me-2"></i>순열 중요도
+        </button>
+      </li>
+    </ul>
+
+    <!-- 탭 콘텐츠 -->
+    <div class="tab-content" id="featureImportanceTabContent">
+      <!-- SHAP 탭 -->
+      <div
+        class="tab-pane fade show active"
+        id="shap-pane"
+        role="tabpanel"
+        aria-labelledby="shap-tab"
+      >
+        <div class="alert alert-info" role="alert">
+          <i class="fas fa-info-circle me-2"></i>SHAP 값으로 계산된 피처 중요도입니다. 각 피처가 모델 예측에 기여한 평균 기여도를 보여줍니다. 값이 클수록 해당 피처가 주가 상승 예측에 더 중요한 역할을 합니다.
+        </div>
+
+        <!-- 차트 -->
+        <div class="mb-4">
+          <canvas id="shap_importance_chart" width="400" height="200"></canvas>
+        </div>
+
+        <!-- 상세 데이터 -->
+        <div class="accordion" id="shapAccordion">
+          <div class="accordion-item">
+            <h2 class="accordion-header">
+              <button
+                class="accordion-button collapsed"
+                type="button"
+                data-bs-toggle="collapse"
+                data-bs-target="#shapDetails"
+              >
+                <i class="fas fa-table me-2"></i>SHAP 중요도 상세 데이터 보기
+              </button>
+            </h2>
+            <div
+              id="shapDetails"
+              class="accordion-collapse collapse"
+              data-bs-parent="#shapAccordion"
+            >
+              <div class="accordion-body">
+                <div class="table-responsive">
+                  <table class="table table-striped" id="shap_table">
+                    <thead class="table-dark">
+                      <tr>
+                        <th>피처 (Feature)</th>
+                        <th>중요도 (Importance)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% if model_info.feature_importances %}
+                        {% for feature, importance in model_info.feature_importances %}
+                        <tr>
+                          <td>{{ feature }}</td>
+                          <td>{{ "{:.6f}".format(importance) }}</td>
+                        </tr>
+                        {% endfor %}
+                      {% else %}
+                        <tr>
+                          <td class="text-center text-muted" colspan="2">SHAP 피처 중요도 정보를 사용할 수 없습니다.</td>
+                        </tr>
+                      {% endif %}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           </div>
         </div>
       </div>
+
+      <!-- 순열 중요도 탭 -->
+      <div
+        class="tab-pane fade"
+        id="permutation-pane"
+        role="tabpanel"
+        aria-labelledby="permutation-tab"
+      >
+        <div class="alert alert-info" role="alert">
+          <i class="fas fa-info-circle me-2"></i>순열 중요도(Permutation Importance)로 계산된 피처 중요도입니다. 각 피처의 값을 랜덤하게 섞었을 때 모델 성능이 얼마나 감소하는지 측정합니다. 값이 클수록 해당 피처가 모델 예측에 더 중요한 역할을 합니다.
+        </div>
+
+        <!-- 차트 -->
+        <div class="mb-4">
+          <canvas id="permutation_importance_chart" width="400" height="200"></canvas>
+        </div>
+
+        <!-- 상세 데이터 -->
+        <div class="accordion" id="permutationAccordion">
+          <div class="accordion-item">
+            <h2 class="accordion-header">
+              <button
+                class="accordion-button collapsed"
+                type="button"
+                data-bs-toggle="collapse"
+                data-bs-target="#permutationDetails"
+              >
+                <i class="fas fa-table me-2"></i>순열 중요도 상세 데이터 보기
+              </button>
+            </h2>
+            <div
+              id="permutationDetails"
+              class="accordion-collapse collapse"
+              data-bs-parent="#permutationAccordion"
+            >
+              <div class="accordion-body">
+                <div class="table-responsive">
+                  <table class="table table-striped" id="permutation_table">
+                    <thead class="table-dark">
+                      <tr>
+                        <th>피처 (Feature)</th>
+                        <th>중요도 (Importance)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% if model_info.permutation_importances %}
+                        {% for feature, importance in model_info.permutation_importances %}
+                        <tr>
+                          <td>{{ feature }}</td>
+                          <td>{{ "{:.6f}".format(importance) }}</td>
+                        </tr>
+                        {% endfor %}
+                      {% else %}
+                        <tr>
+                          <td class="text-center text-muted" colspan="2">순열 중요도 정보를 사용할 수 없습니다.</td>
+                        </tr>
+                      {% endif %}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 학습 파라미터 (공통) -->
+    <div class="accordion mt-4" id="featureAccordion">
 
       <div class="accordion-item">
         <h2 class="accordion-header">
@@ -452,63 +563,104 @@
       const topImportances = [];
       {% endif %}
 
-      // 차트 생성 (데이터가 있을 때만)
-      if (topFeatures.length > 0) {
-          const ctx = document.getElementById('feature_importance_chart').getContext('2d');
-          new Chart(ctx, {
+      // 차트 생성 함수
+      function createChart(canvasId, data, title) {
+          const canvas = document.getElementById(canvasId);
+          if (!canvas) return null;
+          
+          const ctx = canvas.getContext('2d');
+          if (data.length === 0) {
+              canvas.parentElement.innerHTML = '<div class="text-center text-muted p-4">데이터를 사용할 수 없습니다.</div>';
+              return null;
+          }
+
+          // 상위 20개 피처만 표시
+          const topFeatures = data.slice(0, 20).map(item => item[0]);
+          const topImportances = data.slice(0, 20).map(item => item[1]);
+
+          return new Chart(ctx, {
               type: 'bar',
               data: {
                   labels: topFeatures,
                   datasets: [{
-                  label: '중요도',
-                  data: topImportances,
-                  backgroundColor: 'rgba(54, 162, 235, 0.6)',
-                  borderColor: 'rgba(54, 162, 235, 1)',
-                  borderWidth: 1
-              }]
-          },
-          options: {
-              responsive: true,
-              plugins: {
-                  title: {
-                      display: true,
-                      text: '피처 중요도 (상위 20개)'
-                  },
-                  legend: {
-                      display: false
-                  }
+                      label: '중요도',
+                      data: topImportances,
+                      backgroundColor: 'rgba(54, 162, 235, 0.6)',
+                      borderColor: 'rgba(54, 162, 235, 1)',
+                      borderWidth: 1
+                  }]
               },
-              scales: {
-                  y: {
-                      beginAtZero: true,
+              options: {
+                  responsive: true,
+                  maintainAspectRatio: true,
+                  plugins: {
                       title: {
                           display: true,
-                          text: '중요도'
+                          text: title
+                      },
+                      legend: {
+                          display: false
                       }
                   },
-                  x: {
-                      title: {
-                          display: true,
-                          text: '피처'
+                  scales: {
+                      y: {
+                          beginAtZero: true,
+                          title: {
+                              display: true,
+                              text: '중요도'
+                          }
                       },
-                      ticks: {
-                          maxRotation: 45,
-                          minRotation: 45
+                      x: {
+                          title: {
+                              display: true,
+                              text: '피처'
+                          },
+                          ticks: {
+                              maxRotation: 45,
+                              minRotation: 45
+                          }
                       }
                   }
               }
-          }
           });
-      } else {
-          // 데이터가 없을 때 메시지 표시
-          document.getElementById('feature_importance_chart').innerHTML =
-              '<div class="text-center text-muted">모델 정보를 불러올 수 없습니다.</div>';
       }
 
-      // 피처 중요도 테이블 초기화 (재초기화 방지, 데이터가 있을 때만)
+      // 순열 중요도 데이터 준비
+      {% if model_info and model_info.permutation_importances %}
+      const permutationImportances = {{ model_info.permutation_importances | tojson }};
+      {% else %}
+      const permutationImportances = [];
+      {% endif %}
+
+      // SHAP 차트 생성
+      let shapChart = null;
+      if (topFeatures.length > 0) {
+          shapChart = createChart('shap_importance_chart', featureImportances, 'SHAP 중요도 (상위 20개)');
+      }
+
+      // 순열 중요도 차트 생성
+      let permutationChart = null;
+      if (permutationImportances.length > 0) {
+          permutationChart = createChart('permutation_importance_chart', permutationImportances, '순열 중요도 (상위 20개)');
+      }
+
+      // 탭 전환 시 차트 리사이즈
+      const tabButtons = document.querySelectorAll('#featureImportanceTabs button[data-bs-toggle="tab"]');
+      tabButtons.forEach(button => {
+          button.addEventListener('shown.bs.tab', function(event) {
+              const targetId = event.target.getAttribute('data-bs-target');
+              if (targetId === '#shap-pane' && shapChart) {
+                  shapChart.resize();
+              } else if (targetId === '#permutation-pane' && permutationChart) {
+                  permutationChart.resize();
+              }
+          });
+      });
+
+      // 테이블 초기화
       {% if model_info and model_info.feature_importances %}
-      if (!$.fn.DataTable.isDataTable('#feature_table')) {
-          $('#feature_table').DataTable({
+      if (!$.fn.DataTable.isDataTable('#shap_table')) {
+          $('#shap_table').DataTable({
               pageLength: 25,
               order: [[1, 'desc']],
               language: {
@@ -524,7 +676,34 @@
                       "next": "다음",
                       "previous": "이전"
                   }
-              }
+              },
+              scrollX: true,
+              responsive: true
+          });
+      }
+      {% endif %}
+
+      {% if model_info and model_info.permutation_importances %}
+      if (!$.fn.DataTable.isDataTable('#permutation_table')) {
+          $('#permutation_table').DataTable({
+              pageLength: 25,
+              order: [[1, 'desc']],
+              language: {
+                  "lengthMenu": "페이지당 _MENU_ 개씩 보기",
+                  "zeroRecords": "데이터가 없습니다",
+                  "info": "_START_ - _END_ / _TOTAL_ 개",
+                  "infoEmpty": "0 개",
+                  "infoFiltered": "(전체 _MAX_ 개 중 필터링됨)",
+                  "search": "검색:",
+                  "paginate": {
+                      "first": "처음",
+                      "last": "마지막",
+                      "next": "다음",
+                      "previous": "이전"
+                  }
+              },
+              scrollX: true,
+              responsive: true
           });
       }
       {% endif %}
