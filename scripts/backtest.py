@@ -21,8 +21,6 @@ import argparse
 from tqdm import tqdm
 import joblib
 import FinanceDataReader as fdr
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import io
 import traceback
@@ -69,7 +67,7 @@ WEIGHTS_FILE = str(path_manager.get_weights_path())
 CUML_MODEL_FILE = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
 # 기존 모델 경로 (fallback)
 MODEL_FILE = str(path_manager.get_model_path())
-REPORT_FILE = str(path_manager.get_backtest_report_path())
+JSON_REPORT_FILE = str(path_manager.data_dir / 'backtest_report.json')
 TOP_N_STOCKS = 5
 
 def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, buy_universe_rank, transaction_fee_rate):
@@ -139,169 +137,178 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         if i % 50 == 0 or i == total_dates - 1:  # 50개마다 또는 마지막에 로그
             log_progress("상세 백테스팅", i + 1, total_dates)
         try:
+            # 디버깅: 매일 시작 시 현금 및 포트폴리오 상태 로깅 (샘플링)
+            if i % 100 == 0 or i == 0 or i == total_dates - 1:
+                portfolio_value_before = sum(info['buy_price'] * info['shares'] for info in portfolio.values())
+                log_info(f"백테스팅 진행 상황", context={
+                    "date": date.strftime('%Y-%m-%d'),
+                    "cash": f"{cash:,.0f}원",
+                    "portfolio_count": len(portfolio),
+                    "portfolio_value_estimate": f"{portfolio_value_before:,.0f}원",
+                    "total_asset_estimate": f"{cash + portfolio_value_before:,.0f}원"
+                })
+        except:
+            pass  # 디버깅 로그 실패는 무시
+        
+        try:
             # 로그: 현재 처리 중인 날짜 (9월 17일 이후만)
             if date >= pd.to_datetime('2025-09-17'):
                 print(f"🔍 백테스팅 처리 중: {date.strftime('%Y-%m-%d')}")
             daily_trades = []
             
-            # 포트폴리오 매도 처리 (에러 처리 강화)
+            # 포트폴리오 매도 처리
             for ticker in list(portfolio.keys()):
-                try:
-                    stock_info = portfolio[ticker]
-                    is_holding_period_expired = (date - stock_info['buy_date']).days >= max_hold_period
+                stock_info = portfolio[ticker]
+                is_holding_period_expired = (date - stock_info['buy_date']).days >= max_hold_period
 
-                    if (date, ticker) in data.index:
-                        current_price = data.loc[(date, ticker), '종가']
+                # 현재 가격 조회 (데이터가 없으면 이전 가격 사용)
+                current_price = None
+                if (date, ticker) in data.index:
+                    current_price = data.loc[(date, ticker), '종가']
+                else:
+                    # 이전 가격 사용 (최대 5일 전까지)
+                    for days_back in range(1, 6):
+                        prev_date = date - timedelta(days=days_back)
+                        if (prev_date, ticker) in data.index:
+                            current_price = data.loc[(prev_date, ticker), '종가']
+                            break
+                    
+                    # 5일 내에 데이터가 없으면 매수가로 대체 (보수적 평가)
+                    if current_price is None:
+                        current_price = stock_info['buy_price']
+                
+                # 매도 조건 확인 (current_price는 이미 위에서 None이 아닌 값으로 설정됨)
+                sell_condition_price = (current_price >= stock_info['buy_price'] * take_profit_multiplier) or \
+                                       (current_price <= stock_info['buy_price'] * stop_loss_multiplier)
+
+                # 매도 실행 (익절/손절 또는 보유 기간 만료)
+                if sell_condition_price or is_holding_period_expired:
+                    buy_amount = stock_info['actual_buy_price'] * stock_info['shares']
+                    
+                    # 매도 시 수수료 및 세금 적용
+                    actual_sell_price = current_price * (1 - (transaction_fee_rate + SECURITIES_TRANSACTION_TAX_RATE) / 100)
+                    sell_value = actual_sell_price * stock_info['shares']
+                    
+                    profit = sell_value - buy_amount
+                    cash += sell_value
+                    
+                    log_entry = {
+                        'type': 'sell', 'trade_date': date, 'sell_date': date, 'ticker': ticker, 
+                        'sell_price': current_price, 'actual_sell_price': actual_sell_price, 
+                        'return': (actual_sell_price / stock_info['actual_buy_price']) - 1,
+                        'buy_date': stock_info['buy_date'], 'buy_price': stock_info['buy_price'], # 수수료 적용 전 가격
+                        'actual_buy_price': stock_info['actual_buy_price'], # 수수료 적용 후 가격
+                        'buy_market_cap': stock_info.get('buy_market_cap'),
+                        'buy_amount': buy_amount,
+                        'profit': profit
+                    }
+                    log_entry.update(stock_info['buy_scores'])
+                    daily_trades.append(log_entry)
+                    
+                    # 포트폴리오에서 제거
+                    del portfolio[ticker]
+
+            # 매수 처리
+            investment_per_stock = cash / top_n if top_n > 0 else 0
+            if date in data.index.get_level_values('date'):
+                daily_data = data.loc[date]
+                daily_data_tradable = daily_data[daily_data['거래량'] > 0]
+                
+                # 로그: 9월 17일 이후 데이터 확인
+                if date >= pd.to_datetime('2025-09-17'):
+                    print(f"🔍 {date.strftime('%Y-%m-%d')} 데이터: 전체 {len(daily_data)}개, 거래가능 {len(daily_data_tradable)}개")
+                
+                # 1. 전체 거래 가능 종목 중에서 '최종 점수' 기준으로 상위 buy_universe_rank에 드는 종목들만 매수 고려 대상이 됩니다.
+                overall_top_universe = daily_data_tradable.nlargest(buy_universe_rank, 'final_score')
+                
+                # 2. 이렇게 1차로 걸러진 종목들 중에서 현재 보유하고 있는 종목들을 제외합니다.
+                # 3. 남은 종목들 중에서 '최종 점수'가 높은 순서대로 top_n (매수 종목 수)개만큼 매수합니다.
+                #    만약 남은 종목 수가 top_n보다 적다면, 그만큼만 매수하고 나머지는 현금으로 보유합니다.
+                buy_candidates = overall_top_universe[~overall_top_universe.index.get_level_values('종목코드').isin(portfolio.keys())].nlargest(top_n, 'final_score')
+
+                for ticker, row in buy_candidates.iterrows():
+                    if cash >= investment_per_stock and investment_per_stock > 0:
+                        buy_price = row['종가']
                         
-                        sell_condition_price = (current_price >= stock_info['buy_price'] * take_profit_multiplier) or \
-                                               (current_price <= stock_info['buy_price'] * stop_loss_multiplier)
-
-                        if sell_condition_price or is_holding_period_expired:
-                            buy_amount = stock_info['actual_buy_price'] * stock_info['shares']
+                        # 매수 시 수수료 적용
+                        actual_buy_price = buy_price * (1 + transaction_fee_rate / 100)
+                        shares = investment_per_stock // actual_buy_price
+                        
+                        if shares > 0:
+                            buy_amount_with_fee = actual_buy_price * shares
+                            cash -= buy_amount_with_fee
                             
-                            # 매도 시 수수료 및 세금 적용
-                            actual_sell_price = current_price * (1 - (transaction_fee_rate + SECURITIES_TRANSACTION_TAX_RATE) / 100)
-                            sell_value = actual_sell_price * stock_info['shares']
-                            
-                            profit = sell_value - buy_amount
-                            cash += sell_value
-                            
-                            log_entry = {
-                                'type': 'sell', 'sell_date': date, 'ticker': ticker, 
-                                'sell_price': current_price, 'actual_sell_price': actual_sell_price, 'return': (actual_sell_price / stock_info['actual_buy_price']) - 1,
-                                'buy_date': stock_info['buy_date'], 'buy_price': stock_info['buy_price'], # 수수료 적용 전 가격
-                                'actual_buy_price': stock_info['actual_buy_price'], # 수수료 적용 후 가격
-                                'buy_market_cap': stock_info.get('buy_market_cap'),
-                                'buy_amount': buy_amount,
-                                'profit': profit
+                            buy_scores = {col: row.get(col) for col in score_cols_to_log if col in row}
+                            portfolio[ticker] = {
+                                'buy_date': date, 
+                                'buy_price': buy_price, # 수수료 적용 전 가격
+                                'actual_buy_price': actual_buy_price, # 수수료 적용 후 가격
+                                'shares': shares, 
+                                'buy_scores': buy_scores,
+                                'buy_market_cap': row.get('시가총액')
                             }
-                            log_entry.update(stock_info['buy_scores'])
-                            daily_trades.append(log_entry)
                             
-                            del portfolio[ticker]
-                except Exception as e:
-                    log_error(f"포트폴리오 매도 처리 중 에러", exception=e, context={
-                        "date": str(date),
-                        "ticker": ticker,
-                        "portfolio_keys": list(portfolio.keys())
-                    })
-                    # 에러가 발생한 종목은 포트폴리오에서 제거하지 않고 계속 진행
-                    continue
-
-            # 매수 처리 (에러 처리 강화)
-            try:
-                investment_per_stock = cash / top_n if top_n > 0 else 0
-                if date in data.index.get_level_values('date'):
-                    daily_data = data.loc[date]
-                    daily_data_tradable = daily_data[daily_data['거래량'] > 0]
+                            # 매수 이력 추가
+                            buy_amount = actual_buy_price * shares
+                            buy_log_entry = {
+                                'type': 'buy', 'trade_date': date, 'buy_date': date, 'ticker': ticker,
+                                'buy_price': buy_price, 'actual_buy_price': actual_buy_price,
+                                'buy_amount': buy_amount, 'shares': shares,
+                                'buy_market_cap': row.get('시가총액')
+                            }
+                            buy_log_entry.update(buy_scores)
+                            daily_trades.append(buy_log_entry)
+            
+            # 포트폴리오 가치 계산
+            current_portfolio_value = 0
+            for ticker, info in portfolio.items():
+                # 현재 가격 조회 (데이터가 없으면 이전 가격 사용)
+                current_price = None
+                if (date, ticker) in data.index:
+                    current_price = data.loc[(date, ticker), '종가']
+                    # NaN 체크
+                    if pd.isna(current_price):
+                        current_price = None
+                else:
+                    # 이전 가격 사용 (최대 5일 전까지)
+                    for days_back in range(1, 6):
+                        prev_date = date - timedelta(days=days_back)
+                        if (prev_date, ticker) in data.index:
+                            current_price = data.loc[(prev_date, ticker), '종가']
+                            # NaN 체크
+                            if not pd.isna(current_price):
+                            break
+                            else:
+                                current_price = None
                     
-                    # 로그: 9월 17일 이후 데이터 확인
-                    if date >= pd.to_datetime('2025-09-17'):
-                        print(f"🔍 {date.strftime('%Y-%m-%d')} 데이터: 전체 {len(daily_data)}개, 거래가능 {len(daily_data_tradable)}개")
-                    
-                    # 1. 전체 거래 가능 종목 중에서 '최종 점수' 기준으로 상위 buy_universe_rank에 드는 종목들만 매수 고려 대상이 됩니다.
-                    overall_top_universe = daily_data_tradable.nlargest(buy_universe_rank, 'final_score')
-                    
-                    # 2. 이렇게 1차로 걸러진 종목들 중에서 현재 보유하고 있는 종목들을 제외합니다.
-                    # 3. 남은 종목들 중에서 '최종 점수'가 높은 순서대로 top_n (매수 종목 수)개만큼 매수합니다.
-                    #    만약 남은 종목 수가 top_n보다 적다면, 그만큼만 매수하고 나머지는 현금으로 보유합니다.
-                    buy_candidates = overall_top_universe[~overall_top_universe.index.get_level_values('종목코드').isin(portfolio.keys())].nlargest(top_n, 'final_score')
-
-                    for ticker, row in buy_candidates.iterrows():
-                        try:
-                            if cash >= investment_per_stock and investment_per_stock > 0:
-                                buy_price = row['종가']
-                                
-                                # 매수 시 수수료 적용
-                                actual_buy_price = buy_price * (1 + transaction_fee_rate / 100)
-                                shares = investment_per_stock // actual_buy_price
-                                
-                                if shares > 0:
-                                    buy_amount_with_fee = actual_buy_price * shares
-                                    cash -= buy_amount_with_fee
-                                    
-                                    buy_scores = {col: row.get(col) for col in score_cols_to_log if col in row}
-                                    portfolio[ticker] = {
-                                        'buy_date': date, 
-                                        'buy_price': buy_price, # 수수료 적용 전 가격
-                                        'actual_buy_price': actual_buy_price, # 수수료 적용 후 가격
-                                        'shares': shares, 
-                                        'buy_scores': buy_scores,
-                                        'buy_market_cap': row.get('시가총액')
-                                    }
-                        except Exception as e:
-                            log_error(f"개별 종목 매수 처리 중 에러", exception=e, context={
-                                "date": str(date),
-                                "ticker": ticker,
-                                "cash": cash,
-                                "investment_per_stock": investment_per_stock
-                            })
-                            continue
-            except Exception as e:
-                log_error(f"매수 처리 중 에러", exception=e, context={
-                    "date": str(date),
-                    "cash": cash,
-                    "top_n": top_n
-                })
-                # 매수 처리 실패 시 해당 날짜는 건너뛰고 계속 진행
-                        
-            # 포트폴리오 가치 계산 (에러 처리 강화)
-            try:
-                current_portfolio_value = 0
-                for ticker, info in portfolio.items():
-                    try:
-                        if (date, ticker) in data.index:
-                            # 현재 날짜에 데이터가 있으면 현재 가격 사용
-                            current_price = data.loc[(date, ticker), '종가']
-                        else:
-                            # 데이터가 없으면 이전 가격 사용 (최대 5일 전까지)
-                            current_price = None
-                            for days_back in range(1, 6):
-                                prev_date = date - timedelta(days=days_back)
-                                if (prev_date, ticker) in data.index:
-                                    current_price = data.loc[(prev_date, ticker), '종가']
-                                    break
-                            
-                            # 5일 내에 데이터가 없으면 매수가로 대체 (최악의 경우)
-                            if current_price is None:
-                                current_price = info['buy_price']
-                                log_warning(f"종목 가격 데이터 없음", context={
-                                    "ticker": ticker,
-                                    "date": str(date),
-                                    "buy_date": str(info['buy_date']),
-                                    "buy_price": info['buy_price'],
-                                    "holding_days": (date - info['buy_date']).days
-                                })
-                        
-                        current_portfolio_value += current_price * info['shares']
-                    except Exception as e:
-                        log_error(f"개별 종목 가치 계산 중 에러", exception=e, context={
-                            "date": str(date),
-                            "ticker": ticker,
-                            "portfolio_info": info
-                        })
-                        # 에러가 발생한 종목은 매수가로 대체
-                        current_portfolio_value += info['buy_price'] * info['shares']
-                        continue
+                    # 5일 내에 데이터가 없으면 매수가로 대체 (보수적 평가)
+                    if current_price is None or pd.isna(current_price):
+                        current_price = info['buy_price']
                 
-                total_asset = cash + current_portfolio_value
-                portfolio_history.append(total_asset)
-                
-                for entry in daily_trades:
-                    entry['total_asset'] = total_asset
-                    trade_log.append(entry)
-                    
-            except Exception as e:
-                log_error(f"포트폴리오 가치 계산 중 에러", exception=e, context={
-                    "date": str(date),
-                    "cash": cash,
+                # 가격과 주식 수가 유효한 경우에만 계산
+                if current_price is not None and not pd.isna(current_price) and info['shares'] > 0:
+                current_portfolio_value += current_price * info['shares']
+            
+            # 총자산 계산: 현금 + 포트폴리오 가치
+            total_asset = cash + current_portfolio_value
+            
+            # 디버깅: 거래가 발생한 날짜에 상세 로깅
+            if len(daily_trades) > 0:
+                log_info(f"거래 발생일 상세 정보", context={
+                    "date": date.strftime('%Y-%m-%d'),
+                    "cash": f"{cash:,.0f}원",
+                    "portfolio_value": f"{current_portfolio_value:,.0f}원",
+                    "total_asset": f"{total_asset:,.0f}원",
+                    "trade_count": len(daily_trades),
                     "portfolio_count": len(portfolio)
                 })
-                # 포트폴리오 가치 계산 실패 시 이전 가치 유지
-                if portfolio_history:
-                    portfolio_history.append(portfolio_history[-1])
-                else:
-                    portfolio_history.append(initial_capital)
+            
+            portfolio_history.append(total_asset)
+            
+            # 모든 거래 이력에 총자산 추가
+            for entry in daily_trades:
+                entry['total_asset'] = total_asset
+                trade_log.append(entry)
         except Exception as e:
             log_critical(f"백테스팅 일별 처리 중 치명적 에러", exception=e, context={
                 "date": str(date),
@@ -320,6 +327,74 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
     # 로그: 백테스팅 완료 후 최종 상태
     print(f"🔍 백테스팅 완료: 총 거래일 {len(portfolio_ts)}개, 최종 자산 {portfolio_ts.iloc[-1]:,.0f}원")
     print(f"🔍 마지막 거래일: {portfolio_ts.index[-1].strftime('%Y-%m-%d')}")
+    
+    # 정합성 검증
+    log_info("백테스팅 정합성 검증 시작")
+    validation_errors = []
+    
+    # 1. 초기 자본 검증
+    if len(portfolio_ts) > 0:
+        first_asset = portfolio_ts.iloc[0]
+        if abs(first_asset - initial_capital) > 0.01:
+            validation_errors.append(f"초기 자본 불일치: 예상 {initial_capital:,.0f}원, 실제 {first_asset:,.0f}원")
+    
+    # 2. 거래 로그 정합성 검증 (trade_log_df 생성 전에 임시로 생성)
+    trade_log_df_temp = pd.DataFrame(trade_log) if trade_log else pd.DataFrame()
+    if not trade_log_df_temp.empty:
+        # 매수/매도 거래 검증
+        buy_trades = trade_log_df_temp[trade_log_df_temp['type'] == 'buy']
+        sell_trades = trade_log_df_temp[trade_log_df_temp['type'] == 'sell']
+        
+        # 매수 금액 합계 검증
+        if not buy_trades.empty and 'buy_amount' in buy_trades.columns:
+            total_buy_amount = buy_trades['buy_amount'].sum()
+            log_info(f"총 매수 금액: {total_buy_amount:,.0f}원")
+        
+        # 매도 금액 합계 검증
+        if not sell_trades.empty and 'profit' in sell_trades.columns:
+            total_profit = sell_trades['profit'].sum()
+            log_info(f"총 실현 손익: {total_profit:,.0f}원")
+        
+        # 매수/매도 쌍 검증 (매수한 종목이 모두 매도되었는지)
+        buy_tickers = set(buy_trades['ticker'].unique())
+        sell_tickers = set(sell_trades['ticker'].unique())
+        unmatched_buys = buy_tickers - sell_tickers
+        if unmatched_buys:
+            log_warning(f"매도되지 않은 매수 종목 {len(unmatched_buys)}개: {list(unmatched_buys)[:5]}...")
+        
+        # 최종 포트폴리오 상태 검증
+        final_cash_estimate = initial_capital
+        for _, trade in trade_log_df_temp.iterrows():
+            if trade['type'] == 'buy':
+                final_cash_estimate -= trade.get('buy_amount', 0)
+            elif trade['type'] == 'sell':
+                final_cash_estimate += trade.get('buy_amount', 0) + trade.get('profit', 0)
+        
+        log_info(f"거래 로그 기반 추정 현금: {final_cash_estimate:,.0f}원")
+        log_info(f"실제 최종 자산: {portfolio_ts.iloc[-1]:,.0f}원")
+    
+    # 3. 포트폴리오 히스토리 연속성 검증
+    if len(portfolio_ts) > 1:
+        negative_values = portfolio_ts[portfolio_ts < 0]
+        if len(negative_values) > 0:
+            validation_errors.append(f"음수 자산 값 발견: {len(negative_values)}개")
+        
+        # 급격한 변화 검증 (일일 100% 이상 변화는 의심)
+        pct_changes = portfolio_ts.pct_change().fillna(0)
+        extreme_changes = pct_changes[abs(pct_changes) > 1.0]
+        if len(extreme_changes) > 0:
+            log_warning(f"급격한 자산 변화 발견: {len(extreme_changes)}일 (100% 이상 변화)")
+            for date, change in extreme_changes.head(5).items():
+                log_warning(f"  {date.strftime('%Y-%m-%d')}: {change:.2%} 변화")
+    
+    if validation_errors:
+        log_error("정합성 검증 실패", context={"errors": validation_errors})
+        for error in validation_errors:
+            print(f"❌ {error}")
+    else:
+        log_info("정합성 검증 완료: 이상 없음")
+        print("✅ 정합성 검증 완료: 이상 없음")
+    
     daily_returns = portfolio_ts.pct_change().fillna(0)
     total_return = (portfolio_ts.iloc[-1] / portfolio_ts.iloc[0]) - 1 if len(portfolio_ts) > 1 else 0
     annual_return = (1 + total_return) ** (252 / len(portfolio_ts)) - 1 if len(portfolio_ts) > 0 else 0
@@ -329,11 +404,19 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
     mdd = drawdown.min()
     
     trade_log_df = pd.DataFrame(trade_log) if trade_log else pd.DataFrame()
+    
+    # 거래 이력을 날짜순으로 정렬
+    if not trade_log_df.empty and 'trade_date' in trade_log_df.columns:
+        trade_log_df = trade_log_df.sort_values('trade_date').reset_index(drop=True)
+    
     win_rate = 0.0
     if not trade_log_df.empty and len(trade_log_df) > 0:
-        winning_trades = len(trade_log_df[trade_log_df['return'] > 0])
-        total_trades = len(trade_log_df)
-        win_rate = winning_trades / total_trades if total_trades > 0 else 0.0
+        # 매도 거래만으로 승률 계산
+        sell_trades = trade_log_df[trade_log_df['type'] == 'sell']
+        if not sell_trades.empty and 'return' in sell_trades.columns:
+            winning_trades = len(sell_trades[sell_trades['return'] > 0])
+            total_trades = len(sell_trades)
+            win_rate = winning_trades / total_trades if total_trades > 0 else 0.0
         
     final_asset = portfolio_ts.iloc[-1] if not portfolio_ts.empty else initial_capital
         
@@ -342,147 +425,132 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             "initial_capital": initial_capital, "final_asset": final_asset}
 
 
-def create_html_report(results, output_path=REPORT_FILE):
+def create_json_report(results, output_path=None):
+    """JSON 리포트 생성 함수"""
+    if output_path is None:
+        output_path = str(path_manager.data_dir / 'backtest_report.json')
+    
     if results["portfolio_history"].empty:
         print("백테스트 결과가 없어 리포트를 생성할 수 없습니다.")
         return
 
+    # 포트폴리오 히스토리: 실제 총자산 값(원 단위) 저장
+    portfolio_dates = [d.strftime('%Y-%m-%d') for d in results["portfolio_history"].index]
+    portfolio_values = [float(v) for v in results["portfolio_history"].values]
+    
+    # KOSPI 데이터 가져오기 (비교용 누적 수익률)
+    try:
     kospi = fdr.DataReader('KS11', start=results["portfolio_history"].index.min(), end=results["portfolio_history"].index.max())
-    portfolio_cumulative = (1 + results["portfolio_history"].pct_change().fillna(0)).cumprod()
     kospi_cumulative = (1 + kospi['Close'].pct_change().fillna(0)).cumprod()
 
-    sell_log = results['trade_log'].copy()
-    if not sell_log.empty:
+        # KOSPI 초기값 기준으로 정규화 (포트폴리오와 비교 가능하도록)
+        initial_capital = float(results.get('initial_capital', 0))
+        kospi_values = [float(v * initial_capital) for v in kospi_cumulative.values]
+        kospi_dates = [d.strftime('%Y-%m-%d') for d in kospi_cumulative.index]
+    except Exception as e:
+        log_warning(f"KOSPI 데이터 로딩 실패: {e}")
+        kospi_dates = []
+        kospi_values = []
+    
+    # 거래 로그 처리
+    trade_log_all = results['trade_log'].copy()
+    trade_log_records = []
+    
+    if not trade_log_all.empty:
         # 백테스팅용 주식 목록 (캐시 없이 최신 데이터 사용)
         stock_list = data_processor.fetch_stock_list()
-        sell_log = pd.merge(sell_log, stock_list, left_on='ticker', right_on='종목코드', how='left')
+        trade_log_all = pd.merge(trade_log_all, stock_list, left_on='ticker', right_on='종목코드', how='left')
         
-        sell_log['holding_period'] = (sell_log['sell_date'] - sell_log['buy_date']).dt.days
+        # 날짜순 정렬
+        if 'trade_date' in trade_log_all.columns:
+            trade_log_all = trade_log_all.sort_values('trade_date').reset_index(drop=True)
         
-        sell_log['buy_date_str'] = sell_log['buy_date'].dt.strftime('%Y-%m-%d')
-        sell_log['sell_date_str'] = sell_log['sell_date'].dt.strftime('%Y-%m-%d')
-        sell_log['buy_price'] = sell_log['buy_price'].apply(lambda x: f"{x:,.0f}원")
-        sell_log['sell_price'] = sell_log['sell_price'].apply(lambda x: f"{x:,.0f}원")
-        sell_log['return_str'] = sell_log['return'].apply(lambda x: f"{x:+.2%}")
+        # 누적 실현손익 계산
+        cumulative_profit = 0.0
+        if 'profit' in trade_log_all.columns:
+            # 매도 거래만 누적 실현손익 계산
+            trade_log_all['cumulative_profit'] = 0.0
+            for idx, row in trade_log_all.iterrows():
+                if row['type'] == 'sell' and pd.notna(row.get('profit')):
+                    cumulative_profit += row['profit']
+                    trade_log_all.at[idx, 'cumulative_profit'] = cumulative_profit
+                else:
+                    # 매수 거래는 이전 누적값 유지
+                    trade_log_all.at[idx, 'cumulative_profit'] = cumulative_profit
         
-        sell_log['buy_amount_str'] = sell_log['buy_amount'].apply(lambda x: f"{x:,.0f}원")
-        sell_log['profit_str'] = sell_log['profit'].apply(lambda x: f"{x:,.0f}원")
-        sell_log['total_asset_str'] = sell_log['total_asset'].apply(lambda x: f"{x:,.0f}원")
-
-        if 'buy_market_cap' in sell_log.columns:
-            sell_log['buy_market_cap_str'] = (sell_log['buy_market_cap'] / 1_0000_0000).apply(lambda x: f"{x:,.0f}억" if pd.notna(x) else 'N/A')
-        else:
-            sell_log['buy_market_cap_str'] = 'N/A'
-
-        if 'ml_pred_proba' in sell_log.columns:
-            sell_log['ml_pred_proba'] = (sell_log['ml_pred_proba'] * 100).round(2)
-        score_cols = ['final_score', 'ml_pred_proba', 'volatility_score']
-        for col in score_cols:
-            if col in sell_log.columns:
-                sell_log[col] = sell_log[col].round(2)
-        
-        profit_numeric = results['trade_log']['profit']
-        profit_colors = ['rgba(255, 220, 220, 0.7)' if p > 0 else 'rgba(220, 220, 255, 0.7)' if p < 0 else 'white' for p in profit_numeric]
-        return_colors = ['rgba(255, 220, 220, 0.7)' if r > 0 else 'rgba(220, 220, 255, 0.7)' if r < 0 else 'white' for r in results['trade_log']['return']]
-        
-        rename_map = {
-            'buy_date_str': '매수일', 'sell_date_str': '매도일', 'holding_period': '보유기간',
-            '종목명': '종목명', 'buy_market_cap_str': '매수시점 시총',
-            'buy_price': '매수가', 'sell_price': '매도가', 'buy_amount_str': '매수금액', 'profit_str': '실현손익',
-            'return_str': '수익률', 'total_asset_str': '총자산', 'final_score': '최종점수',
-            'ml_pred_proba': '상승확률', 'volatility_score': '변동성'
-        }
-        display_columns = list(rename_map.keys())
-        sell_log = sell_log[[col for col in display_columns if col in sell_log.columns]].rename(columns=rename_map)
+        # 거래 로그를 레코드로 변환
+        for _, row in trade_log_all.iterrows():
+            record = {
+                'type': row['type'],
+                'trade_date': row['trade_date'].strftime('%Y-%m-%d') if pd.notna(row['trade_date']) else None,
+                'ticker': row['ticker'],
+                'stock_name': row.get('종목명', 'N/A'),
+                'buy_date': row['buy_date'].strftime('%Y-%m-%d') if pd.notna(row['buy_date']) else None,
+                'sell_date': row['sell_date'].strftime('%Y-%m-%d') if pd.notna(row['sell_date']) and 'sell_date' in row else None,
+                'holding_period': int((row['sell_date'] - row['buy_date']).days) if 'sell_date' in row and pd.notna(row['sell_date']) and pd.notna(row['buy_date']) else None,
+                'buy_price': float(row['buy_price']) if pd.notna(row['buy_price']) else None,
+                'actual_buy_price': float(row['actual_buy_price']) if pd.notna(row['actual_buy_price']) else None,
+                'sell_price': float(row['sell_price']) if 'sell_price' in row and pd.notna(row['sell_price']) else None,
+                'actual_sell_price': float(row['actual_sell_price']) if 'actual_sell_price' in row and pd.notna(row['actual_sell_price']) else None,
+                'shares': int(row['shares']) if 'shares' in row and pd.notna(row['shares']) else None,
+                'buy_amount': float(row['buy_amount']) if pd.notna(row['buy_amount']) else None,
+                'profit': float(row['profit']) if 'profit' in row and pd.notna(row['profit']) else None,
+                'return': float(row['return']) if 'return' in row and pd.notna(row['return']) else None,
+                'buy_market_cap': float(row['buy_market_cap']) if 'buy_market_cap' in row and pd.notna(row['buy_market_cap']) else None,
+                'total_asset': float(row['total_asset']) if 'total_asset' in row and pd.notna(row['total_asset']) else None,
+                'cumulative_profit': float(row['cumulative_profit']) if 'cumulative_profit' in row and pd.notna(row['cumulative_profit']) else None,
+                'final_score': float(row['final_score']) if 'final_score' in row and pd.notna(row['final_score']) else None,
+                'ml_pred_proba': float(row['ml_pred_proba']) if 'ml_pred_proba' in row and pd.notna(row['ml_pred_proba']) else None,
+                'volatility_score': float(row['volatility_score']) if 'volatility_score' in row and pd.notna(row['volatility_score']) else None
+            }
+            trade_log_records.append(record)
     
-    fig = make_subplots(
-        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.1,
-        row_heights=[0.45, 0.2, 0.35],
-        specs=[[{"type": "scatter"}], [{"type": "table"}], [{"type": "table"}]]
-    )
-
-    fig.add_trace(go.Scatter(x=portfolio_cumulative.index, y=portfolio_cumulative, name='포트폴리오', line=dict(color='royalblue', width=2)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=kospi_cumulative.index, y=kospi_cumulative, name='KOSPI', line=dict(color='grey', width=1, dash='dash')), row=1, col=1)
-
-    metrics_data = {
-        '지표': [
-            '초기 자본', '최종 자산', '총수익률', '연환산 수익률',
-            '최대 낙폭 (MDD)', '샤프 지수', '승률', '거래 수수료율',
-            '증권거래세율', '최대 보유 기간', '익절 목표 (%)', '손절 라인 (%)',
-            '매수 종목 수 (N)', '매수 대상 범위'
-        ],
-        '값': [
-            f"{results.get('initial_capital', 0):,.0f}원",
-            f"{results.get('final_asset', 0):,.0f}원",
-            f"{results['total_return']:.2%}", 
-            f"{results['annual_return']:.2%}", 
-            f"{results['mdd']:.2%}", 
-            f"{results['sharpe_ratio']:.2f}", 
-            f"{results.get('win_rate', 0.0):.2%}",
-            f"{results.get('transaction_fee_rate', 0.0):.3f}%",
-            f"{results.get('securities_transaction_tax_rate', 0.0):.2f}%",
-            f"{results.get('max_hold_period', 0)}일",
-            f"{results.get('take_profit_pct', 0.0):.2f}%",
-            f"{results.get('stop_loss_pct', 0.0):.2f}%",
-            f"{results.get('top_n', 0)}개",
-            f"{results.get('buy_universe_rank', 0)}위"
-        ]
+    # 리포트 데이터 구성
+    report_data = {
+        'metadata': {
+            'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'test_period': {
+                'start_date': results["portfolio_history"].index.min().strftime('%Y-%m-%d'),
+                'end_date': results["portfolio_history"].index.max().strftime('%Y-%m-%d'),
+                'total_days': len(results["portfolio_history"])
+            }
+        },
+        'performance_metrics': {
+            'initial_capital': float(results.get('initial_capital', 0)),
+            'final_asset': float(results.get('final_asset', 0)),
+            'total_return': float(results.get('total_return', 0)),
+            'annual_return': float(results.get('annual_return', 0)),
+            'sharpe_ratio': float(results.get('sharpe_ratio', 0)),
+            'mdd': float(results.get('mdd', 0)),
+            'win_rate': float(results.get('win_rate', 0))
+        },
+        'strategy_parameters': {
+            'transaction_fee_rate': float(results.get('transaction_fee_rate', 0)),
+            'securities_transaction_tax_rate': float(results.get('securities_transaction_tax_rate', SECURITIES_TRANSACTION_TAX_RATE)),
+            'max_hold_period': int(results.get('max_hold_period', 0)),
+            'take_profit_pct': float(results.get('take_profit_pct', 0)),
+            'stop_loss_pct': float(results.get('stop_loss_pct', 0)),
+            'top_n': int(results.get('top_n', 0)),
+            'buy_universe_rank': int(results.get('buy_universe_rank', 0))
+        },
+        'portfolio_history': {
+            'dates': portfolio_dates,
+            'values': portfolio_values
+        },
+        'kospi_history': {
+            'dates': kospi_dates,
+            'values': kospi_values
+        },
+        'trade_log': trade_log_records
     }
-    metrics_df_temp = pd.DataFrame(metrics_data)
-
-    # 2열씩 묶어서 4열 DataFrame 생성
-    metrics_df = pd.DataFrame({
-        '지표': metrics_df_temp['지표'].iloc[::2].reset_index(drop=True),
-        '값': metrics_df_temp['값'].iloc[::2].reset_index(drop=True),
-        '지표 ': metrics_df_temp['지표'].iloc[1::2].reset_index(drop=True),
-        '값 ': metrics_df_temp['값'].iloc[1::2].reset_index(drop=True)
-    })
-
-    fig.add_trace(go.Table(
-        header=dict(values=list(metrics_df.columns), fill_color='paleturquoise', align='left', font=dict(size=14)),
-        cells=dict(values=[metrics_df['지표'], metrics_df['값'], metrics_df['지표 '], metrics_df['값 ']], fill_color='lavender', align=['left', 'right', 'left', 'right'], font=dict(size=14))
-    ), row=2, col=1)
     
-    if not sell_log.empty:
-        col_widths = [1.5, 1.5, 0.8, 1.8, 1.2, 1.2, 1.2, 1.5, 1.2, 1, 1.5, 1, 1, 0.8, 0.8, 0.8, 0.8, 0.8]
-        final_columns = list(sell_log.columns)
-        col_widths = col_widths[:len(final_columns)]
-
-        cell_colors = []
-        for col_name in final_columns:
-            if col_name == '실현손익':
-                cell_colors.append(profit_colors)
-            elif col_name == '수익률':
-                cell_colors.append(return_colors)
-            else:
-                cell_colors.append(['white'] * len(sell_log))
-
-        fig.add_trace(go.Table(
-            header=dict(values=final_columns, fill_color='lightskyblue', align='left', font=dict(size=12)),
-            columnwidth=col_widths,
-            cells=dict(
-                values=[sell_log[k].tolist() for k in final_columns],
-                fill_color=cell_colors,
-                align=['left', 'left', 'center', 'left'] + ['right'] * (len(final_columns) - 4),
-                font=dict(size=11),
-                height=25
-            )
-        ), row=3, col=1)
-
-    fig.update_layout(
-        title_text='<b>백테스팅 성과 분석 리포트</b>', height=1600, showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        margin=dict(l=50, r=50, t=100, b=50)
-    )
-    fig.update_yaxes(title_text='누적 수익률', row=1, col=1)
-    
-    fig.add_annotation(text="<b>주요 성과 지표</b>", xref="paper", yref="paper", x=0.0, y=0.54, showarrow=False, font=dict(size=16))
-    if not sell_log.empty:
-        fig.add_annotation(text="<b>상세 매매 기록 (매도 완료 기준)</b>", xref="paper", yref="paper", x=0.0, y=0.34, showarrow=False, font=dict(size=16))
-    
-    html_content = fig.to_html(full_html=False, include_plotlyjs='cdn')
+    # JSON 파일로 저장
     with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(html_content)
+        json.dump(report_data, f, ensure_ascii=False, indent=2)
+    
+    log_info(f"JSON 리포트 생성 완료: {output_path}")
+    return report_data
+
 
 def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate):
     """최종 백테스팅 실행 - 강화된 에러 처리"""
@@ -761,20 +829,22 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             })
             raise
         
-        # HTML 리포트 생성 (강화된 에러 처리)
+        # JSON 리포트 생성 (강화된 에러 처리)
         try:
-            log_info("\n4. HTML 리포트 생성 중...")
-            log_info("HTML 리포트 생성 시작", context={"report_file": REPORT_FILE})
+            log_info("\n4. JSON 리포트 생성 중...")
+            json_report_path = str(path_manager.data_dir / 'backtest_report.json')
+            log_info("JSON 리포트 생성 시작", context={"report_file": json_report_path})
             
-            create_html_report(backtest_results, output_path=REPORT_FILE)
+            create_json_report(backtest_results, output_path=json_report_path)
             
-            log_info("HTML 리포트 생성 완료", context={"report_file": REPORT_FILE})
-            log_info(f"\n✅ 백테스팅 완료. `{REPORT_FILE}` 파일이 생성되었습니다.")
+            log_info("JSON 리포트 생성 완료", context={"report_file": json_report_path})
             
         except Exception as e:
-            log_critical("HTML 리포트 생성 실패", exception=e, context={"report_file": REPORT_FILE})
+            log_critical("JSON 리포트 생성 실패", exception=e, context={"report_file": json_report_path if 'json_report_path' in locals() else "Unknown"})
             # 리포트 생성 실패해도 백테스팅 결과는 반환
-            log_info(f"\n⚠️ 백테스팅은 완료되었지만 리포트 생성에 실패했습니다: {e}")
+            log_warning(f"\n⚠️ JSON 리포트 생성에 실패했습니다: {e}")
+        
+        log_info(f"\n✅ 백테스팅 완료. JSON 리포트 파일이 생성되었습니다.")
         
         # 로거 종료
         try:

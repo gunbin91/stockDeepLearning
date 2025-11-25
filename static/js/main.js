@@ -790,13 +790,409 @@ $(document).ready(function() {
     }
     
     function loadBacktestReport() {
-        $.get('/static/backtest_report.html')
+        // JSON 리포트 로드
+        $.get('/api/backtest_report')
             .done(function(data) {
-                $('#backtest_report').html(data);
+                renderBacktestReport(data);
             })
             .fail(function() {
                 $('#backtest_report').html('<div class="alert alert-danger">리포트를 로드할 수 없습니다.</div>');
             });
+    }
+    
+    function renderBacktestReport(data) {
+        const container = $('#backtest_report');
+        container.empty();
+        
+        // 메타데이터 표시
+        const metadata = data.metadata || {};
+        const metrics = data.performance_metrics || {};
+        const params = data.strategy_parameters || {};
+        
+        // 성과 지표 카드
+        let metricsHtml = `
+            <div class="row mb-4">
+                <div class="col-12">
+                    <div class="card">
+                        <div class="card-header bg-primary text-white">
+                            <h5 class="mb-0"><i class="fas fa-chart-line me-2"></i>성과 지표</h5>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-3 mb-3">
+                                    <div class="text-center p-3 bg-light rounded">
+                                        <div class="text-muted small mb-1">초기 자본</div>
+                                        <div class="h5 mb-0">${formatCurrency(metrics.initial_capital)}</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <div class="text-center p-3 bg-light rounded">
+                                        <div class="text-muted small mb-1">최종 자산</div>
+                                        <div class="h5 mb-0 ${metrics.final_asset >= metrics.initial_capital ? 'text-danger' : 'text-primary'}">${formatCurrency(metrics.final_asset)}</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <div class="text-center p-3 bg-light rounded">
+                                        <div class="text-muted small mb-1">총수익률</div>
+                                        <div class="h5 mb-0 ${metrics.total_return >= 0 ? 'text-danger' : 'text-primary'}">${formatPercent(metrics.total_return)}</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <div class="text-center p-3 bg-light rounded">
+                                        <div class="text-muted small mb-1">연환산 수익률</div>
+                                        <div class="h5 mb-0 ${metrics.annual_return >= 0 ? 'text-danger' : 'text-primary'}">${formatPercent(metrics.annual_return)}</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <div class="text-center p-3 bg-light rounded">
+                                        <div class="text-muted small mb-1">샤프 지수</div>
+                                        <div class="h5 mb-0">${metrics.sharpe_ratio.toFixed(2)}</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <div class="text-center p-3 bg-light rounded">
+                                        <div class="text-muted small mb-1">최대 낙폭 (MDD)</div>
+                                        <div class="h5 mb-0 text-primary">${formatPercent(metrics.mdd)}</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <div class="text-center p-3 bg-light rounded">
+                                        <div class="text-muted small mb-1">승률</div>
+                                        <div class="h5 mb-0">${formatPercent(metrics.win_rate)}</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3 mb-3">
+                                    <div class="text-center p-3 bg-light rounded">
+                                        <div class="text-muted small mb-1">테스트 기간</div>
+                                        <div class="h6 mb-0">${metadata.test_period ? metadata.test_period.start_date + ' ~ ' + metadata.test_period.end_date : 'N/A'}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        // 전략 파라미터 카드
+        let paramsHtml = `
+            <div class="row mb-4">
+                <div class="col-12">
+                    <div class="card">
+                        <div class="card-header bg-info text-white">
+                            <h5 class="mb-0"><i class="fas fa-cogs me-2"></i>전략 파라미터</h5>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-3 mb-2"><strong>거래 수수료:</strong> ${params.transaction_fee_rate.toFixed(3)}%</div>
+                                <div class="col-md-3 mb-2"><strong>증권거래세:</strong> ${params.securities_transaction_tax_rate.toFixed(2)}%</div>
+                                <div class="col-md-3 mb-2"><strong>최대 보유 기간:</strong> ${params.max_hold_period}일</div>
+                                <div class="col-md-3 mb-2"><strong>익절 목표:</strong> ${params.take_profit_pct.toFixed(2)}%</div>
+                                <div class="col-md-3 mb-2"><strong>손절 라인:</strong> ${params.stop_loss_pct.toFixed(2)}%</div>
+                                <div class="col-md-3 mb-2"><strong>매수 종목 수:</strong> ${params.top_n}개</div>
+                                <div class="col-md-3 mb-2"><strong>매수 대상 범위:</strong> 상위 ${params.buy_universe_rank}위</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        // 차트 영역
+        let chartHtml = `
+            <div class="row mb-4">
+                <div class="col-12">
+                    <div class="card">
+                        <div class="card-header bg-success text-white">
+                            <h5 class="mb-0"><i class="fas fa-chart-area me-2"></i>포트폴리오 성과 차트</h5>
+                        </div>
+                        <div class="card-body">
+                            <div id="backtest_chart" style="height: 500px;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        // 거래 로그 테이블
+        let tradeLogHtml = '';
+        if (data.trade_log && data.trade_log.length > 0) {
+            tradeLogHtml = `
+                <div class="row mb-4">
+                    <div class="col-12">
+                        <div class="card">
+                            <div class="card-header bg-warning text-dark">
+                                <h5 class="mb-0"><i class="fas fa-list me-2"></i>상세 매매 기록</h5>
+                            </div>
+                            <div class="card-body">
+                                <div class="table-responsive">
+                                    <table id="backtest_trade_table" class="table table-striped table-hover">
+                                        <thead class="table-dark">
+                                            <tr>
+                                                <th>거래일</th>
+                                                <th>구분</th>
+                                                <th>종목명</th>
+                                                <th>종목코드</th>
+                                                <th>매수일</th>
+                                                <th>매도일</th>
+                                                <th>보유기간</th>
+                                                <th>매수가</th>
+                                                <th>매도가</th>
+                                                <th>수익률</th>
+                                                <th>실현손익</th>
+                                                <th>누적 실현손익</th>
+                                                <th>매수금액</th>
+                                                <th>총자산</th>
+                                                <th>최종점수</th>
+                                                <th>상승확률</th>
+                                                <th>변동성</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+            `;
+            
+            data.trade_log.forEach(function(trade) {
+                const returnClass = trade.return !== null && trade.return !== undefined ? (trade.return >= 0 ? 'text-danger' : 'text-primary') : '';
+                const profitClass = trade.profit !== null && trade.profit !== undefined ? (trade.profit >= 0 ? 'text-danger' : 'text-primary') : '';
+                const cumulativeProfitClass = trade.cumulative_profit !== null && trade.cumulative_profit !== undefined ? (trade.cumulative_profit >= 0 ? 'text-danger' : 'text-primary') : '';
+                
+                tradeLogHtml += `
+                    <tr>
+                        <td>${trade.trade_date || 'N/A'}</td>
+                        <td><span class="badge ${trade.type === 'buy' ? 'bg-primary' : 'bg-success'}">${trade.type === 'buy' ? '매수' : '매도'}</span></td>
+                        <td>${trade.stock_name || 'N/A'}</td>
+                        <td>${trade.ticker || 'N/A'}</td>
+                        <td>${trade.buy_date || 'N/A'}</td>
+                        <td>${trade.sell_date || 'N/A'}</td>
+                        <td class="text-center">${trade.holding_period !== null && trade.holding_period !== undefined ? trade.holding_period + '일' : 'N/A'}</td>
+                        <td class="text-end">${trade.buy_price !== null && trade.buy_price !== undefined ? formatCurrency(trade.buy_price) : 'N/A'}</td>
+                        <td class="text-end">${trade.sell_price !== null && trade.sell_price !== undefined ? formatCurrency(trade.sell_price) : 'N/A'}</td>
+                        <td class="text-end ${returnClass} fw-bold">${trade.return !== null && trade.return !== undefined ? formatPercent(trade.return) : 'N/A'}</td>
+                        <td class="text-end ${profitClass} fw-bold">${trade.profit !== null && trade.profit !== undefined ? formatCurrency(trade.profit) : 'N/A'}</td>
+                        <td class="text-end ${cumulativeProfitClass} fw-bold">${trade.cumulative_profit !== null && trade.cumulative_profit !== undefined ? formatCurrency(trade.cumulative_profit) : 'N/A'}</td>
+                        <td class="text-end">${trade.buy_amount !== null && trade.buy_amount !== undefined ? formatCurrency(trade.buy_amount) : 'N/A'}</td>
+                        <td class="text-end">${trade.total_asset !== null && trade.total_asset !== undefined ? formatCurrency(trade.total_asset) : 'N/A'}</td>
+                        <td class="text-end">${trade.final_score !== null && trade.final_score !== undefined ? trade.final_score.toFixed(2) : 'N/A'}</td>
+                        <td class="text-end">${trade.ml_pred_proba !== null && trade.ml_pred_proba !== undefined ? (trade.ml_pred_proba * 100).toFixed(2) + '%' : 'N/A'}</td>
+                        <td class="text-end">${trade.volatility_score !== null && trade.volatility_score !== undefined ? trade.volatility_score.toFixed(2) : 'N/A'}</td>
+                    </tr>
+                `;
+            });
+            
+            tradeLogHtml += `
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        container.html(metricsHtml + paramsHtml + chartHtml + tradeLogHtml);
+        
+        // 차트 렌더링
+        if (data.portfolio_history && data.portfolio_history.dates && data.portfolio_history.values) {
+            renderBacktestChart(data);
+        }
+        
+        // DataTables 초기화
+        if ($('#backtest_trade_table').length) {
+            if (!$.fn.DataTable.isDataTable('#backtest_trade_table')) {
+                $('#backtest_trade_table').DataTable({
+                    pageLength: 25,
+                    order: [[0, 'desc']], // 최신 거래일 순
+                    language: {
+                        "lengthMenu": "페이지당 _MENU_ 개씩 보기",
+                        "zeroRecords": "데이터가 없습니다",
+                        "info": "_START_ - _END_ / _TOTAL_ 개",
+                        "infoEmpty": "0 개",
+                        "infoFiltered": "(전체 _MAX_ 개 중 필터링됨)",
+                        "search": "검색:",
+                        "paginate": {
+                            "first": "처음",
+                            "last": "마지막",
+                            "next": "다음",
+                            "previous": "이전"
+                        }
+                    },
+                    scrollX: true,
+                    responsive: true
+                });
+            }
+        }
+    }
+    
+    function renderBacktestChart(data) {
+        const portfolioDates = data.portfolio_history.dates || [];
+        const portfolioValues = data.portfolio_history.values || [];
+        const kospiDates = data.kospi_history.dates || [];
+        const kospiValues = data.kospi_history.values || [];
+        const tradeLog = data.trade_log || [];
+        
+        // 누적 실현손익 계산 (날짜별)
+        const cumulativeProfitByDate = {};
+        let cumulativeProfit = 0;
+        
+        // 거래 로그를 날짜순으로 정렬
+        const sortedTrades = tradeLog.slice().sort(function(a, b) {
+            const dateA = a.trade_date ? new Date(a.trade_date) : new Date(0);
+            const dateB = b.trade_date ? new Date(b.trade_date) : new Date(0);
+            return dateA - dateB;
+        });
+        
+        // 매도 거래만 누적 실현손익 계산
+        sortedTrades.forEach(function(trade) {
+            if (trade.type === 'sell' && trade.profit !== null && trade.profit !== undefined) {
+                cumulativeProfit += trade.profit;
+                if (trade.trade_date) {
+                    cumulativeProfitByDate[trade.trade_date] = cumulativeProfit;
+                }
+            }
+        });
+        
+        // 포트폴리오 날짜에 대해 누적 실현손익 배열 생성
+        const cumulativeProfitValues = [];
+        let lastCumulativeProfit = 0;
+        
+        portfolioDates.forEach(function(date) {
+            if (cumulativeProfitByDate[date] !== undefined) {
+                lastCumulativeProfit = cumulativeProfitByDate[date];
+            }
+            cumulativeProfitValues.push(lastCumulativeProfit);
+        });
+        
+        const traces = [];
+        
+        // 누적 실현손익 추적선 (억원 단위)
+        if (portfolioDates.length > 0 && cumulativeProfitValues.length > 0) {
+            const cumulativeProfitInHundredMillion = cumulativeProfitValues.map(function(val) {
+                return val / 100000000; // 억원 단위로 변환
+            });
+            
+            traces.push({
+                x: portfolioDates,
+                y: cumulativeProfitInHundredMillion,
+                name: '누적 실현손익',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: 'royalblue', width: 2 }
+            });
+        }
+        
+        // KOSPI 추적선 (초기 자본 기준 정규화된 값, 억원 단위)
+        if (kospiDates.length > 0 && kospiValues.length > 0 && data.performance_metrics && data.performance_metrics.initial_capital) {
+            const initialCapital = data.performance_metrics.initial_capital;
+            const kospiInHundredMillion = kospiValues.map(function(val) {
+                return (val - initialCapital) / 100000000; // 초기 자본 대비 변화를 억원 단위로
+            });
+            
+            traces.push({
+                x: kospiDates,
+                y: kospiInHundredMillion,
+                name: 'KOSPI (초기자본 대비)',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: 'grey', width: 1, dash: 'dash' }
+            });
+        }
+        
+        // 날짜 포맷팅 함수 (월/일 형식)
+        function formatDate(dateStr) {
+            if (!dateStr) return '';
+            const date = new Date(dateStr);
+            if (isNaN(date.getTime())) return dateStr; // 유효하지 않은 날짜면 원본 반환
+            const month = date.getMonth() + 1; // 0-11이므로 +1
+            const day = date.getDate();
+            return `${month}월 ${day}일`;
+        }
+        
+        // X축 틱 값과 레이블 생성 (월/일 형식)
+        const tickValues = [];
+        const tickLabels = [];
+        if (portfolioDates.length > 0) {
+            const dateCount = portfolioDates.length;
+            const tickInterval = Math.max(1, Math.floor(dateCount / 10)); // 최대 10개 틱
+            
+            for (let i = 0; i < dateCount; i += tickInterval) {
+                const dateStr = portfolioDates[i];
+                if (dateStr) {
+                    const dateObj = new Date(dateStr);
+                    if (!isNaN(dateObj.getTime())) {
+                        tickValues.push(dateObj);
+                        tickLabels.push(formatDate(dateStr));
+                    }
+                }
+            }
+            // 마지막 날짜도 포함
+            if (dateCount > 0) {
+                const lastDateStr = portfolioDates[dateCount - 1];
+                const lastDateObj = new Date(lastDateStr);
+                if (!isNaN(lastDateObj.getTime())) {
+                    const lastTickValue = tickValues[tickValues.length - 1];
+                    if (!lastTickValue || lastDateObj.getTime() !== lastTickValue.getTime()) {
+                        tickValues.push(lastDateObj);
+                        tickLabels.push(formatDate(lastDateStr));
+                    }
+                }
+            }
+        }
+        
+        // 호버 템플릿에 날짜 포맷 적용
+        traces.forEach(function(trace) {
+            if (trace.x && trace.x.length > 0) {
+                trace.hovertemplate = '<b>%{customdata}</b><br>' +
+                    trace.name + ': %{y:,.2f}억원<br>' +
+                    '<extra></extra>';
+                trace.customdata = trace.x.map(formatDate);
+            }
+        });
+        
+        const layout = {
+            title: {
+                text: '<b>포트폴리오 성과 비교 (누적 실현손익)</b>',
+                font: { size: 16 }
+            },
+            xaxis: {
+                title: '날짜',
+                type: 'date',
+                tickmode: tickValues.length > 0 ? 'array' : 'auto',
+                tickvals: tickValues.length > 0 ? tickValues : undefined,
+                ticktext: tickLabels.length > 0 ? tickLabels : undefined,
+                tickformat: tickValues.length === 0 ? '%m/%d' : undefined, // fallback 형식
+                tickangle: -45
+            },
+            yaxis: {
+                title: '누적 실현손익 (억원)',
+                tickformat: ',.2f'
+            },
+            hovermode: 'x unified',
+            legend: {
+                orientation: 'h',
+                yanchor: 'bottom',
+                y: 1.02,
+                xanchor: 'right',
+                x: 1
+            },
+            margin: { l: 100, r: 50, t: 60, b: 80 }  // 아래 여백 증가 (날짜 표시 공간)
+        };
+        
+        Plotly.newPlot('backtest_chart', traces, layout, {
+            responsive: true,
+            displayModeBar: true
+        });
+    }
+    
+    function formatCurrency(value) {
+        if (value === null || value === undefined || isNaN(value)) return 'N/A';
+        return new Intl.NumberFormat('ko-KR', { style: 'currency', currency: 'KRW' }).format(value);
+    }
+    
+    function formatPercent(value) {
+        if (value === null || value === undefined || isNaN(value)) return 'N/A';
+        const sign = value >= 0 ? '+' : '';
+        return sign + (value * 100).toFixed(2) + '%';
     }
     
     function initializeFeatureChart() {
