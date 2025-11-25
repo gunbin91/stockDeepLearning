@@ -52,11 +52,13 @@ except ImportError:
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from logger import log_info, log_warning, log_error, log_critical
+
 import data_processor
 
 from path_manager import path_manager
 
-from logger import log_info, log_warning, log_error, log_critical
+# 언더샘플링은 직접 구현하므로 외부 라이브러리 불필요
 
 
 
@@ -327,21 +329,21 @@ def prepare_data_and_save(data_path, start_date, end_date):
 
         # 이 단계에서 메모리 사용량이 일시적으로 크게 증가함
 
-        full_df = data_processor.get_preprocessed_data(start_date, end_date)
+        # 학습용 데이터 생성 시 팩터 점수 계산 건너뛰기 (백테스팅에서만 필요)
+        full_df = data_processor.get_preprocessed_data(start_date, end_date, skip_factor_scores=True)
 
         log_memory_usage("전체 데이터 로딩 완료")
 
-
-
         if full_df is None or full_df.empty:
-
             log_error("데이터 전처리 중 오류가 발생하여 데이터를 생성할 수 없습니다.")
-
             return False
+
+        log_info(f"   📊 전처리된 원본 데이터: {len(full_df):,}행")
 
         # target 필터링 (전체 데이터에서)
         log_info("   🔍 target 필터링 중...")
         full_df = full_df[full_df['target'].notna()].copy()
+        log_info(f"   📊 target 필터링 후 데이터: {len(full_df):,}행")
         if full_df.empty:
             log_error("target 필터링 후 데이터가 없습니다.")
             return False
@@ -570,208 +572,98 @@ def load_fold_data(file_paths, features, imputation_values):
 
 
 def objective(trial, fold_data_cache, features, imputation_values, max_depth_list, rng):
-
     """
-
-    Optuna를 위한 objective 함수 (청크 단위 학습 방식).
-
-    fold_data_cache: 모든 Fold의 데이터 캐시 (main 함수에서 미리 로드)
-    각 fold를 3개 청크로 나눠서 학습하고, 앙상블 모델로 예측하여 점수 계산
-
+    Optuna를 위한 objective 함수 (단일 모델 학습 방식).
+    fold_data_cache: 모든 Fold의 데이터 캐시.
+    각 fold에서 단일 모델을 학습하고 검증 점수를 계산합니다.
     """
-
     trial_start_time = datetime.now()
     log_info(f"\n{'='*60}")
     log_info(f"🚀 Optuna Trial #{trial.number} 시작")
     
     params = {
-        'n_estimators': trial.suggest_int('n_estimators', 100, 400),
+        'n_estimators': trial.suggest_int('n_estimators', 200, 500),
         'max_depth': trial.suggest_categorical('max_depth', max_depth_list),
-        'min_samples_split': trial.suggest_int('min_samples_split', 5, 50),  # 하한 상향: 2-50 → 5-50 (과적합 방지)
-        'min_samples_leaf': trial.suggest_int('min_samples_leaf', 2, 50),  # 하한 상향: 1-50 → 2-50 (노이즈 대응)
-        'max_samples': trial.suggest_categorical('max_samples', [0.7, 0.8, 0.9, 1.0]),  # 0.6 제거: 정보 손실 방지
+        'min_samples_split': trial.suggest_int('min_samples_split', 5, 50),
+        'min_samples_leaf': trial.suggest_int('min_samples_leaf', 2, 50),
+        'max_samples': trial.suggest_categorical('max_samples', [0.7, 0.8, 0.9, 1.0]),
+        'max_features': trial.suggest_float('max_features', 0.4, 1.0),
         'split_criterion': trial.suggest_categorical('split_criterion', [0, 1]),
         'random_state': 42,
         'n_streams': 1,
     }
 
-    log_info(f"   📋 파라미터: n_estimators={params['n_estimators']}, max_depth={params['max_depth']}, max_samples={params['max_samples']}")
+    log_info(f"   📋 파라미터: n_estimators={params['n_estimators']}, max_depth={params['max_depth']}, max_samples={params['max_samples']}, max_features={params['max_features']}")
 
     if not fold_data_cache:
         log_error("Fold 데이터 캐시가 비어있습니다. Trial을 중단합니다.")
         return 0.0
 
     fold_scores = []
-
     # --- 각 Fold 처리 (캐시된 데이터 사용) ---
     for fold in range(len(fold_data_cache)):
         fold_start_time = datetime.now()
         
-        # Fold 시작 전 GPU 메모리 정리 (이전 fold의 잔여 메모리 해제)
         if fold > 0:
-            safe_gpu_memory_cleanup()
-            gc.collect()
+            safe_gpu_memory_cleanup(); gc.collect()
 
-        # 캐시된 데이터 사용 (중복 로드 방지)
         X_train_all, y_train_all, X_val, y_val = fold_data_cache[fold]
         
         if X_train_all is None or X_val is None:
             log_warning(f"   ⚠️ Fold #{fold+1} 데이터가 없습니다. 건너뜁니다.")
             continue
 
-        # 샘플링 제거: 실제 시장 분포를 그대로 사용 (보수적 예측)
-        # 스케일러 학습 (각 Fold마다 새로 생성)
+        # 스케일러 학습 및 데이터 변환
         step_start = datetime.now()
         scaler = cuStandardScaler()
-        scaler.fit(X_train_all)
-        scaler_fit_time = (datetime.now() - step_start).total_seconds()
-
-        # 훈련 데이터 스케일링
-        step_start = datetime.now()
-        X_train_scaled = scaler.transform(X_train_all)
-        train_scale_time = (datetime.now() - step_start).total_seconds()
-        
-        # 원본 훈련 데이터 즉시 삭제 (스케일링 완료 후 불필요, 메모리 최적화)
-        del X_train_all
-        safe_gpu_memory_cleanup()
-        gc.collect()
-
-        # 검증 데이터 스케일링
-        step_start = datetime.now()
+        X_train_scaled = scaler.fit_transform(X_train_all)
         X_val_scaled = scaler.transform(X_val)
-        val_scale_time = (datetime.now() - step_start).total_seconds()
+        preprocessing_time = (datetime.now() - step_start).total_seconds()
         
-        # 원본 검증 데이터 즉시 삭제 (스케일링 완료 후 불필요, 메모리 최적화)
-        del X_val
-        safe_gpu_memory_cleanup()
-        gc.collect()
+        del X_train_all, X_val
+        safe_gpu_memory_cleanup(); gc.collect()
 
-        # 청크 단위 학습 (3개 청크로 분할)
-        n_chunks = 3
-        chunk_size = len(X_train_scaled) // n_chunks
-        chunk_models = []
-        fit_time = 0.0
-        
+        # 단일 모델 학습
         step_start = datetime.now()
-        for chunk_idx in range(n_chunks):
-            # 청크 인덱스 계산 (데이터 정합성 보장)
-            start_idx = chunk_idx * chunk_size
-            if chunk_idx == n_chunks - 1:
-                # 마지막 청크는 나머지 모든 데이터 포함
-                end_idx = len(X_train_scaled)
-            else:
-                end_idx = (chunk_idx + 1) * chunk_size
-            
-            # 청크 데이터 추출
-            X_chunk = X_train_scaled.iloc[start_idx:end_idx]
-            y_chunk = y_train_all.iloc[start_idx:end_idx]
-            
-            # 청크별 모델 학습
-            chunk_model = cuRF(**params)
-            chunk_model.fit(X_chunk, y_chunk)
-            chunk_models.append(chunk_model)
-            
-            # 청크 데이터 즉시 삭제 (메모리 최적화)
-            del X_chunk, y_chunk
-            safe_gpu_memory_cleanup()
-            gc.collect()
-        
+        model = cuRF(**params)
+        model.fit(X_train_scaled, y_train_all)
         fit_time = (datetime.now() - step_start).total_seconds()
         
-        # X_train_scaled 즉시 삭제 (모델 학습 완료 후 불필요)
         del X_train_scaled, y_train_all
-        safe_gpu_memory_cleanup()
-        gc.collect()
+        safe_gpu_memory_cleanup(); gc.collect()
         
-        # 앙상블 모델로 예측 (GPU 메모리 최적화 및 예외 처리)
+        # 예측
         step_start = datetime.now()
-        
-        # 1. 예측 전 GPU 메모리 강제 해제 (FIL 모델 생성 전 메모리 확보)
-        safe_gpu_memory_cleanup()
-        gc.collect()
-        
-        # 2. 앙상블 예측 수행 (MemoryError 발생 시 fold 건너뛰기)
         try:
-            from ml_model_wrapper import EnsembleModelWrapper
-            ensemble_model = EnsembleModelWrapper(chunk_models, scaler, lazy_importances=True)
-            
-            # 검증 데이터에 대해 앙상블 예측
-            pred_proba = ensemble_model.predict_proba(X_val_scaled)
-            
-            # 앙상블 모델 및 청크 모델들 삭제
-            del ensemble_model
-            for cm in chunk_models:
-                del cm
-            del chunk_models
-            safe_gpu_memory_cleanup()
-            gc.collect()
-            
-        except MemoryError as e:
-            # GPU 메모리 부족으로 예측 실패
-            log_error(f"   ❌ GPU 메모리 부족으로 예측 실패: {e}")
-            log_warning(f"   ⚠️ Fold #{fold+1}를 건너뛰고 다음 fold로 진행합니다.")
-            # GPU 메모리 강제 해제
-            if 'chunk_models' in locals():
-                for cm in chunk_models:
-                    del cm
-                del chunk_models
-            if 'X_val_scaled' in locals():
-                del X_val_scaled
-            safe_gpu_memory_cleanup()
-            gc.collect()
-            # 해당 fold는 건너뛰고 다음 fold로 진행
-            continue
-        
-        pred_time = (datetime.now() - step_start).total_seconds()
-        
-        # 예측 결과 추출
-        if isinstance(pred_proba, np.ndarray):
-            if len(pred_proba.shape) == 2 and pred_proba.shape[1] > 1:
-                y_pred_proba = pred_proba[:, 1]
-            else:
-                y_pred_proba = pred_proba.flatten()
-        else:
-            y_pred_proba = pred_proba
-        
-        # 3. 예측 결과 및 검증 데이터 삭제
-        del X_val_scaled, pred_proba
-        safe_gpu_memory_cleanup()
-        gc.collect()
+            pred_proba_cudf = model.predict_proba(X_val_scaled)
+            y_pred_proba = pred_proba_cudf.iloc[:, 1]
+            pred_time = (datetime.now() - step_start).total_seconds()
+        except Exception as e:
+            log_error(f"   ❌ Fold #{fold+1} 예측 실패: {e}")
+            del model, X_val_scaled, y_val
+            safe_gpu_memory_cleanup(); gc.collect()
+            continue # 다음 fold로 진행
 
         # ROC-AUC 점수 계산
         score = roc_auc_score(y_val, y_pred_proba)
-
         fold_scores.append(score)
         
-        # y_pred_proba 즉시 삭제 (ROC-AUC 계산 완료 후 불필요, 메모리 최적화)
-        del y_pred_proba
-        safe_gpu_memory_cleanup()
-        gc.collect()
+        # 사용 완료된 객체 정리
+        del scaler, model, X_val_scaled, y_val, y_pred_proba, pred_proba_cudf
+        safe_gpu_memory_cleanup(); gc.collect()
 
         fold_duration = (datetime.now() - fold_start_time).total_seconds()
-        
-        # Fold 완료 로그 (한 줄로 통합)
-        preprocessing_time = scaler_fit_time + train_scale_time + val_scale_time
         log_info(f"   ✅ Fold #{fold+1}/3 | Score: {score:.4f} | 총: {fold_duration:.1f}초 "
-                f"(전처리: {preprocessing_time:.1f}초, 학습: {fit_time:.1f}초, 예측: {pred_time:.1f}초, 청크: {n_chunks}개)")
+                 f"(전처리: {preprocessing_time:.1f}초, 학습: {fit_time:.1f}초, 예측: {pred_time:.1f}초)")
 
-        # Pruning 체크: 각 fold 후 중간 점수를 보고 나쁜 trial 조기 종료
+        # Pruning 체크
         trial.report(score, step=fold)
         if trial.should_prune():
             trial_duration = (datetime.now() - trial_start_time).total_seconds()
             log_info(f"   ⏹️ Trial #{trial.number} 조기 종료 (Pruning) | 총 소요시간: {trial_duration/60:.1f}분 ({trial_duration:.1f}초)")
             log_info(f"{'='*60}")
-            # Pruning 시 캐시 데이터는 유지 (다른 Trial에서 사용)
-            # GPU 메모리 정리 후 종료
-            safe_gpu_memory_cleanup()
-            gc.collect()
+            safe_gpu_memory_cleanup(); gc.collect()
             raise optuna.TrialPruned()
-
-        # 4. Fold 정리 (모든 변수 삭제)
-        # X_train_all, X_val, X_val_scaled, pred_proba, chunk_models, y_pred_proba는 이미 위에서 삭제됨
-        del scaler, y_val
-        safe_gpu_memory_cleanup()
-        gc.collect()
 
     if not fold_scores:
         log_error("모든 Fold에서 학습에 실패했습니다. Trial을 중단합니다.")
@@ -785,448 +677,321 @@ def objective(trial, fold_data_cache, features, imputation_values, max_depth_lis
 
     return mean_score
 
-def train_final_ensemble_model(fold_data_cache, features, imputation_values, best_params, rng, optimization_results=None, training_config=None):
+def train_final_ensemble_model(fold_data_cache, features, imputation_values, best_params, rng, optimization_results=None, training_config=None, data_path=None):
     """
     전체 데이터를 사용하여 최종 단일 모델을 훈련하고 저장합니다.
-    
-    fold_data_cache: 모든 Fold의 데이터 캐시 (main 함수에서 미리 로드)
+    (메모리 최적화 버전: 모델을 순차적으로 학습/예측하여 GPU 메모리 사용량 최소화)
     """
     log_info("\n--- 🚂 최적 파라미터로 최종 단일 모델 훈련 시작 ---")
     
     try:
-        # 캐시된 데이터로 전체 데이터 구성
-        log_info("   📊 전체 데이터 구성 중...")
+        # 1. 원본 데이터 로드 (fold_cache 파일에서 직접 로드하여 데이터 누실 방지)
+        log_info("   [DATA] 원본 데이터 로드 중 (fold_cache 파일에서)...")
         compose_start = datetime.now()
-        X_all_list = []
-        y_all_list = []
         
-        for fold in range(len(fold_data_cache)):
-            X_train, y_train, X_val, y_val = fold_data_cache[fold]
-            if X_train is None or X_val is None:
-                log_warning(f"   ⚠️ Fold #{fold+1} 데이터가 없습니다. 건너뜁니다.")
-                continue
-            # 모든 Fold의 훈련 데이터와 검증 데이터를 합침
-            X_all_list.append(X_train)
-            X_all_list.append(X_val)
-            y_all_list.append(y_train)
-            y_all_list.append(y_val)
+        # fold_cache 디렉토리 경로 계산
+        if data_path is None:
+            # data_path가 제공되지 않은 경우, fold_data_cache에서 추론 불가능하므로 에러
+            raise ValueError("data_path가 제공되지 않았습니다. fold_cache 파일을 로드할 수 없습니다.")
         
-        # cuDF concat으로 전체 데이터 합치기
-        X_all = cudf.concat(X_all_list, ignore_index=True)
-        y_all = cudf.concat(y_all_list, ignore_index=True)
-        del X_all_list, y_all_list
-        gc.collect()
-        compose_time = (datetime.now() - compose_start).total_seconds()
-        log_info(f"   ✅ 전체 데이터 구성 완료: {len(X_all):,}행 ({compose_time:.1f}초)")
+        fold_cache_dir = os.path.join(os.path.dirname(os.path.expanduser(data_path)), "fold_cache")
+        fold_cache_path = os.path.join(fold_cache_dir, "fold_0_data.joblib")
         
-        # fold_data_cache의 원본 데이터 참조 해제 (X_all 생성 완료 후 더 이상 불필요, 메모리 최적화)
-        # 주의: fold_data_cache는 함수 파라미터이므로 내용만 삭제하고 딕셔너리 구조는 유지
-        for fold_key in list(fold_data_cache.keys()):
-            fold_data = fold_data_cache[fold_key]
-            if fold_data:
-                X_train, y_train, X_val, y_val = fold_data
-                del X_train, y_train, X_val, y_val
-                fold_data_cache[fold_key] = None
-        safe_gpu_memory_cleanup()
-        gc.collect()
+        if not os.path.exists(fold_cache_path):
+            raise FileNotFoundError(f"fold_cache 파일을 찾을 수 없습니다: {fold_cache_path}")
         
-        final_scaler = cuStandardScaler()
+        # 원본 데이터 로드 (샘플링 전 데이터)
+        fold_data = joblib.load(fold_cache_path)
+        X_train_original, y_train_original, X_val_original, y_val_original = fold_data
         
-        # 전체 데이터로 스케일러를 fit
-        step_start = datetime.now()
-        final_scaler.fit(X_all)
-        scaler_fit_time = (datetime.now() - step_start).total_seconds()
+        if X_train_original is None or X_val_original is None:
+            raise ValueError("fold_cache 파일의 데이터가 유효하지 않습니다.")
+        
+        log_info(f"   [OK] 원본 데이터 로드 완료: Train {len(X_train_original):,}행, Val {len(X_val_original):,}행")
+        
+        # 원본 train + 원본 val 합치기 (전체 데이터 복원)
+        X_all = cudf.concat([X_train_original, X_val_original], ignore_index=True)
+        y_all = cudf.concat([y_train_original, y_val_original], ignore_index=True)
+        
+        # 원본 데이터 메모리 해제
+        del X_train_original, y_train_original, X_val_original, y_val_original, fold_data
+        safe_gpu_memory_cleanup(); gc.collect()
+        
+        # 원본 데이터 클래스 분포 확인
+        y_all_pandas = y_all.to_pandas()
+        value_counts_original = y_all_pandas.value_counts()
+        minority_class_label = value_counts_original.idxmin()
+        majority_class_label = value_counts_original.idxmax()
+        n_minority_original = value_counts_original[minority_class_label]
+        n_majority_original = value_counts_original[majority_class_label]
+        minority_class_name = "상승" if minority_class_label == 1 else "하락"
+        majority_class_name = "상승" if majority_class_label == 1 else "하락"
+        
+        log_info(f"   [OK] 전체 데이터 구성 완료: {len(X_all):,}행 ({(datetime.now() - compose_start).total_seconds():.1f}초)")
+        log_info(f"   [DATA] 원본 데이터 클래스 분포:")
+        log_info(f"      - 소수 클래스 ({minority_class_label}, {minority_class_name}): {n_minority_original:,}개")
+        log_info(f"      - 다수 클래스 ({majority_class_label}, {majority_class_name}): {n_majority_original:,}개")
+        
+        del y_all_pandas
 
-        # 스케일링
+        # 2. 전체 데이터 언더샘플링 적용 (클래스 불균형 해결)
+        log_info("   [SAMPLING] 전체 데이터 언더샘플링 진행 중...")
+        sampling_start = datetime.now()
+        
+        if n_majority_original > n_minority_original:
+            # cuDF에서 직접 boolean 인덱싱으로 위치 인덱스 추출
+            majority_mask = (y_all == majority_class_label).to_pandas().values
+            minority_mask = (y_all == minority_class_label).to_pandas().values
+            
+            # 위치 인덱스 생성 (0부터 시작)
+            all_indices = np.arange(len(y_all))
+            majority_indices = all_indices[majority_mask]
+            minority_indices = all_indices[minority_mask]
+            
+            # 소수 클래스 개수만큼 랜덤 샘플링
+            rng_final = np.random.RandomState(42)  # 최종 학습용 고정 시드
+            sampled_majority_indices = rng_final.choice(majority_indices, size=n_minority_original, replace=False)
+            
+            # 언더샘플링된 인덱스 결합
+            balanced_indices = np.concatenate([minority_indices, sampled_majority_indices])
+            
+            # 셔플 (numpy 배열에서 직접)
+            rng_final.shuffle(balanced_indices)
+            
+            # cuPy 배열로 변환하여 cuDF iloc에 사용
+            balanced_indices_cupy = cp.asarray(balanced_indices)
+            
+            # 언더샘플링된 데이터 생성
+            X_all_resampled = X_all.iloc[balanced_indices_cupy].reset_index(drop=True)
+            y_all_resampled = y_all.iloc[balanced_indices_cupy].reset_index(drop=True)
+            
+            # 결과 확인
+            y_all_resampled_pandas = y_all_resampled.to_pandas()
+            value_counts_resampled = y_all_resampled_pandas.value_counts()
+            n_minority_resampled = value_counts_resampled[minority_class_label]
+            n_majority_resampled = value_counts_resampled[majority_class_label]
+            del y_all_resampled_pandas, majority_mask, minority_mask, all_indices, majority_indices, minority_indices, balanced_indices, balanced_indices_cupy
+            
+            # 원본 데이터 삭제
+            del X_all, y_all
+            safe_gpu_memory_cleanup(); gc.collect()
+            
+            # 샘플링된 데이터로 교체
+            X_all = X_all_resampled
+            y_all = y_all_resampled
+            del X_all_resampled, y_all_resampled
+            
+            log_info(f"   [OK] 언더샘플링 완료: 소수 클래스 {n_minority_original:,}개 → {n_minority_resampled:,}개, 다수 클래스 {n_majority_original:,}개 → {n_majority_resampled:,}개")
+            log_info(f"   [DATA] 샘플링 후 데이터: {len(X_all):,}행 ({(datetime.now() - sampling_start).total_seconds():.1f}초)")
+        else:
+            log_info(f"   ℹ️ 클래스 불균형이 없어 샘플링을 건너뜁니다.")
+            log_info(f"   [DATA] 최종 학습 데이터: {len(X_all):,}행")
+
+        # 3. 전체 데이터 전처리
         step_start = datetime.now()
+        log_info("   [PREPROC] 데이터 스케일링 중...")
+        final_scaler = cuStandardScaler()
+        final_scaler.fit(X_all)
         X_all_scaled = final_scaler.transform(X_all)
-        scale_time = (datetime.now() - step_start).total_seconds()
-        
-        # 원본 데이터 즉시 삭제 (스케일링 완료 후 불필요, 메모리 최적화)
         del X_all
-        safe_gpu_memory_cleanup()
-        gc.collect()
+        safe_gpu_memory_cleanup(); gc.collect()
+        log_info(f"   [OK] 전처리 완료 ({(datetime.now() - step_start).total_seconds():.1f}초)")
+
+        # 4. Teacher 모델 학습/예측 및 Soft Label 생성 (보류)
+        # [보류] Teacher 모델/예측 Soft라벨 방식 보류 => 언더샘플링 방식으로 변경
+        # OOM 방지 및 메모리 효율성을 위해 Teacher 모델 학습/예측 로직은 주석 처리하고,
+        # 바로 언더샘플링 방식으로 최종 모델을 학습합니다.
+        log_info("   [INFO] Teacher 모델/예측 Soft라벨 방식 보류 => 언더샘플링 방식으로 변경")
         
-        log_info(f"   ✅ 전처리 완료 (스케일러 학습: {scaler_fit_time:.1f}초, 스케일링: {scale_time:.1f}초)")
-        
-        # 청크 단위 학습으로 앙상블 모델 생성 (Knowledge Distillation을 위한 teacher 모델)
-        n_chunks = 6
-        chunk_size = len(X_all_scaled) // n_chunks
-        chunk_models = []
-        ensemble_fit_time = 0.0
-        
-        step_start = datetime.now()
-        for chunk_idx in range(n_chunks):
-            # 청크 인덱스 계산 (데이터 정합성 보장)
-            start_idx = chunk_idx * chunk_size
-            if chunk_idx == n_chunks - 1:
-                # 마지막 청크는 나머지 모든 데이터 포함
-                end_idx = len(X_all_scaled)
-            else:
-                end_idx = (chunk_idx + 1) * chunk_size
-            
-            # 청크 데이터 추출 (원본 참조 끊기 위해 .copy() 사용)
-            X_chunk = X_all_scaled.iloc[start_idx:end_idx].copy()
-            y_chunk = y_all.iloc[start_idx:end_idx].copy()
-            
-            # 청크별 모델 학습
-            chunk_model = cuRF(**best_params)
-            chunk_model.fit(X_chunk, y_chunk)
-            chunk_models.append(chunk_model)
-            
-            # 청크 데이터 즉시 삭제 (메모리 최적화)
-            del X_chunk, y_chunk
-            # 모델 학습 후 GPU 메모리 정리 강화
-            safe_gpu_memory_cleanup()
-            gc.collect()
-            safe_gpu_memory_cleanup()  # 이중 정리로 메모리 확보
-        
-        ensemble_fit_time = (datetime.now() - step_start).total_seconds()
-        log_info(f"   ✅ 앙상블 모델 학습 완료 ({ensemble_fit_time:.1f}초, {n_chunks}개 청크)")
-        
-        # y_all 삭제 (앙상블 모델 학습 완료 후 더 이상 불필요, 예측 단계에서 사용 안 함)
-        del y_all
-        safe_gpu_memory_cleanup()
-        gc.collect()
-        
-        # Knowledge Distillation: 앙상블 모델의 예측을 soft label로 사용하여 단일 모델 학습
-        from ml_model_wrapper import EnsembleModelWrapper
-        ensemble_model = EnsembleModelWrapper(chunk_models, final_scaler, lazy_importances=True)
-        
-        # 앙상블 모델로 전체 데이터에 대해 청크 단위 예측 (soft label 생성, 메모리 최적화)
-        log_info("   📊 앙상블 모델로 soft label 생성 중...")
-        step_start = datetime.now()
-        
-        # 예측 전 GPU 메모리 정리
-        safe_gpu_memory_cleanup()
-        gc.collect()
-        try:
-            cp.get_default_memory_pool().free_all_blocks()
-        except Exception:
-            pass
-        safe_gpu_memory_cleanup()
-        gc.collect()
-        
-        # 청크 단위 예측 (메모리 최적화: 누적 합산 방식 사용)
-        n_pred_chunks = 60  # 예측용 청크 수 (메모리 사용량 감소, 30 → 60으로 증가)
-        pred_chunk_size = len(X_all_scaled) // n_pred_chunks
-        soft_labels = None  # 누적 합산 방식으로 변경 (리스트 대신)
-        total_samples = 0  # 총 샘플 수 추적
-        
-        try:
-            for pred_chunk_idx in range(n_pred_chunks):
-                # 청크 인덱스 계산 (데이터 정합성 보장)
-                pred_start_idx = pred_chunk_idx * pred_chunk_size
-                if pred_chunk_idx == n_pred_chunks - 1:
-                    # 마지막 청크는 나머지 모든 데이터 포함
-                    pred_end_idx = len(X_all_scaled)
-                else:
-                    pred_end_idx = (pred_chunk_idx + 1) * pred_chunk_size
-                
-                # 청크 데이터 추출 (원본 참조 끊기 위해 .copy() 사용)
-                X_pred_chunk = X_all_scaled.iloc[pred_start_idx:pred_end_idx].copy()
-                
-                # 예측 전 GPU 메모리 정리 (각 청크마다)
-                safe_gpu_memory_cleanup()
-                gc.collect()
-                try:
-                    cp.get_default_memory_pool().free_all_blocks()
-                except Exception:
-                    pass
-                safe_gpu_memory_cleanup()
-                gc.collect()
-                
-                # 청크별 앙상블 예측 (MemoryError 발생 시 처리)
-                try:
-                    chunk_soft_labels = ensemble_model.predict_proba(X_pred_chunk)
-                except (MemoryError, RuntimeError) as e:
-                    error_msg = str(e)
-                    if "out_of_memory" in error_msg or "MemoryError" in error_msg or "cudaErrorMemoryAllocation" in error_msg:
-                        log_error(f"   ❌ GPU 메모리 부족으로 청크 #{pred_chunk_idx+1} 예측 실패: {e}")
-                        # 메모리 정리 강화 (FIL 내부 버퍼 포함)
-                        safe_gpu_memory_cleanup()
-                        gc.collect()
-                        try:
-                            cp.get_default_memory_pool().free_all_blocks()
-                        except Exception:
-                            pass
-                        safe_gpu_memory_cleanup()
-                        gc.collect()
-                        # 재시도
-                        try:
-                            chunk_soft_labels = ensemble_model.predict_proba(X_pred_chunk)
-                        except Exception as retry_e:
-                            log_error(f"   ❌ 재시도도 실패: {retry_e}")
-                            # 재시도 실패 시 해당 청크는 건너뛰고 NaN으로 채움
-                            chunk_size_actual = pred_end_idx - pred_start_idx
-                            chunk_soft_labels = np.full(chunk_size_actual, 0.5, dtype=np.float32)  # 중립값으로 채움
-                            log_warning(f"   ⚠️ 청크 #{pred_chunk_idx+1}는 중립값(0.5)으로 대체됩니다.")
-                    else:
-                        # MemoryError가 아닌 다른 예외는 그대로 전파
-                        raise
-                
-                # 예측 결과 처리 (양성 클래스 확률 추출)
-                if isinstance(chunk_soft_labels, np.ndarray):
-                    if len(chunk_soft_labels.shape) == 2 and chunk_soft_labels.shape[1] > 1:
-                        chunk_soft_labels = chunk_soft_labels[:, 1]  # 양성 클래스 확률
-                    else:
-                        chunk_soft_labels = chunk_soft_labels.flatten()
-                
-                # 누적 합산 방식으로 변경 (메모리 누적 방지)
-                chunk_size_actual = len(chunk_soft_labels)
-                if soft_labels is None:
-                    # 첫 번째 청크: 직접 할당
-                    soft_labels = chunk_soft_labels.copy()
-                    total_samples = chunk_size_actual
-                else:
-                    # 이후 청크: 누적 합산 (순서 보장)
-                    soft_labels = np.concatenate([soft_labels, chunk_soft_labels])
-                    total_samples += chunk_size_actual
-                
-                # 청크 데이터 및 중간 결과 즉시 삭제 (메모리 최적화)
-                del X_pred_chunk, chunk_soft_labels
-                
-                # 각 청크 예측 후 GPU 메모리 정리 강화 (FIL 내부 버퍼 포함)
-                safe_gpu_memory_cleanup()
-                gc.collect()
-                try:
-                    cp.get_default_memory_pool().free_all_blocks()
-                except Exception:
-                    pass
-                try:
-                    import cuml
-                    if hasattr(cuml, 'utils') and hasattr(cuml.utils, 'memory_utils'):
-                        if hasattr(cuml.utils.memory_utils, 'rts'):
-                            cuml.utils.memory_utils.rts.cuda_free_memory()
-                except (AttributeError, ImportError):
-                    pass
-                safe_gpu_memory_cleanup()
-                gc.collect()
-            
-            # 모든 청크 결과 확인
-            if soft_labels is None or total_samples == 0:
-                raise RuntimeError("soft label 생성 실패: 모든 청크 예측 실패")
-            
-            # 최종 결과 확인 (데이터 정합성 검증)
-            if len(soft_labels) != len(X_all_scaled):
-                log_warning(f"   ⚠️ soft label 길이 불일치: {len(soft_labels)} != {len(X_all_scaled)}")
-                # 길이 맞추기 (부족한 경우 중립값으로 채움)
-                if len(soft_labels) < len(X_all_scaled):
-                    missing = len(X_all_scaled) - len(soft_labels)
-                    soft_labels = np.concatenate([soft_labels, np.full(missing, 0.5, dtype=np.float32)])
-                else:
-                    soft_labels = soft_labels[:len(X_all_scaled)]
-            
-            safe_gpu_memory_cleanup()
-            gc.collect()
-            
-        except Exception as e:
-            # 예외 발생 시 메모리 정리 강화
-            if 'soft_labels' in locals():
-                del soft_labels
-            if 'X_pred_chunk' in locals():
-                del X_pred_chunk
-            if 'chunk_soft_labels' in locals():
-                del chunk_soft_labels
-            # 예외 발생 시 더 적극적인 메모리 정리
-            safe_gpu_memory_cleanup()
-            gc.collect()
-            try:
-                cp.get_default_memory_pool().free_all_blocks()
-            except Exception:
-                pass
-            try:
-                import cuml
-                if hasattr(cuml, 'utils') and hasattr(cuml.utils, 'memory_utils'):
-                    if hasattr(cuml.utils.memory_utils, 'rts'):
-                        cuml.utils.memory_utils.rts.cuda_free_memory()
-            except (AttributeError, ImportError):
-                pass
-            safe_gpu_memory_cleanup()
-            gc.collect()
-            log_error(f"   ❌ soft label 생성 중 오류 발생: {e}")
-            raise
-        
-        # soft label을 이진 클래스로 변환 (0.6 기준)
-        y_soft = (soft_labels >= 0.6).astype(np.int32)
-        y_soft_cudf = cudf.Series(y_soft)
-        
-        # soft_labels 즉시 삭제 (y_soft_cudf 생성 완료 후 불필요)
-        del soft_labels, y_soft
-        safe_gpu_memory_cleanup()
-        gc.collect()
-        
-        # 앙상블 모델 및 청크 모델들 삭제 (메모리 최적화)
-        del ensemble_model
-        for cm in chunk_models:
-            del cm
-        del chunk_models
-        # 모델 삭제 후 GPU 메모리 정리 강화
-        safe_gpu_memory_cleanup()
-        gc.collect()
-        try:
-            cp.get_default_memory_pool().free_all_blocks()
-        except Exception:
-            pass
-        safe_gpu_memory_cleanup()
-        gc.collect()
-        
-        soft_label_time = (datetime.now() - step_start).total_seconds()
-        
-        # 단일 모델 학습 (soft label 사용)
+        # ===== 주석 처리된 Teacher 모델 학습/예측 로직 (보류) =====
+        # soft_label_start = datetime.now()
+        # 
+        # n_chunks = 6
+        # chunk_size = len(X_all_scaled) // n_chunks
+        # # CPU에 예측 확률 누적 (메모리 최적화)
+        # accumulated_probas = np.zeros(len(X_all_scaled), dtype=np.float32)
+        # ensemble_fit_time = 0.0
+        # 
+        # for chunk_idx in range(n_chunks):
+        #     log_info(f"\n   --- Teacher 모델 {chunk_idx + 1}/{n_chunks} 학습 및 예측 ---")
+        #     
+        #     # --- 가. Teacher 모델 학습 ---
+        #     fit_start = datetime.now()
+        #     start_idx = chunk_idx * chunk_size
+        #     end_idx = len(X_all_scaled) if chunk_idx == n_chunks - 1 else (chunk_idx + 1) * chunk_size
+        #     
+        #     X_chunk = X_all_scaled.iloc[start_idx:end_idx]
+        #     y_chunk = y_all.iloc[start_idx:end_idx]
+        # 
+        #     chunk_model = cuRF(**best_params)
+        #     chunk_model.fit(X_chunk, y_chunk)
+        #     del X_chunk, y_chunk
+        #     safe_gpu_memory_cleanup(); gc.collect()
+        #     
+        #     fit_duration = (datetime.now() - fit_start).total_seconds()
+        #     ensemble_fit_time += fit_duration
+        #     log_info(f"      [OK] 모델 학습 완료 ({fit_duration:.1f}초)")
+        # 
+        #     # --- 나. 전체 데이터에 대한 예측 (배치 처리) ---
+        #     predict_start = datetime.now()
+        #     log_info("      [PRED] 전체 데이터셋에 대한 예측 진행 중...")
+        #     
+        #     # 예측을 위한 배치 크기 설정 (GPU 메모리 상황에 맞게 조절)
+        #     pred_batch_size = 500000 
+        #     num_batches = (len(X_all_scaled) + pred_batch_size - 1) // pred_batch_size
+        #     
+        #     probas_for_model = np.zeros(len(X_all_scaled), dtype=np.float32)
+        # 
+        #     for i in range(num_batches):
+        #         batch_start_idx = i * pred_batch_size
+        #         batch_end_idx = min((i + 1) * pred_batch_size, len(X_all_scaled))
+        #         
+        #         X_batch = X_all_scaled.iloc[batch_start_idx:batch_end_idx]
+        #         
+        #         try:
+        #             # predict_proba는 cudf.DataFrame [class_0_prob, class_1_prob] 반환
+        #             batch_probas = chunk_model.predict_proba(X_batch)
+        #             # to_numpy()로 CPU로 바로 가져옴
+        #             probas_for_model[batch_start_idx:batch_end_idx] = batch_probas.iloc[:, 1].to_numpy()
+        #         except Exception as e:
+        #             log_error(f"      [FAIL] 배치 {i+1}/{num_batches} 예측 실패: {e}")
+        #             # 실패 시 중립값(0.5)으로 채워넣기
+        #             probas_for_model[batch_start_idx:batch_end_idx] = 0.5
+        #         finally:
+        #             del X_batch, batch_probas
+        #             safe_gpu_memory_cleanup()
+        #     
+        #     # 현재 모델의 예측 확률을 누적
+        #     accumulated_probas += probas_for_model
+        #     
+        #     predict_duration = (datetime.now() - predict_start).total_seconds()
+        #     log_info(f"      [OK] 예측 완료 ({predict_duration:.1f}초)")
+        # 
+        #     # --- 다. Teacher 모델 및 관련 객체 즉시 삭제 ---
+        #     del chunk_model, probas_for_model
+        #     log_info("      [CLEAN] Teacher 모델 메모리 해제 완료")
+        #     safe_gpu_memory_cleanup(); gc.collect()
+        # 
+        # # --- 라. Soft Label 계산 완료 및 메모리 정리 ---
+        # # Soft Label은 이제 최종 모델 학습에 직접 사용되지 않으므로 계산 없이 바로 삭제합니다.
+        # del accumulated_probas
+        # safe_gpu_memory_cleanup(); gc.collect()
+        # log_info(f"\n   [OK] 참고용 Soft Label 계산 로직 완료. 이제 OOM 방지 및 클래스 균형을 위해 언더샘플링을 진행합니다. (총 소요시간: {(datetime.now() - soft_label_start).total_seconds():.1f}초)")
+        # ===== 주석 처리 완료 =====
+
+        # 5. 최종 단일 모델 학습 (언더샘플링된 전체 데이터 사용)
+        log_info("   [TRAIN] 최종 단일 모델 학습 시작...")
         step_start = datetime.now()
         final_model = cuRF(**best_params)
-        final_model.fit(X_all_scaled, y_soft_cudf)
+        # 이미 샘플링된 데이터로 최종 모델 학습
+        final_model.fit(X_all_scaled, y_all)
         fit_time = (datetime.now() - step_start).total_seconds()
         
-        # soft label 삭제 (y_all은 이미 예측 전에 삭제됨)
-        del y_soft_cudf
-        safe_gpu_memory_cleanup()
-        gc.collect()
+        log_info(f"   [OK] 최종 모델 학습 완료 (학습 시간: {fit_time:.1f}초)")
         
-        log_info(f"   ✅ 모델 학습 완료 (앙상블: {ensemble_fit_time:.1f}초, soft label: {soft_label_time:.1f}초, 단일 모델: {fit_time:.1f}초)")
-        
-        # SHAP 계산 전 GPU 메모리 정리 (대용량 메모리 사용 전 정리)
-        safe_gpu_memory_cleanup()
-        gc.collect()
-        
-        # SHAP를 사용한 피처 중요도 계산 (단일 모델용)
+        # 6. SHAP를 사용한 피처 중요도 계산
         feature_importances = None
         if SHAP_AVAILABLE:
+            log_info("   [SHAP] 피처 중요도 계산 중...")
+            shap_start = datetime.now()
+            X_sample_cudf = None
             try:
-                log_info("   📊 SHAP 피처 중요도 계산 중...")
-                shap_start = datetime.now()
-                
-                # 샘플 데이터 선택 (메모리 절약을 위해 최대 1000개 또는 전체의 10%)
+                # 샘플링된 데이터의 일부를 사용
                 sample_size = min(1000, max(100, len(X_all_scaled) // 10))
-                if sample_size < len(X_all_scaled):
-                    # 랜덤 샘플링
-                    sample_indices = np.random.choice(len(X_all_scaled), sample_size, replace=False)
-                    X_sample_cudf = X_all_scaled.iloc[sample_indices]
-                else:
-                    X_sample_cudf = X_all_scaled
+                sample_indices = cp.random.choice(len(X_all_scaled), sample_size, replace=False)
+                X_sample_cudf = X_all_scaled.iloc[sample_indices.get()]
                 
-                # cuDF를 pandas로 변환 (SHAP는 CPU 데이터 필요)
-                X_sample_pd = X_sample_cudf.to_pandas()
-                
-                # cuML 모델의 예측 함수 래핑 (SHAP 호환)
-                def model_predict_wrapper(X):
-                    """cuML 모델 예측 함수 래퍼 (SHAP 호환)"""
-                    X_cudf = cudf.from_pandas(pd.DataFrame(X, columns=features))
+                # SHAP는 numpy 배열을 선호
+                X_sample_np = X_sample_cudf.to_numpy()
+
+                def model_predict_proba_wrapper(X_np):
+                    X_cudf = cudf.DataFrame(X_np, columns=features)
                     try:
-                        proba = final_model.predict_proba(X_cudf)
-                        if isinstance(proba, cudf.DataFrame):
-                            return proba.iloc[:, 1].to_pandas().values
-                        elif hasattr(proba, 'iloc'):
-                            return proba.iloc[:, 1].values
-                        else:
-                            return proba[:, 1]
+                        probas = final_model.predict_proba(X_cudf)
+                        return probas.iloc[:, 1].to_numpy()
                     finally:
                         del X_cudf
-                
-                # SHAP KernelExplainer 사용
-                background_size = min(50, len(X_sample_pd))
-                background_indices = np.random.choice(len(X_sample_pd), background_size, replace=False)
-                X_background = X_sample_pd.iloc[background_indices].values
-                
-                explainer = shap.KernelExplainer(model_predict_wrapper, X_background)
-                shap_values = explainer.shap_values(X_sample_pd.values, nsamples=100)
-                
-                if isinstance(shap_values, list):
-                    shap_values = shap_values[1]
+
+                explainer = shap.KernelExplainer(model_predict_proba_wrapper, shap.sample(X_sample_np, 50))
+                shap_values = explainer.shap_values(X_sample_np, nsamples=100)
                 
                 mean_abs_shap = np.abs(shap_values).mean(axis=0)
-                feature_importances = list(zip(features, mean_abs_shap))
-                feature_importances.sort(key=lambda x: x[1], reverse=True)
+                feature_importances = sorted(zip(features, mean_abs_shap), key=lambda x: x[1], reverse=True)
                 
-                shap_time = (datetime.now() - shap_start).total_seconds()
-                log_info(f"   ✅ SHAP 피처 중요도 계산 완료 ({shap_time:.1f}초)")
-                
-                # 중간 객체 메모리 해제
-                del X_sample_cudf, X_sample_pd, X_background, shap_values, mean_abs_shap, explainer
-                safe_gpu_memory_cleanup()
-                gc.collect()
+                log_info(f"   [OK] SHAP 계산 완료 ({(datetime.now() - shap_start).total_seconds():.1f}초)")
+                del X_sample_np, explainer, shap_values, mean_abs_shap
                 
             except Exception as e:
-                # SHAP 계산 실패는 경고만 출력 (학습은 계속 진행)
-                log_warning(f"   ⚠️ SHAP 피처 중요도 계산 실패: {type(e).__name__}: {str(e)}")
-                feature_importances = None
+                log_warning(f"   [WARN] SHAP 피처 중요도 계산 실패: {e}")
+            finally:
+                if X_sample_cudf is not None:
+                    del X_sample_cudf
+                safe_gpu_memory_cleanup(); gc.collect()
         else:
-            log_warning("   ⚠️ SHAP 라이브러리가 없어 피처 중요도를 계산할 수 없습니다.")
-            feature_importances = None
+            log_warning("   [WARN] SHAP 라이브러리가 없어 피처 중요도를 계산할 수 없습니다.")
 
-        # 전체 데이터 메모리 해제 (SHAP 계산 완료 후)
-        del X_all_scaled
-        safe_gpu_memory_cleanup()
-        gc.collect()
-        
-        if final_model is None:
-            log_error("   최종 모델 훈련에 실패했습니다.")
-            return
+        # 7. 최종 모델 저장
+        if final_model:
+            log_info("   [SAVE] 최종 단일 모델 및 전처리기 저장 중...")
+            model_path = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
+            metadata_path = str(path_manager.data_dir / 'cuml_ensemble_model_metadata.joblib')
+            
+            # 최종 training_config 구성 (n_final_models 추가)
+            final_training_config = {**(training_config or {}), 'n_final_models': 1}
+            
+            # 모델 파일 저장
+            joblib.dump({
+                'model': final_model,
+                'features': features,
+                'scaler': final_scaler,
+                'imputation_values': imputation_values,
+                'best_params': best_params,
+                'model_type': 'single_model',
+                'optimization_results': optimization_results or {},
+                'training_config': final_training_config,
+                'feature_importances': feature_importances
+            }, model_path, compress=3)
+            log_info(f"   [OK] 최종 모델 저장 완료: {model_path}")
+            
+            # 메타데이터 파일 저장 (웹페이지에서 빠른 로드를 위해)
+            try:
+                parameter_explanations = {
+                    'n_estimators': 'RandomForest가 만들 트리의 개수',
+                    'max_depth': '각 트리의 최대 깊이 (과적합 방지)',
+                    'min_samples_split': '노드 분할에 필요한 최소 샘플 수',
+                    'min_samples_leaf': '리프 노드의 최소 샘플 수',
+                    'max_samples': '각 트리가 사용할 샘플 비율',
+                    'max_features': '각 분할에서 사용할 최대 피처 비율',
+                    'split_criterion': '분할 기준 (0: Gini, 1: Entropy)'
+                }
+                
+                metadata_to_save = {
+                    'features': features,
+                    'best_params': best_params,
+                    'model_type': 'single_model',
+                    'optimization_results': optimization_results or {},
+                    'training_config': final_training_config,
+                    'feature_importances': feature_importances,
+                    'parameter_explanations': parameter_explanations
+                }
+                
+                joblib.dump(metadata_to_save, metadata_path, compress=3)
+                log_info(f"   [OK] 메타데이터 파일 저장 완료: {metadata_path}")
+            except Exception as e:
+                log_warning(f"   [WARN] 메타데이터 파일 저장 실패 (선택사항): {e}")
+        else:
+            log_error("   [FAIL] 최종 모델이 생성되지 않아 저장할 수 없습니다.")
 
-        log_info("   💾 최종 단일 모델 및 전처리기 저장 중...")
-        model_path = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
-        metadata_path = str(path_manager.data_dir / 'cuml_ensemble_model_metadata.joblib')
-        
-        # training_config에 모델 개수 저장 (단일 모델)
-        if training_config:
-            training_config['n_final_models'] = 1
-        else:
-            training_config = {'n_final_models': 1}
-        
-        # 피처 중요도 저장 전 확인
-        if feature_importances is None:
-            log_warning("   ⚠️ 피처 중요도가 None입니다. 모델 파일과 메타데이터에 저장되지 않습니다.")
-        else:
-            log_info(f"   💾 피처 중요도 저장 준비: {len(feature_importances)}개 피처")
-        
-        # 전체 모델 파일 저장 (예측에 사용)
-        joblib.dump({
-            'model': final_model,  # 단일 모델 저장
-            'features': features,
-            'scaler': final_scaler,
-            'imputation_values': imputation_values,
-            'best_params': best_params,
-            'model_type': 'single_model',  # 단일 모델 타입
-            'optimization_results': optimization_results or {},
-            'training_config': training_config or {},
-            'feature_importances': feature_importances  # SHAP 값으로 계산된 피처 중요도
-        }, model_path, compress=3)
-        
-        # 메타데이터 파일 저장 (모델 분석 페이지용, 메모리 최적화)
-        # 모델 객체는 저장하지 않고 정보만 저장
-        joblib.dump({
-            'features': features,
-            'best_params': best_params,
-            'model_type': 'single_model',
-            'optimization_results': optimization_results or {},
-            'training_config': training_config or {},
-            'feature_importances': feature_importances,  # SHAP 값으로 계산된 피처 중요도 (메타데이터에도 저장)
-            'parameter_explanations': {
-                'n_estimators': 'RandomForest가 만들 트리의 개수',
-                'max_depth': '각 트리의 최대 깊이 (과적합 방지)',
-                'min_samples_split': '노드 분할에 필요한 최소 샘플 수',
-                'min_samples_leaf': '리프 노드의 최소 샘플 수',
-                'max_samples': '각 트리가 사용할 샘플 비율',
-                'split_criterion': '분할 기준 (0: Gini, 1: Entropy)'
-            }
-        }, metadata_path, compress=3)
-        
-        log_info(f"   ✅ 최종 단일 모델이 '{model_path}' 경로에 저장되었습니다.")
-        log_info(f"   ✅ 모델 메타데이터가 '{metadata_path}' 경로에 저장되었습니다 (메모리 최적화).")
-        if feature_importances:
-            log_info(f"   ✅ 피처 중요도가 모델 파일과 메타데이터에 저장되었습니다 ({len(feature_importances)}개 피처).")
-        else:
-            log_warning("   ⚠️ 피처 중요도가 저장되지 않았습니다. SHAP 계산이 실패했거나 SHAP 라이브러리가 설치되지 않았을 수 있습니다.")
-    
     except Exception as e:
-        log_critical("최종 모델 훈련 또는 저장 중 오류 발생", exception=e)
-        log_warning("   최종 모델을 저장하지 못했습니다.")
+        log_critical("최종 모델 훈련 또는 저장 중 심각한 오류 발생", exception=e)
     finally:
-        # 함수 내에서 생성된 모든 변수 정리
+        # 모든 주요 변수 정리
         if 'final_model' in locals(): del final_model
         if 'final_scaler' in locals(): del final_scaler
+        if 'X_all_scaled' in locals(): del X_all_scaled
+        if 'y_all' in locals(): del y_all
         safe_gpu_memory_cleanup(); gc.collect()
+
 
 
 # --- 메인 실행 로직 ---
@@ -1459,6 +1224,86 @@ def main():
         log_critical("Fold 데이터 로딩에 실패했습니다. 프로그램을 종료합니다.")
         sys.exit(1)
 
+    # --- Trial 전 언더샘플링 적용 (모든 fold의 train 데이터에 적용) ---
+    log_info(f"\n--- 🔄 Trial 전 언더샘플링 적용 중 ---")
+    step_start = datetime.now()
+    
+    for fold in range(len(fold_data_cache)):
+        X_train, y_train, X_val, y_val = fold_data_cache[fold]
+        
+        # 클래스 분포 확인
+        y_train_pandas = y_train.to_pandas()
+        value_counts = y_train_pandas.value_counts()
+        
+        if len(value_counts) < 2:
+            log_warning(f"   ⚠️ Fold #{fold+1}에 클래스가 1개만 있어 샘플링을 건너뜁니다.")
+            continue
+        
+        minority_class_label = value_counts.idxmin()
+        majority_class_label = value_counts.idxmax()
+        n_minority = value_counts[minority_class_label]
+        n_majority = value_counts[majority_class_label]
+        
+        # 클래스 레이블을 의미있는 문자열로 변환
+        minority_class_name = "상승" if minority_class_label == 1 else "하락"
+        majority_class_name = "상승" if majority_class_label == 1 else "하락"
+        
+        log_info(f"   Fold #{fold+1}/3 클래스 분포:")
+        log_info(f"      - 소수 클래스 ({minority_class_label}, {minority_class_name}) 샘플 수: {n_minority:,}개")
+        log_info(f"      - 다수 클래스 ({majority_class_label}, {majority_class_name}) 샘플 수: {n_majority:,}개")
+        
+        # 언더샘플링: 다수 클래스를 소수 클래스 개수만큼만 남김
+        if n_majority > n_minority:
+            # cuDF에서 직접 boolean 인덱싱으로 위치 인덱스 추출
+            # cuDF Series는 위치 기반 인덱싱을 사용하므로, boolean mask로 필터링 후 인덱스 추출
+            majority_mask = (y_train == majority_class_label).to_pandas().values
+            minority_mask = (y_train == minority_class_label).to_pandas().values
+            
+            # 위치 인덱스 생성 (0부터 시작)
+            all_indices = np.arange(len(y_train))
+            majority_indices = all_indices[majority_mask]
+            minority_indices = all_indices[minority_mask]
+            
+            # 소수 클래스 개수만큼 랜덤 샘플링
+            rng = np.random.RandomState(42 + fold)  # fold별로 다른 시드 사용
+            sampled_majority_indices = rng.choice(majority_indices, size=n_minority, replace=False)
+            
+            # 언더샘플링된 인덱스 결합
+            balanced_indices = np.concatenate([minority_indices, sampled_majority_indices])
+            
+            # 셔플 (numpy 배열에서 직접)
+            rng.shuffle(balanced_indices)
+            
+            # cuPy 배열로 변환하여 cuDF iloc에 사용
+            balanced_indices_cupy = cp.asarray(balanced_indices)
+            
+            # 언더샘플링된 데이터 생성
+            X_train_resampled = X_train.iloc[balanced_indices_cupy].reset_index(drop=True)
+            y_train_resampled = y_train.iloc[balanced_indices_cupy].reset_index(drop=True)
+            
+            # 결과 확인 (삭제 전에 확인)
+            y_train_resampled_pandas = y_train_resampled.to_pandas()
+            value_counts_resampled = y_train_resampled_pandas.value_counts()
+            n_minority_resampled = value_counts_resampled[minority_class_label]
+            n_majority_resampled = value_counts_resampled[majority_class_label]
+            del y_train_resampled_pandas
+            
+            # fold_data_cache 업데이트 (검증 데이터는 그대로 유지)
+            fold_data_cache[fold] = (X_train_resampled, y_train_resampled, X_val, y_val)
+            
+            # 원본 데이터 삭제
+            del X_train, y_train, balanced_indices, balanced_indices_cupy
+            safe_gpu_memory_cleanup(); gc.collect()
+            
+            log_info(f"      ✅ 언더샘플링 완료: 소수 클래스 {n_minority:,}개 → {n_minority_resampled:,}개, 다수 클래스 {n_majority:,}개 → {n_majority_resampled:,}개")
+        else:
+            log_info(f"      ℹ️ 클래스 불균형이 없어 샘플링을 건너뜁니다.")
+    
+    log_info(f"   ✅ Trial 전 언더샘플링 완료: 총 {len(fold_data_cache)}개 Fold | 소요시간: {(datetime.now() - step_start).total_seconds():.1f}초")
+    
+    # 주의: 샘플링된 데이터는 메모리에서만 사용하고, fold_cache 파일은 원본 데이터로 유지합니다.
+    # 다음 실행 시 원본 데이터를 로드하여 일관성 있는 샘플링을 보장합니다.
+
     log_info(f"\n--- 🤖 Optuna 하이퍼파라미터 최적화 시작 (n_trials={args.n_iter}) ---")
 
     try:
@@ -1488,7 +1333,11 @@ def main():
         'scoring': 'roc_auc',
         'search_method': 'Optuna (TPE Sampler)',
         'n_streams': 1,
-        'n_mini_batches': 1  # Optuna trial에서 단일 모델 사용
+        'n_mini_batches': 1,  # Optuna trial에서 단일 모델 사용
+        # 모델 목표 정보 (메타데이터)
+        'target_days': 10,  # 거래일 기준
+        'target_percentage': 8,  # 퍼센트
+        'target_description': '10거래일 사이 한번이라도 8% 상승이 있었는지 확인'
     }
 
     # --- 4. 최종 모델 훈련 및 저장 (캐시 데이터 재사용) ---
@@ -1496,7 +1345,7 @@ def main():
         best_params = study.best_params
         best_params['random_state'] = 42
         best_params['n_streams'] = 1  # GPU 병렬 처리 개선 (속도 향상)
-        train_final_ensemble_model(fold_data_cache, features, imputation_values, best_params, rng, optimization_results, training_config)
+        train_final_ensemble_model(fold_data_cache, features, imputation_values, best_params, rng, optimization_results, training_config, data_path)
     except Exception as e:
         log_critical("최종 모델 훈련 또는 저장 중 오류 발생", exception=e)
     finally:

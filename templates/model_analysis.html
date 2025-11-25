@@ -175,7 +175,15 @@
             <h6 class="card-title">
               <i class="fas fa-bullseye text-success me-2"></i>모델 목표
             </h6>
-            <p class="card-text">15영업일 후 주가가 5% 이상 상승할 확률 예측</p>
+            <p class="card-text">
+              {% if model_info.training_config and model_info.training_config.target_description %}
+                {{ model_info.training_config.target_description }}
+              {% elif model_info.training_config and model_info.training_config.target_days and model_info.training_config.target_percentage %}
+                {{ model_info.training_config.target_days }}거래일 사이 한번이라도 {{ model_info.training_config.target_percentage }}% 상승이 있었는지 확인
+              {% else %}
+                <span class="text-muted">정보 없음</span>
+              {% endif %}
+            </p>
           </div>
         </div>
       </div>

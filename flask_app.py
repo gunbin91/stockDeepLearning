@@ -431,6 +431,12 @@ def model_analysis():
             try:
                 model_data = joblib.load(metadata_path)
                 log_info("메타데이터 파일에서 모델 정보 로드 (메모리 최적화)")
+                # 디버깅: 메타데이터 파일 내용 확인
+                log_info(f"메타데이터 파일 키: {list(model_data.keys())}")
+                if 'training_config' in model_data:
+                    log_info(f"training_config 키: {list(model_data['training_config'].keys())}")
+                if 'optimization_results' in model_data:
+                    log_info(f"optimization_results 키: {list(model_data['optimization_results'].keys())}")
             except Exception as e:
                 log_warning(f"메타데이터 파일 로드 실패: {e}. 모델 파일에서 로드합니다.")
                 # 메타데이터 로드 실패 시 모델 파일에서 로드 (기존 방식)
@@ -479,6 +485,7 @@ def model_analysis():
                             'min_samples_split': '노드 분할에 필요한 최소 샘플 수',
                             'min_samples_leaf': '리프 노드의 최소 샘플 수',
                             'max_samples': '각 트리가 사용할 샘플 비율',
+                            'max_features': '각 분할에서 사용할 최대 피처 비율',
                             'split_criterion': '분할 기준 (0: Gini, 1: Entropy)'
                         }
                     }
@@ -591,6 +598,14 @@ def model_analysis():
             if 'max_depth_candidates' not in training_config:
                 training_config['max_depth_candidates'] = []
             
+            # 모델 목표 정보 기본값 설정 (하위 호환성)
+            if 'target_days' not in training_config:
+                training_config['target_days'] = 10  # 기본값: 10거래일
+            if 'target_percentage' not in training_config:
+                training_config['target_percentage'] = 8  # 기본값: 8%
+            if 'target_description' not in training_config:
+                training_config['target_description'] = f"{training_config.get('target_days', 10)}거래일 사이 한번이라도 {training_config.get('target_percentage', 8)}% 상승이 있었는지 확인"
+            
             # 모델 정보 (메모리 최적화: 모델 객체 생성 없이 필요한 정보만 저장)
             model_info = {
                 'model_type': model_type_str,
@@ -622,6 +637,14 @@ def model_analysis():
             if not best_params and optimization_results:
                 best_params = optimization_results.get('best_params', {})
             
+            # 모델 목표 정보 기본값 설정 (하위 호환성)
+            if 'target_days' not in training_config:
+                training_config['target_days'] = 10  # 기본값: 10거래일
+            if 'target_percentage' not in training_config:
+                training_config['target_percentage'] = 8  # 기본값: 8%
+            if 'target_description' not in training_config:
+                training_config['target_description'] = f"{training_config.get('target_days', 10)}거래일 사이 한번이라도 {training_config.get('target_percentage', 8)}% 상승이 있었는지 확인"
+            
             del model_data
             gc.collect()
             
@@ -646,6 +669,14 @@ def model_analysis():
             training_config = model_data.get('training_config', {})
             optimization_results = model_data.get('optimization_results', {})
             parameter_explanations = model_data.get('parameter_explanations', {})
+            
+            # 모델 목표 정보 기본값 설정 (하위 호환성)
+            if 'target_days' not in training_config:
+                training_config['target_days'] = 10  # 기본값: 10거래일
+            if 'target_percentage' not in training_config:
+                training_config['target_percentage'] = 8  # 기본값: 8%
+            if 'target_description' not in training_config:
+                training_config['target_description'] = f"{training_config.get('target_days', 10)}거래일 사이 한번이라도 {training_config.get('target_percentage', 8)}% 상승이 있었는지 확인"
             
             # model_data에서 필요한 정보 추출 후 즉시 삭제
             del model_data

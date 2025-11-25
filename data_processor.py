@@ -553,8 +553,12 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         df['52주_최고가'] = df['종가'].rolling(250).max()
         df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
         
-        # target 변수 생성
-        df['target'] = (df['종가'].shift(-15) / df['종가'] > 1.05).astype(int)
+        # target 변수 생성 (10일 사이 한번이라도 8% 상승이 있었는지 확인)
+        # 10일 후부터 역방향으로 10일 윈도우의 최대값 계산
+        max_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).max()
+        df['target'] = (max_price_10d / df['종가'] > 1.08).astype(int)
+        # 중간 변수 삭제 (메모리 최적화)
+        del max_price_10d
         df['종목코드'] = ticker
         
         # 데이터 구조 설정
@@ -575,8 +579,14 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
 
 
 
-def _fetch_and_prepare_data(start_date, end_date):
-    """실시간 데이터 수집 및 전처리"""
+def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
+    """실시간 데이터 수집 및 전처리
+    
+    Args:
+        start_date: 시작 날짜
+        end_date: 종료 날짜
+        skip_factor_scores: True일 경우 팩터 점수 계산을 건너뜀 (학습용 데이터 생성 시 사용)
+    """
     log_info(f"실시간 데이터 수집 시작 ({start_date} ~ {end_date})...")
     
     stock_list = fetch_stock_list()
@@ -750,8 +760,13 @@ def _fetch_and_prepare_data(start_date, end_date):
     
     raw_feature_df.sort_values(by=['date', '종목코드'], inplace=True)
 
-    log_info("일별 팩터 점수 계산 중...")
-    final_df = raw_feature_df.groupby('date', group_keys=False).apply(calculate_factor_scores).reset_index(drop=True)
+    # 팩터 점수 계산 (백테스팅/분석용, 학습용 데이터 생성 시에는 불필요)
+    if skip_factor_scores:
+        log_info("   ℹ️ 학습용 데이터 생성: 팩터 점수 계산을 건너뜁니다.")
+        final_df = raw_feature_df.copy()
+    else:
+        log_info("일별 팩터 점수 계산 중...")
+        final_df = raw_feature_df.groupby('date', group_keys=False).apply(calculate_factor_scores).reset_index(drop=True)
     
     # 최종 데이터 검증
     if final_df.empty:
@@ -777,8 +792,14 @@ def _fetch_and_prepare_data(start_date, end_date):
     
     return final_df
 
-def get_preprocessed_data(start_date, end_date):
-    """실시간 데이터 전처리 함수"""
+def get_preprocessed_data(start_date, end_date, skip_factor_scores=False):
+    """실시간 데이터 전처리 함수
+    
+    Args:
+        start_date: 시작 날짜
+        end_date: 종료 날짜
+        skip_factor_scores: True일 경우 팩터 점수 계산을 건너뜀 (학습용 데이터 생성 시 사용)
+    """
     try:
         log_info("🔄 실시간 데이터 수집 시작", context={
             "start_date": start_date,
@@ -786,7 +807,7 @@ def get_preprocessed_data(start_date, end_date):
             "mode": "realtime"
         })
         
-        return _fetch_and_prepare_data(start_date, end_date)
+        return _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=skip_factor_scores)
         
     except Exception as e:
         log_critical("실시간 데이터 수집 중 오류", exception=e, context={
