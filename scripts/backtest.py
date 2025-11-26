@@ -277,7 +277,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                             current_price = data.loc[(prev_date, ticker), '종가']
                             # NaN 체크
                             if not pd.isna(current_price):
-                            break
+                                break
                             else:
                                 current_price = None
                     
@@ -287,7 +287,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                 
                 # 가격과 주식 수가 유효한 경우에만 계산
                 if current_price is not None and not pd.isna(current_price) and info['shares'] > 0:
-                current_portfolio_value += current_price * info['shares']
+                    current_portfolio_value += current_price * info['shares']
             
             # 총자산 계산: 현금 + 포트폴리오 가치
             total_asset = cash + current_portfolio_value
@@ -332,11 +332,42 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
     log_info("백테스팅 정합성 검증 시작")
     validation_errors = []
     
-    # 1. 초기 자본 검증
+    # 1. 초기 자본 검증 (첫 거래일의 수수료를 고려)
     if len(portfolio_ts) > 0:
         first_asset = portfolio_ts.iloc[0]
-        if abs(first_asset - initial_capital) > 0.01:
-            validation_errors.append(f"초기 자본 불일치: 예상 {initial_capital:,.0f}원, 실제 {first_asset:,.0f}원")
+        first_date = portfolio_ts.index[0]
+        
+        # 첫 거래일의 거래 로그 확인하여 수수료 계산
+        first_date_trades = [t for t in trade_log if t.get('trade_date') == first_date]
+        first_date_buy_trades = [t for t in first_date_trades if t.get('type') == 'buy']
+        
+        # 첫 거래일에 발생한 수수료 계산
+        # buy_amount = actual_buy_price * shares (수수료 포함)
+        # buy_price = 실제 주가 (수수료 미포함)
+        # 수수료 = (actual_buy_price - buy_price) * shares = buy_amount - (buy_price * shares)
+        estimated_fee = 0.0
+        if first_date_buy_trades:
+            for trade in first_date_buy_trades:
+                buy_amount = trade.get('buy_amount', 0)
+                buy_price = trade.get('buy_price', 0)
+                shares = trade.get('shares', 0)
+                if buy_amount > 0 and buy_price > 0 and shares > 0:
+                    # 수수료 = buy_amount - (buy_price * shares)
+                    trade_fee = buy_amount - (buy_price * shares)
+                    estimated_fee += trade_fee
+        
+        # 예상 첫 자산 = 초기 자본 - 첫 거래일 수수료
+        # (포트폴리오 가치는 매수가 기준이므로 수수료 차감 후 현금 + 포트폴리오 가치)
+        expected_first_asset = initial_capital - estimated_fee
+        
+        # 허용 오차: 수수료 계산의 부동소수점 오차 및 반올림 오차 고려 (1% 또는 최소 100원)
+        tolerance = max(estimated_fee * 0.01, 100.0) if estimated_fee > 0 else 100.0
+        
+        if abs(first_asset - expected_first_asset) > tolerance:
+            validation_errors.append(
+                f"초기 자본 불일치: 예상 {expected_first_asset:,.0f}원 (초기자본 {initial_capital:,.0f}원 - 수수료 {estimated_fee:,.0f}원), "
+                f"실제 {first_asset:,.0f}원 (차이: {abs(first_asset - expected_first_asset):,.0f}원)"
+            )
     
     # 2. 거래 로그 정합성 검증 (trade_log_df 생성 전에 임시로 생성)
     trade_log_df_temp = pd.DataFrame(trade_log) if trade_log else pd.DataFrame()
@@ -440,9 +471,9 @@ def create_json_report(results, output_path=None):
     
     # KOSPI 데이터 가져오기 (비교용 누적 수익률)
     try:
-    kospi = fdr.DataReader('KS11', start=results["portfolio_history"].index.min(), end=results["portfolio_history"].index.max())
-    kospi_cumulative = (1 + kospi['Close'].pct_change().fillna(0)).cumprod()
-
+        kospi = fdr.DataReader('KS11', start=results["portfolio_history"].index.min(), end=results["portfolio_history"].index.max())
+        kospi_cumulative = (1 + kospi['Close'].pct_change().fillna(0)).cumprod()
+        
         # KOSPI 초기값 기준으로 정규화 (포트폴리오와 비교 가능하도록)
         initial_capital = float(results.get('initial_capital', 0))
         kospi_values = [float(v * initial_capital) for v in kospi_cumulative.values]
