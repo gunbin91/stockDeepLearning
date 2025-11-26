@@ -790,13 +790,23 @@ $(document).ready(function() {
     }
     
     function loadBacktestReport() {
+        const container = $('#backtest_report');
+        // 로딩 아이콘 표시
+        container.html(`
+            <div class="text-center py-5">
+                <i class="fas fa-spinner fa-spin fa-3x text-primary mb-3"></i>
+                <div class="h5 text-muted">백테스팅 리포트를 불러오는 중...</div>
+                <div class="text-muted small">JSON 데이터를 분석하고 있습니다.</div>
+            </div>
+        `);
+        
         // JSON 리포트 로드
         $.get('/api/backtest_report')
             .done(function(data) {
                 renderBacktestReport(data);
             })
             .fail(function() {
-                $('#backtest_report').html('<div class="alert alert-danger">리포트를 로드할 수 없습니다.</div>');
+                container.html('<div class="alert alert-danger">리포트를 로드할 수 없습니다.</div>');
             });
     }
     
@@ -942,6 +952,7 @@ $(document).ready(function() {
                                                 <th>실현손익</th>
                                                 <th>누적 실현손익</th>
                                                 <th>매수금액</th>
+                                                <th>시가총액</th>
                                                 <th>총자산</th>
                                                 <th>최종점수</th>
                                                 <th>상승확률</th>
@@ -950,6 +961,20 @@ $(document).ready(function() {
                                         </thead>
                                         <tbody>
             `;
+            
+            // 시가총액 포맷팅 함수
+            function formatMarketCap(value) {
+                if (value === null || value === undefined || isNaN(value)) return 'N/A';
+                if (value >= 1000000000000) {
+                    return (value / 1000000000000).toFixed(2) + '조';
+                } else if (value >= 100000000) {
+                    return (value / 100000000).toFixed(2) + '억';
+                } else if (value >= 10000) {
+                    return (value / 10000).toFixed(2) + '만';
+                } else {
+                    return formatCurrency(value);
+                }
+            }
             
             data.trade_log.forEach(function(trade) {
                 const returnClass = trade.return !== null && trade.return !== undefined ? (trade.return >= 0 ? 'text-danger' : 'text-primary') : '';
@@ -971,6 +996,7 @@ $(document).ready(function() {
                         <td class="text-end ${profitClass} fw-bold">${trade.profit !== null && trade.profit !== undefined ? formatCurrency(trade.profit) : 'N/A'}</td>
                         <td class="text-end ${cumulativeProfitClass} fw-bold">${trade.cumulative_profit !== null && trade.cumulative_profit !== undefined ? formatCurrency(trade.cumulative_profit) : 'N/A'}</td>
                         <td class="text-end">${trade.buy_amount !== null && trade.buy_amount !== undefined ? formatCurrency(trade.buy_amount) : 'N/A'}</td>
+                        <td class="text-end">${trade.buy_market_cap !== null && trade.buy_market_cap !== undefined ? formatMarketCap(trade.buy_market_cap) : 'N/A'}</td>
                         <td class="text-end">${trade.total_asset !== null && trade.total_asset !== undefined ? formatCurrency(trade.total_asset) : 'N/A'}</td>
                         <td class="text-end">${trade.final_score !== null && trade.final_score !== undefined ? trade.final_score.toFixed(2) : 'N/A'}</td>
                         <td class="text-end">${trade.ml_pred_proba !== null && trade.ml_pred_proba !== undefined ? (trade.ml_pred_proba * 100).toFixed(2) + '%' : 'N/A'}</td>
@@ -1018,7 +1044,29 @@ $(document).ready(function() {
                         }
                     },
                     scrollX: true,
-                    responsive: true
+                    scrollCollapse: true,
+                    responsive: false,  // scrollX와 함께 사용 시 responsive는 false
+                    autoWidth: false,
+                    columnDefs: [
+                        { width: "100px", targets: 0 },  // 거래일
+                        { width: "80px", targets: 1 },   // 구분
+                        { width: "120px", targets: 2 }, // 종목명
+                        { width: "100px", targets: 3 },  // 종목코드
+                        { width: "100px", targets: 4 },  // 매수일
+                        { width: "100px", targets: 5 },  // 매도일
+                        { width: "80px", targets: 6 },   // 보유기간
+                        { width: "100px", targets: 7 },  // 매수가
+                        { width: "100px", targets: 8 },  // 매도가
+                        { width: "100px", targets: 9 },  // 수익률
+                        { width: "120px", targets: 10 }, // 실현손익
+                        { width: "120px", targets: 11 }, // 누적 실현손익
+                        { width: "120px", targets: 12 }, // 매수금액
+                        { width: "120px", targets: 13 }, // 시가총액
+                        { width: "120px", targets: 14 }, // 총자산
+                        { width: "100px", targets: 15 }, // 최종점수
+                        { width: "100px", targets: 16 }, // 상승확률
+                        { width: "100px", targets: 17 }  // 변동성
+                    ]
                 });
             }
         }
