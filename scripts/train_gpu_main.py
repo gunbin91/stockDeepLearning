@@ -427,6 +427,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
 
     # 기존 CPU 버전과 동일하게, 검증된 핵심 피처 목록을 하드코딩
     # 제거된 피처: PBR, USDKRW_pct_1d, KOSPI_pct_1d, 이익수익률, 수익률(3M), 수익률(1M), ATRr_14
+    # 추가된 피처: KOSPI_변동성(1W), KOSPI_변동성(1M), KOSPI_변동성(3M), KOSPI_disparity_120, KOSPI_disparity_240
     features = [
         'log_mktcap', 'BPS',
         '52주_신고가_비율',
@@ -435,7 +436,9 @@ def prepare_data_and_save(data_path, start_date, end_date):
         'disparity_120', 'disparity_240',
         '거래대금_MA5', '거래대금_MA20', 'OBV',
         'KOSPI_pct_5d', 'USDKRW_pct_5d',
-        'VIX_pct_1d', 'VIX_pct_5d'
+        'VIX_pct_1d', 'VIX_pct_5d',
+        'KOSPI_변동성(1W)', 'KOSPI_변동성(1M)', 'KOSPI_변동성(3M)',
+        'KOSPI_disparity_120', 'KOSPI_disparity_240'
     ]
 
     try:
@@ -465,6 +468,17 @@ def prepare_data_and_save(data_path, start_date, end_date):
 
         # imputation_values 계산 (전체 데이터 기준)
         log_info("   📊 결측치 대체값(중앙값) 계산 중...")
+        
+        # features 리스트에 있는 피처가 데이터에 있는지 검증
+        missing_features_for_imputation = [f for f in features if f not in full_df.columns]
+        if missing_features_for_imputation:
+            error_msg = f"❌ 심각한 오류: imputation_values 계산 시 필요한 피처가 데이터에 없습니다: {missing_features_for_imputation}"
+            log_critical(error_msg)
+            log_critical(f"   사용 가능한 컬럼: {list(full_df.columns)[:30]}")
+            log_critical(f"   기대하는 features ({len(features)}개): {features}")
+            log_critical(f"   누락된 피처 ({len(missing_features_for_imputation)}개): {missing_features_for_imputation}")
+            raise ValueError(error_msg)
+        
         numeric_features_df = full_df[features].select_dtypes(include=np.number)
         imputation_values = numeric_features_df.median().to_dict()
         log_info(f"   ✅ 결측치 대체값 계산 완료 ({len(features)}개 피처)")
@@ -485,45 +499,100 @@ def prepare_data_and_save(data_path, start_date, end_date):
 
         log_info(f"   📂 총 {len(tickers)}개 종목의 데이터를 전처리하여 개별 파일로 저장합니다...")
 
+        saved_count = 0
+        failed_count = 0
+        failed_tickers = []
+
         for i, ticker in enumerate(tickers):
+            try:
+                ticker_df = full_df[full_df['종목코드'] == ticker].copy()
 
-            ticker_df = full_df[full_df['종목코드'] == ticker].copy()
+                if ticker_df.empty:
+                    log_warning(f"   ⚠️ 종목 {ticker}의 데이터가 비어있습니다. 건너뜁니다.")
+                    failed_count += 1
+                    failed_tickers.append(ticker)
+                    continue
 
-            # 전처리: 모든 피처 저장 (학습 시 features 리스트로 필터링)
-            # 숫자형 피처만 선택 (target 제외)
-            numeric_cols = ticker_df.select_dtypes(include=[np.number]).columns.tolist()
-            if 'target' in numeric_cols:
-                numeric_cols.remove('target')
-            
-            # 모든 숫자형 피처 저장 (features 리스트에 없는 피처도 포함)
-            X_all = ticker_df[numeric_cols].astype(np.float32)
-            y = ticker_df['target'].astype(np.int32)
-            
-            # imputation_values는 features에 있는 피처만 적용
-            features_in_data = [f for f in features if f in X_all.columns]
-            if features_in_data:
-                imputation_dict = {k: v for k, v in imputation_values.items() if k in features_in_data}
-                X_all[features_in_data] = X_all[features_in_data].fillna(imputation_dict)
+                # 전처리: 모든 피처 저장 (학습 시 features 리스트로 필터링)
+                # 숫자형 피처만 선택 (target 제외)
+                numeric_cols = ticker_df.select_dtypes(include=[np.number]).columns.tolist()
+                if 'target' in numeric_cols:
+                    numeric_cols.remove('target')
+                
+                if not numeric_cols:
+                    log_warning(f"   ⚠️ 종목 {ticker}에 숫자형 피처가 없습니다. 건너뜁니다.")
+                    failed_count += 1
+                    failed_tickers.append(ticker)
+                    continue
+                
+                # 모든 숫자형 피처 저장 (features 리스트에 없는 피처도 포함)
+                X_all = ticker_df[numeric_cols].astype(np.float32)
+                
+                if 'target' not in ticker_df.columns:
+                    log_warning(f"   ⚠️ 종목 {ticker}에 target 컬럼이 없습니다. 건너뜁니다.")
+                    failed_count += 1
+                    failed_tickers.append(ticker)
+                    del X_all
+                    continue
+                
+                y = ticker_df['target'].astype(np.int32)
+                
+                # imputation_values는 features에 있는 피처만 적용
+                features_in_data = [f for f in features if f in X_all.columns]
+                if features_in_data:
+                    imputation_dict = {k: v for k, v in imputation_values.items() if k in features_in_data}
+                    X_all[features_in_data] = X_all[features_in_data].fillna(imputation_dict)
 
-            # 모든 피처와 target을 하나의 DataFrame으로 합치기
-            preprocessed_df = X_all.copy()
-            preprocessed_df['target'] = y
+                # 모든 피처와 target을 하나의 DataFrame으로 합치기
+                preprocessed_df = X_all.copy()
+                preprocessed_df['target'] = y
 
-            file_path = os.path.join(data_path, f"{ticker}.feather")
+                file_path = os.path.join(data_path, f"{ticker}.feather")
 
-            # pandas를 사용하여 feather 파일로 저장 (모든 피처 포함)
-            preprocessed_df.to_feather(file_path)
+                # pandas를 사용하여 feather 파일로 저장 (모든 피처 포함)
+                try:
+                    preprocessed_df.to_feather(file_path)
+                    saved_count += 1
+                except Exception as save_error:
+                    log_error(f"   ❌ 종목 {ticker} feather 파일 저장 실패: {save_error}")
+                    failed_count += 1
+                    failed_tickers.append(ticker)
+                    # 저장 실패해도 메모리 정리는 계속 진행
+                
+                # 메모리 정리 (X_all로 수정)
+                del ticker_df, X_all, y, preprocessed_df
 
-            # 메모리 정리
-            del ticker_df, X, y, preprocessed_df
+                if (i + 1) % 200 == 0:
+                    log_info(f"      ... {i+1}/{len(tickers)} 개 종목 저장 완료 (성공: {saved_count}, 실패: {failed_count})")
+                    
+            except Exception as e:
+                log_error(f"   ❌ 종목 {ticker} 처리 중 오류 발생: {e}")
+                log_error(f"   ❌ 오류 상세: {type(e).__name__}: {str(e)}")
+                import traceback
+                log_error(f"   ❌ 스택 트레이스:\n{traceback.format_exc()}")
+                failed_count += 1
+                failed_tickers.append(ticker)
+                # 메모리 정리 시도
+                try:
+                    if 'ticker_df' in locals():
+                        del ticker_df
+                    if 'X_all' in locals():
+                        del X_all
+                    if 'y' in locals():
+                        del y
+                    if 'preprocessed_df' in locals():
+                        del preprocessed_df
+                except:
+                    pass
+                continue
 
-            if (i + 1) % 200 == 0:
+        if failed_count > 0:
+            log_warning(f"   ⚠️ {failed_count}개 종목 저장 실패: {failed_tickers[:10]}{'...' if len(failed_tickers) > 10 else ''}")
+        
+        log_info(f"   ✅ 총 {saved_count}/{len(tickers)}개 종목의 전처리된 데이터 저장이 완료되었습니다.")
 
-                log_info(f"      ... {i+1}/{len(tickers)} 개 종목 저장 완료")
 
 
-
-        log_info(f"   ✅ 총 {len(tickers)}개 종목의 전처리된 데이터 저장이 완료되었습니다.")
 
         
 
@@ -622,10 +691,24 @@ def load_fold_data(file_paths, features, imputation_values):
 
 
         # features와 target만 추출 (이미 전처리 완료된 데이터, 타입 변환 불필요)
+        # 피처 누락 검증
+        missing_features = [f for f in features if f not in df.columns]
+        if missing_features:
+            error_msg = f"❌ 심각한 오류: load_fold_data에서 필요한 피처가 데이터에 없습니다: {missing_features}"
+            log_critical(error_msg)
+            log_critical(f"   사용 가능한 컬럼: {list(df.columns)[:30]}")
+            log_critical(f"   기대하는 features ({len(features)}개): {features}")
+            log_critical(f"   누락된 피처 ({len(missing_features)}개): {missing_features}")
+            raise ValueError(error_msg)
+        
+        # target 컬럼 검증
+        if 'target' not in df.columns:
+            error_msg = "❌ 심각한 오류: load_fold_data에서 'target' 컬럼이 데이터에 없습니다."
+            log_critical(error_msg)
+            log_critical(f"   사용 가능한 컬럼: {list(df.columns)[:30]}")
+            raise ValueError(error_msg)
+        
         X = df[features]
-
-
-
         y = df['target']
 
 
@@ -1415,6 +1498,7 @@ def main():
 
     # 기존 CPU 버전과 동일하게, 검증된 핵심 피처 목록을 하드코딩
     # 제거된 피처: PBR, USDKRW_pct_1d, KOSPI_pct_1d, 이익수익률, 수익률(3M), 수익률(1M), ATRr_14
+    # 추가된 피처: KOSPI_변동성(1W), KOSPI_변동성(1M), KOSPI_변동성(3M), KOSPI_disparity_120, KOSPI_disparity_240
     features = [
         'log_mktcap', 'BPS',
         '52주_신고가_비율',
@@ -1423,7 +1507,9 @@ def main():
         'disparity_120', 'disparity_240',
         '거래대금_MA5', '거래대금_MA20', 'OBV',
         'KOSPI_pct_5d', 'USDKRW_pct_5d',
-        'VIX_pct_1d', 'VIX_pct_5d'
+        'VIX_pct_1d', 'VIX_pct_5d',
+        'KOSPI_변동성(1W)', 'KOSPI_변동성(1M)', 'KOSPI_변동성(3M)',
+        'KOSPI_disparity_120', 'KOSPI_disparity_240'
     ]
     
     # imputation_values 파일 경로 설정 (data_path와 같은 레벨)
@@ -1461,6 +1547,16 @@ def main():
         all_df = pd.concat(all_dfs)
         del all_dfs
         gc.collect()
+        
+        # features 리스트에 있는 피처가 데이터에 있는지 검증
+        missing_features_for_imputation = [f for f in features if f not in all_df.columns]
+        if missing_features_for_imputation:
+            error_msg = f"❌ 심각한 오류: imputation_values 계산 시 필요한 피처가 데이터에 없습니다: {missing_features_for_imputation}"
+            log_critical(error_msg)
+            log_critical(f"   사용 가능한 컬럼: {list(all_df.columns)[:30]}")
+            log_critical(f"   기대하는 features ({len(features)}개): {features}")
+            log_critical(f"   누락된 피처 ({len(missing_features_for_imputation)}개): {missing_features_for_imputation}")
+            raise ValueError(error_msg)
         
         numeric_features_df = all_df[features].select_dtypes(include=np.number)
         imputation_values = numeric_features_df.median().to_dict()

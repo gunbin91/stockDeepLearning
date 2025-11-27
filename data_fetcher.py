@@ -236,6 +236,28 @@ def _fetch_macro_data(start_date, end_date):
             for col in macro_df.columns:
                 macro_df[f'{col}_pct_1d'] = macro_df[col].pct_change(1)
                 macro_df[f'{col}_pct_5d'] = macro_df[col].pct_change(5)
+            
+            # KOSPI 변동성 및 이격도 계산 (종목 데이터와 동일한 방식)
+            if 'KOSPI' in macro_df.columns:
+                kospi_close = macro_df['KOSPI']
+                
+                # 변동성 계산 (종목 데이터와 동일한 방식)
+                # 변동성(1W) = 5일 롤링 표준편차 / 5일 롤링 평균
+                macro_df['KOSPI_변동성(1W)'] = kospi_close.rolling(5).std() / kospi_close.rolling(5).mean()
+                # 변동성(1M) = 20일 롤링 표준편차 / 20일 롤링 평균
+                macro_df['KOSPI_변동성(1M)'] = kospi_close.rolling(20).std() / kospi_close.rolling(20).mean()
+                # 변동성(3M) = 60일 롤링 표준편차 / 60일 롤링 평균
+                macro_df['KOSPI_변동성(3M)'] = kospi_close.rolling(60).std() / kospi_close.rolling(60).mean()
+                
+                # 이격도 계산 (종목 데이터와 동일한 방식)
+                # 이격도 = (현재가 / 이동평균) * 100
+                for period in [120, 240]:
+                    ma = kospi_close.rolling(window=period).mean()
+                    macro_df[f'KOSPI_disparity_{period}'] = (kospi_close / ma) * 100
+            
+            # 인덱스를 date 컬럼으로 변환 (merge_asof를 위해)
+            macro_df.reset_index(inplace=True)
+            macro_df.rename(columns={'index': 'date'}, inplace=True)
             log_info("✅ 거시 경제 지표 수집 완료.")
             return macro_df
         else:
