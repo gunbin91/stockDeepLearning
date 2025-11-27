@@ -1,0 +1,74 @@
+0. 기존 윈도우에 nvidia드라이버 최신버전 업데이트.
+
+1. 마이크로 소프트 스토어에서 ubuntu 설치
+
+2. 아래 명령어로 WSL2 버전으로 업데이트
+wsl --set-default-version 2 
+
+3. ubuntu 실행하여 아래 명령어로 gpu, cuda 정보확인
+nvidia-smi
+
+4. NVIDIA CUDA 다운로드 페이지 접속(https://developer.nvidia.com/cuda-toolkit) 
+
+NVIDIA CUDA Toolkit 다운로드 페이지로 이동하여, Target Platform을 다음과 같이 선택합니다.
+
+Operating System: Linux
+
+Architecture: x86_64
+
+Distribution: WSL-Ubuntu (사용 중인 배포판이 Ubuntu인 경우)
+
+Version: 2.0 (WSL2)
+
+Installer Type: deb(local) 또는 runfile 등 적절한 유형 선택 (보통 **deb(local)**이 권장됨)
+
+=> 순차적으로 명령어 실행
+=> 환경변수 설정
+환경변수파일오픈: nano ~/.bashrc
+
+# 아래내용추가 => CUDA 13.0 환경 변수 설정
+export PATH=/usr/local/cuda-13.0/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda-13.0/lib64:$LD_LIBRARY_PATH
+
+# 환경변수 설정명령
+source ~/.bashrc
+
+# 명령어 확인
+nvcc --version
+
+5. 우분투에 미니콘다(OR 아나콘다) 설치파일 설치
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+
+6. 우분투엥 미니콘다 설치파일 실행
+bash Miniconda3-latest-Linux-x86_64.sh
+
+7. 설치확인
+source ~/.bashrc
+conda list
+
+8. 콘다 가상환경 생성
+conda create -n rapids-env python=3.12
+
+9. 콘다 가상환경 활성화
+conda activate rapids-env
+
+10. RAPIDS 설치
+https://docs.rapids.ai/install/ 공식사이트에서 버전 선택 후 명령어 실행
+
+11. 설치한 rapids 가상환경 확인
+conda activate rapids-25.10
+
+12. 설치확인
+python 실행후
+import  cuml
+
+
+# 참고
+- wsl 우분투 환경 이동/삭제
+https://jooy34.tistory.com/29
+
+- 가상환경 비활성화
+conda deactivate
+
+- 가상환경 리스트
+conda env list

@@ -164,33 +164,146 @@ def log_memory_usage(stage_name, additional_info=None):
 
 
 def safe_gpu_memory_cleanup():
-
-    """안전하게 GPU 메모리를 정리합니다."""
-
+    """안전하게 GPU 메모리를 정리하고 VRAM 파편화를 최소화합니다."""
     try:
-
-        gc.collect()
-
-        # cuPy 메모리 풀 정리
+        # 1. Python GC 강제 실행 (여러 번 실행하여 순환 참조 해제)
+        for _ in range(3):
+            gc.collect()
+        
+        # 2. CUDA 컨텍스트 동기화 (진행 중인 작업 완료 대기)
         try:
-            cp.get_default_memory_pool().free_all_blocks()
+            cuda.synchronize()
         except Exception:
-            # cuPy 메모리 풀 정리 실패 시 무시
+            pass  # Numba 컨텍스트가 없는 경우 무시
+        
+        # 3. cuPy 메모리 풀 완전 정리
+        try:
+            # 기본 메모리 풀 정리
+            cp.get_default_memory_pool().free_all_blocks()
+            # 피니드 메모리 풀도 정리 (있는 경우)
+            if hasattr(cp, 'get_default_pinned_memory_pool'):
+                try:
+                    cp.get_default_pinned_memory_pool().free_all_blocks()
+                except Exception:
+                    pass
+        except Exception:
+            pass  # cuPy 메모리 풀 정리 실패 시 무시
+        
+        # 4. cuDF 내부 캐시 정리 (있는 경우)
+        try:
+            if hasattr(cudf, '_cached_data'):
+                cudf._cached_data.clear()
+        except Exception:
             pass
-
-        # cuML의 메모리 정리 API는 버전에 따라 다를 수 있으므로 안전하게 처리
+        
+        # 5. cuML의 메모리 정리 API (버전에 따라 다를 수 있음)
         try:
             # cuML 24.04+ 버전
             if hasattr(cuml, 'utils') and hasattr(cuml.utils, 'memory_utils'):
                 if hasattr(cuml.utils.memory_utils, 'rts'):
                     cuml.utils.memory_utils.rts.cuda_free_memory()
-        except AttributeError:
-            # API가 없는 경우 무시 (GPU 메모리는 Python GC로도 정리됨)
-            pass
-
+        except (AttributeError, Exception):
+            pass  # API가 없거나 실패 시 무시
+        
+        # 6. 추가 GC 실행 (메모리 정리 후)
+        gc.collect()
+        
     except Exception as e:
-
         log_warning(f"   ⚠️ GPU 메모리 정리 중 오류: {e}")
+
+
+def check_gpu_memory_fragmentation():
+    """
+    GPU 메모리 파편화 정도를 확인합니다.
+    Returns:
+        tuple: (is_fragmented: bool, fragmentation_info: dict)
+    """
+    try:
+        # GPU 메모리 사용량 확인
+        gpu_mem_used = get_memory_usage(gpu=True)
+        
+        # GPU 메모리 총량 확인
+        try:
+            command = "nvidia-smi --query-gpu=memory.total,memory.free --format=csv,noheader,nounits"
+            result = subprocess.check_output(command, shell=True, encoding='utf-8')
+            parts = result.strip().split('\n')[0].split(', ')
+            gpu_total_mb = int(parts[0])
+            gpu_free_mb = int(parts[1])
+        except Exception:
+            return False, {}
+        
+        # 메모리 사용률 계산
+        usage_pct = (gpu_mem_used / gpu_total_mb * 100) if gpu_total_mb > 0 else 0
+        
+        # 파편화 추정: 사용률이 높은데 큰 메모리 할당이 실패할 가능성
+        # 실제로는 테스트 할당을 해봐야 정확하지만, 여기서는 사용률 기반으로 추정
+        is_fragmented = False
+        fragmentation_reason = ""
+        
+        # 사용률이 80% 이상이면 파편화 가능성 높음
+        if usage_pct > 80:
+            is_fragmented = True
+            fragmentation_reason = f"메모리 사용률이 높음 ({usage_pct:.1f}%)"
+        # 사용 가능한 메모리가 적은데 사용률이 높으면 파편화 가능성
+        elif gpu_free_mb < 1000 and usage_pct > 60:
+            is_fragmented = True
+            fragmentation_reason = f"사용 가능 메모리 부족 ({gpu_free_mb}MB) 및 사용률 높음 ({usage_pct:.1f}%)"
+        
+        info = {
+            'total_mb': gpu_total_mb,
+            'used_mb': gpu_mem_used,
+            'free_mb': gpu_free_mb,
+            'usage_pct': usage_pct,
+            'is_fragmented': is_fragmented,
+            'reason': fragmentation_reason
+        }
+        
+        return is_fragmented, info
+        
+    except Exception as e:
+        log_warning(f"   ⚠️ GPU 메모리 파편화 확인 중 오류: {e}")
+        return False, {}
+
+
+def enhanced_gpu_memory_cleanup(force_defrag=False):
+    """
+    향상된 GPU 메모리 정리 함수 (파편화 모니터링 포함)
+    
+    Args:
+        force_defrag: True이면 파편화 확인 후 강제 정리 수행
+    """
+    # 기본 메모리 정리
+    safe_gpu_memory_cleanup()
+    
+    # 파편화 확인
+    if force_defrag:
+        is_fragmented, frag_info = check_gpu_memory_fragmentation()
+        
+        if is_fragmented:
+            log_warning(f"   ⚠️ GPU 메모리 파편화 감지: {frag_info.get('reason', '알 수 없음')}")
+            log_info(f"   💾 메모리 상태: 사용 {frag_info.get('used_mb', 0):.0f}MB / 총 {frag_info.get('total_mb', 0):.0f}MB ({frag_info.get('usage_pct', 0):.1f}%)")
+            
+            # 추가 정리 수행
+            try:
+                # 추가 GC 실행
+                for _ in range(5):
+                    gc.collect()
+                
+                # cuPy 메모리 풀 강제 정리
+                try:
+                    cp.get_default_memory_pool().free_all_blocks()
+                except Exception:
+                    pass
+                
+                # CUDA 동기화
+                try:
+                    cuda.synchronize()
+                except Exception:
+                    pass
+                
+                log_info("   ✅ 추가 메모리 정리 완료")
+            except Exception as e:
+                log_warning(f"   ⚠️ 추가 메모리 정리 중 오류: {e}")
 
 
 def apply_hybrid_sampling(X, y, target_ratio=0.5, random_state=42):
@@ -313,14 +426,15 @@ def prepare_data_and_save(data_path, start_date, end_date):
     log_memory_usage("데이터 전처리 시작")
 
     # 기존 CPU 버전과 동일하게, 검증된 핵심 피처 목록을 하드코딩
+    # 제거된 피처: PBR, USDKRW_pct_1d, KOSPI_pct_1d, 이익수익률, 수익률(3M), 수익률(1M), ATRr_14
     features = [
-        'PBR', 'log_mktcap', '이익수익률', 'BPS',
-        '수익률(1M)', '수익률(3M)', '52주_신고가_비율',
+        'log_mktcap', 'BPS',
+        '52주_신고가_비율',
         'ADX_14',
-        '변동성(1W)', '변동성(1M)', '변동성(3M)', 'ATRr_14', 'BBW_20_2', 'BB_Position',
+        '변동성(1W)', '변동성(1M)', '변동성(3M)', 'BBW_20_2', 'BB_Position',
         'disparity_120', 'disparity_240',
         '거래대금_MA5', '거래대금_MA20', 'OBV',
-        'KOSPI_pct_1d', 'KOSPI_pct_5d', 'USDKRW_pct_1d', 'USDKRW_pct_5d',
+        'KOSPI_pct_5d', 'USDKRW_pct_5d',
         'VIX_pct_1d', 'VIX_pct_5d'
     ]
 
@@ -375,18 +489,29 @@ def prepare_data_and_save(data_path, start_date, end_date):
 
             ticker_df = full_df[full_df['종목코드'] == ticker].copy()
 
-            # 전처리: 피처 선택, 타입 변환, fillna
-            X = ticker_df[features].astype(np.float32)
+            # 전처리: 모든 피처 저장 (학습 시 features 리스트로 필터링)
+            # 숫자형 피처만 선택 (target 제외)
+            numeric_cols = ticker_df.select_dtypes(include=[np.number]).columns.tolist()
+            if 'target' in numeric_cols:
+                numeric_cols.remove('target')
+            
+            # 모든 숫자형 피처 저장 (features 리스트에 없는 피처도 포함)
+            X_all = ticker_df[numeric_cols].astype(np.float32)
             y = ticker_df['target'].astype(np.int32)
-            X = X.fillna(imputation_values)
+            
+            # imputation_values는 features에 있는 피처만 적용
+            features_in_data = [f for f in features if f in X_all.columns]
+            if features_in_data:
+                imputation_dict = {k: v for k, v in imputation_values.items() if k in features_in_data}
+                X_all[features_in_data] = X_all[features_in_data].fillna(imputation_dict)
 
-            # X와 y를 하나의 DataFrame으로 합치기
-            preprocessed_df = X.copy()
+            # 모든 피처와 target을 하나의 DataFrame으로 합치기
+            preprocessed_df = X_all.copy()
             preprocessed_df['target'] = y
 
             file_path = os.path.join(data_path, f"{ticker}.feather")
 
-            # pandas를 사용하여 feather 파일로 저장 (전처리 완료된 데이터)
+            # pandas를 사용하여 feather 파일로 저장 (모든 피처 포함)
             preprocessed_df.to_feather(file_path)
 
             # 메모리 정리
@@ -588,7 +713,7 @@ def objective(trial, fold_data_cache, features, imputation_values, max_depth_lis
         'min_samples_split': trial.suggest_int('min_samples_split', 5, 50),
         'min_samples_leaf': trial.suggest_int('min_samples_leaf', 2, 50),
         'max_samples': trial.suggest_categorical('max_samples', [0.7, 0.8, 0.9, 1.0]),
-        'max_features': trial.suggest_float('max_features', 0.4, 1.0),
+        'max_features': trial.suggest_categorical('max_features', [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
         'split_criterion': trial.suggest_categorical('split_criterion', [0, 1]),
         'random_state': 42,
         'n_streams': 1,
@@ -606,7 +731,8 @@ def objective(trial, fold_data_cache, features, imputation_values, max_depth_lis
         fold_start_time = datetime.now()
         
         if fold > 0:
-            safe_gpu_memory_cleanup(); gc.collect()
+            enhanced_gpu_memory_cleanup(force_defrag=True)
+            gc.collect()
 
         X_train_all, y_train_all, X_val, y_val = fold_data_cache[fold]
         
@@ -622,7 +748,8 @@ def objective(trial, fold_data_cache, features, imputation_values, max_depth_lis
         preprocessing_time = (datetime.now() - step_start).total_seconds()
         
         del X_train_all, X_val
-        safe_gpu_memory_cleanup(); gc.collect()
+        enhanced_gpu_memory_cleanup(force_defrag=False)
+        gc.collect()
 
         # 단일 모델 학습
         step_start = datetime.now()
@@ -631,18 +758,60 @@ def objective(trial, fold_data_cache, features, imputation_values, max_depth_lis
         fit_time = (datetime.now() - step_start).total_seconds()
         
         del X_train_scaled, y_train_all
-        safe_gpu_memory_cleanup(); gc.collect()
+        enhanced_gpu_memory_cleanup(force_defrag=False)
+        gc.collect()
         
-        # 예측
+        # 예측 (VRAM 파편화 방지를 위한 배치 처리)
         step_start = datetime.now()
         try:
-            pred_proba_cudf = model.predict_proba(X_val_scaled)
-            y_pred_proba = pred_proba_cudf.iloc[:, 1]
+            # 예측 전 파편화 확인 및 정리
+            is_fragmented, frag_info = check_gpu_memory_fragmentation()
+            if is_fragmented:
+                log_warning(f"   ⚠️ Fold #{fold+1} 예측 전 파편화 감지: {frag_info.get('reason', '알 수 없음')}")
+                enhanced_gpu_memory_cleanup(force_defrag=True)
+            
+            # 검증 데이터 크기에 따라 배치 처리 여부 결정
+            val_size = len(X_val_scaled)
+            # 큰 데이터셋(100만 행 이상)이면 배치 처리
+            if val_size > 1000000:
+                batch_size = 500000  # 배치 크기
+                num_batches = (val_size + batch_size - 1) // batch_size
+                
+                pred_proba_list = []
+                for batch_idx in range(num_batches):
+                    start_idx = batch_idx * batch_size
+                    end_idx = min((batch_idx + 1) * batch_size, val_size)
+                    X_batch = X_val_scaled.iloc[start_idx:end_idx]
+                    
+                    try:
+                        batch_proba = model.predict_proba(X_batch)
+                        pred_proba_list.append(batch_proba.iloc[:, 1])
+                        del X_batch, batch_proba
+                        # 배치 간 메모리 정리
+                        if batch_idx < num_batches - 1:  # 마지막 배치가 아니면 정리
+                            enhanced_gpu_memory_cleanup(force_defrag=False)
+                    except Exception as e:
+                        log_error(f"   ❌ Fold #{fold+1} 배치 {batch_idx+1}/{num_batches} 예측 실패: {e}")
+                        # 실패한 배치는 중립값(0.5)으로 채움
+                        neutral_proba = cudf.Series([0.5] * (end_idx - start_idx))
+                        pred_proba_list.append(neutral_proba)
+                        del X_batch
+                        enhanced_gpu_memory_cleanup(force_defrag=False)
+                
+                # 배치 결과 합치기
+                y_pred_proba = cudf.concat(pred_proba_list, ignore_index=True)
+                del pred_proba_list
+            else:
+                # 작은 데이터셋은 한 번에 처리
+                pred_proba_cudf = model.predict_proba(X_val_scaled)
+                y_pred_proba = pred_proba_cudf.iloc[:, 1]
+                del pred_proba_cudf
+            
             pred_time = (datetime.now() - step_start).total_seconds()
         except Exception as e:
             log_error(f"   ❌ Fold #{fold+1} 예측 실패: {e}")
             del model, X_val_scaled, y_val
-            safe_gpu_memory_cleanup(); gc.collect()
+            enhanced_gpu_memory_cleanup(force_defrag=True)
             continue # 다음 fold로 진행
 
         # ROC-AUC 점수 계산
@@ -650,8 +819,15 @@ def objective(trial, fold_data_cache, features, imputation_values, max_depth_lis
         fold_scores.append(score)
         
         # 사용 완료된 객체 정리
-        del scaler, model, X_val_scaled, y_val, y_pred_proba, pred_proba_cudf
-        safe_gpu_memory_cleanup(); gc.collect()
+        # 변수 정리 (배치 처리 경로에서는 pred_proba_cudf가 없을 수 있음)
+        del scaler, model, X_val_scaled, y_val, y_pred_proba
+        try:
+            del pred_proba_cudf
+        except NameError:
+            # 배치 처리 경로에서는 pred_proba_cudf가 생성되지 않음
+            pass
+        enhanced_gpu_memory_cleanup(force_defrag=False)
+        gc.collect()
 
         fold_duration = (datetime.now() - fold_start_time).total_seconds()
         log_info(f"   ✅ Fold #{fold+1}/3 | Score: {score:.4f} | 총: {fold_duration:.1f}초 "
@@ -663,7 +839,8 @@ def objective(trial, fold_data_cache, features, imputation_values, max_depth_lis
             trial_duration = (datetime.now() - trial_start_time).total_seconds()
             log_info(f"   ⏹️ Trial #{trial.number} 조기 종료 (Pruning) | 총 소요시간: {trial_duration/60:.1f}분 ({trial_duration:.1f}초)")
             log_info(f"{'='*60}")
-            safe_gpu_memory_cleanup(); gc.collect()
+            enhanced_gpu_memory_cleanup(force_defrag=True)
+            gc.collect()
             raise optuna.TrialPruned()
 
     if not fold_scores:
@@ -714,9 +891,24 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
         X_all = cudf.concat([X_train_original, X_val_original], ignore_index=True)
         y_all = cudf.concat([y_train_original, y_val_original], ignore_index=True)
         
+        # features 리스트에 있는 피처만 선택 (feather 파일에는 모든 피처가 저장되어 있음)
+        missing_features = [f for f in features if f not in X_all.columns]
+        if missing_features:
+            error_msg = f"❌ 심각한 오류: features 리스트에 있는 피처가 데이터에 없습니다: {missing_features}"
+            log_critical(error_msg)
+            log_critical(f"   사용 가능한 컬럼: {list(X_all.columns)[:20]}...")
+            log_critical(f"   기대하는 features: {features}")
+            raise ValueError(error_msg)
+        
+        # features 리스트에 있는 피처만 선택
+        X_all = X_all[features]
+        
+        log_info(f"   ✅ 데이터 피처 선택 완료: {len(features)}개 피처 사용")
+        
         # 원본 데이터 메모리 해제
         del X_train_original, y_train_original, X_val_original, y_val_original, fold_data
-        safe_gpu_memory_cleanup(); gc.collect()
+        enhanced_gpu_memory_cleanup(force_defrag=False)
+        gc.collect()
         
         # 원본 데이터 클래스 분포 확인
         y_all_pandas = y_all.to_pandas()
@@ -775,7 +967,8 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
             
             # 원본 데이터 삭제
             del X_all, y_all
-            safe_gpu_memory_cleanup(); gc.collect()
+            enhanced_gpu_memory_cleanup(force_defrag=True)
+            gc.collect()
             
             # 샘플링된 데이터로 교체
             X_all = X_all_resampled
@@ -795,7 +988,8 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
         final_scaler.fit(X_all)
         X_all_scaled = final_scaler.transform(X_all)
         del X_all
-        safe_gpu_memory_cleanup(); gc.collect()
+        enhanced_gpu_memory_cleanup(force_defrag=True)
+        gc.collect()
         log_info(f"   [OK] 전처리 완료 ({(datetime.now() - step_start).total_seconds():.1f}초)")
 
         # 4. Teacher 모델 학습/예측 및 Soft Label 생성 (보류)
@@ -895,6 +1089,7 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
         permutation_importances = None
         X_sample_cudf = None
         y_sample = None
+        actual_features = None  # 실제 사용된 피처 이름 (SHAP/순열 중요도 계산용)
         
         if SHAP_AVAILABLE:
             log_info("   [SHAP] 피처 중요도 계산 중...")
@@ -907,11 +1102,16 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
                 X_sample_cudf = X_all_scaled.iloc[sample_indices_np]
                 y_sample = y_all.iloc[sample_indices_np]
                 
+                # features 리스트를 직접 사용 (스케일링 후 컬럼 이름이 유지되지 않을 수 있음)
+                # X_all_scaled는 features 순서대로 스케일링되었으므로 features 리스트를 사용
+                actual_features = features
+                
                 # SHAP는 numpy 배열을 선호
                 X_sample_np = X_sample_cudf.to_numpy()
 
                 def model_predict_proba_wrapper(X_np):
-                    X_cudf = cudf.DataFrame(X_np, columns=features)
+                    # features 리스트를 사용하여 DataFrame 생성 (순서 중요)
+                    X_cudf = cudf.DataFrame(X_np, columns=actual_features)
                     try:
                         probas = final_model.predict_proba(X_cudf)
                         return probas.iloc[:, 1].to_numpy()
@@ -922,7 +1122,12 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
                 shap_values = explainer.shap_values(X_sample_np, nsamples=100)
                 
                 mean_abs_shap = np.abs(shap_values).mean(axis=0)
-                feature_importances = sorted(zip(features, mean_abs_shap), key=lambda x: x[1], reverse=True)
+                # features 리스트와 SHAP 값 매칭 (피처 이름 보장)
+                if len(actual_features) == len(mean_abs_shap):
+                    feature_importances = sorted(zip(actual_features, mean_abs_shap), key=lambda x: x[1], reverse=True)
+                else:
+                    log_warning(f"   [WARN] 피처 수 불일치: features={len(actual_features)}, SHAP={len(mean_abs_shap)}")
+                    feature_importances = None
                 
                 log_info(f"   [OK] SHAP 계산 완료 ({(datetime.now() - shap_start).total_seconds():.1f}초)")
                 del X_sample_np, explainer, shap_values, mean_abs_shap
@@ -934,6 +1139,10 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
         
         # 6-1. 순열 중요도 계산 (SHAP 계산 후, 같은 샘플 데이터 사용)
         if X_sample_cudf is not None and y_sample is not None:
+            # features 리스트를 직접 사용 (스케일링 후 컬럼 이름이 유지되지 않을 수 있음)
+            if actual_features is None:
+                actual_features = features
+            
             log_info("   [PERM] 순열 중요도 계산 중...")
             perm_start = datetime.now()
             try:
@@ -972,7 +1181,8 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
                     def predict_proba(self, X):
                         # X가 numpy 배열이면 cuDF DataFrame으로 변환
                         if isinstance(X, np.ndarray):
-                            X_cudf = cudf.DataFrame(X, columns=features)
+                            # actual_features 사용 (클로저에서 가져옴)
+                            X_cudf = cudf.DataFrame(X, columns=actual_features)
                             probas = self.cuml_model.predict_proba(X_cudf)
                             # numpy 배열로 반환
                             return probas.to_pandas().values
@@ -988,7 +1198,8 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
                     def predict(self, X):
                         # X가 numpy 배열이면 cuDF DataFrame으로 변환
                         if isinstance(X, np.ndarray):
-                            X_cudf = cudf.DataFrame(X, columns=features)
+                            # actual_features 사용 (클로저에서 가져옴)
+                            X_cudf = cudf.DataFrame(X, columns=actual_features)
                             preds = self.cuml_model.predict(X_cudf)
                             # numpy 배열로 반환
                             return preds.to_pandas().values if hasattr(preds, 'to_pandas') else np.array(preds)
@@ -1018,7 +1229,12 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
                 
                 # 평균 중요도 추출 및 정렬
                 mean_perm_importance = perm_result.importances_mean
-                permutation_importances = sorted(zip(features, mean_perm_importance), key=lambda x: x[1], reverse=True)
+                # features 리스트와 순열 중요도 매칭 (피처 이름 보장)
+                if len(actual_features) == len(mean_perm_importance):
+                    permutation_importances = sorted(zip(actual_features, mean_perm_importance), key=lambda x: x[1], reverse=True)
+                else:
+                    log_warning(f"   [WARN] 피처 수 불일치: features={len(actual_features)}, 순열 중요도={len(mean_perm_importance)}")
+                    permutation_importances = None
                 
                 log_info(f"   [OK] 순열 중요도 계산 완료 ({(datetime.now() - perm_start).total_seconds():.1f}초)")
                 del X_sample_np, y_sample_np, wrapped_model, perm_result, mean_perm_importance
@@ -1041,6 +1257,24 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
             log_info("   [SAVE] 최종 단일 모델 및 전처리기 저장 중...")
             model_path = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
             metadata_path = str(path_manager.data_dir / 'cuml_ensemble_model_metadata.joblib')
+            
+            # 모델 피처 수 검증 (저장 전 확인)
+            model_expected_features = None
+            try:
+                if hasattr(final_model, 'n_features_in_'):
+                    model_expected_features = final_model.n_features_in_
+                elif hasattr(final_model, 'n_features_'):
+                    model_expected_features = final_model.n_features_
+            except Exception:
+                pass
+            
+            if model_expected_features is not None and model_expected_features != len(features):
+                error_msg = f"❌ 심각한 오류: 모델 내부는 {model_expected_features}개 피처를 기대하지만, 저장하려는 features 리스트는 {len(features)}개입니다. 모델 저장을 중단합니다."
+                log_critical(error_msg)
+                log_critical(f"   저장하려는 features: {features}")
+                raise ValueError(error_msg)
+            
+            log_info(f"   ✅ 모델 피처 수 검증 완료: 모델 내부 {model_expected_features}개, features 리스트 {len(features)}개 (일치)")
             
             # 최종 training_config 구성 (n_final_models 추가)
             final_training_config = {**(training_config or {}), 'n_final_models': 1}
@@ -1098,7 +1332,8 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
         if 'final_scaler' in locals(): del final_scaler
         if 'X_all_scaled' in locals(): del X_all_scaled
         if 'y_all' in locals(): del y_all
-        safe_gpu_memory_cleanup(); gc.collect()
+        enhanced_gpu_memory_cleanup(force_defrag=True)
+        gc.collect()
 
 
 
@@ -1179,14 +1414,15 @@ def main():
     log_info(f"   총 {len(file_paths)}개 종목의 데이터를 학습에 사용합니다.")
 
     # 기존 CPU 버전과 동일하게, 검증된 핵심 피처 목록을 하드코딩
+    # 제거된 피처: PBR, USDKRW_pct_1d, KOSPI_pct_1d, 이익수익률, 수익률(3M), 수익률(1M), ATRr_14
     features = [
-        'PBR', 'log_mktcap', '이익수익률', 'BPS',
-        '수익률(1M)', '수익률(3M)', '52주_신고가_비율',
+        'log_mktcap', 'BPS',
+        '52주_신고가_비율',
         'ADX_14',
-        '변동성(1W)', '변동성(1M)', '변동성(3M)', 'ATRr_14', 'BBW_20_2', 'BB_Position',
+        '변동성(1W)', '변동성(1M)', '변동성(3M)', 'BBW_20_2', 'BB_Position',
         'disparity_120', 'disparity_240',
         '거래대금_MA5', '거래대금_MA20', 'OBV',
-        'KOSPI_pct_1d', 'KOSPI_pct_5d', 'USDKRW_pct_1d', 'USDKRW_pct_5d',
+        'KOSPI_pct_5d', 'USDKRW_pct_5d',
         'VIX_pct_1d', 'VIX_pct_5d'
     ]
     
@@ -1287,13 +1523,24 @@ def main():
                     log_warning(f"   ⚠️ Fold #{fold+1} 캐시 파일 데이터가 유효하지 않습니다. 재로딩합니다.")
                     raise ValueError("Invalid cache data")
                 
+                # features 리스트에 있는 피처가 모두 있는지 확인 (feather 파일에는 모든 피처가 저장되어 있음)
+                missing_features = [f for f in features if f not in X_train.columns]
+                if missing_features:
+                    log_warning(f"   ⚠️ Fold #{fold+1} 캐시 파일에 필요한 피처가 없습니다: {missing_features}. 재로딩합니다.")
+                    raise ValueError(f"Missing features in cache: {missing_features}")
+                
+                # features 리스트에 있는 피처만 선택
+                X_train = X_train[features]
+                X_val = X_val[features]
+                
                 fold_data_cache[fold] = (X_train, y_train, X_val, y_val)
                 log_info(f"   ✅ Fold #{fold+1}/3 캐시 로드 완료: 훈련 {len(X_train):,}행, 검증 {len(X_val):,}행 ({load_time:.1f}초)")
             except Exception as e:
                 log_warning(f"   ⚠️ Fold #{fold+1} 캐시 파일 로드 실패: {e}. 재로딩합니다.")
-                # 캐시 파일이 손상된 경우 삭제 후 재로딩
+                # 캐시 파일이 손상되었거나 피처가 불일치하는 경우 삭제 후 재로딩
                 try:
                     os.remove(fold_cache_path)
+                    log_info(f"   🗑️ Fold #{fold+1} 캐시 파일 삭제 완료 (재생성을 위해)")
                 except:
                     pass
                 fold_data = None
@@ -1401,7 +1648,8 @@ def main():
             
             # 원본 데이터 삭제
             del X_train, y_train, balanced_indices, balanced_indices_cupy
-            safe_gpu_memory_cleanup(); gc.collect()
+            enhanced_gpu_memory_cleanup(force_defrag=False)
+            gc.collect()
             
             log_info(f"      ✅ 언더샘플링 완료: 소수 클래스 {n_minority:,}개 → {n_minority_resampled:,}개, 다수 클래스 {n_majority:,}개 → {n_majority_resampled:,}개")
         else:

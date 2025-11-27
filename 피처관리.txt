@@ -1,0 +1,28 @@
+총 25개 피처:
+log_mktcap
+BPS
+52주_신고가_비율
+ADX_14
+변동성(1W)
+변동성(1M)
+변동성(3M)
+BBW_20_2
+BB_Position
+disparity_120
+disparity_240
+거래대금_MA5
+거래대금_MA20
+OBV
+KOSPI_pct_5d
+USDKRW_pct_5d
+VIX_pct_1d
+VIX_pct_5d
+
+
+PBR (GPU에서 제거됨)
+이익수익률 (GPU에서 제거됨)
+수익률(1M) (GPU에서 제거됨)
+수익률(3M) (GPU에서 제거됨)
+ATRr_14 (GPU에서 제거됨)
+KOSPI_pct_1d (GPU에서 제거됨)
+USDKRW_pct_1d (GPU에서 제거됨)
