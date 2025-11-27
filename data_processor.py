@@ -26,6 +26,17 @@ import os
 import gc
 import locale
 import platform
+import multiprocessing
+
+# WSL2/Linux 환경에서 multiprocessing 최적화
+# fork 방식 사용 (spawn보다 빠르고 메모리 효율적)
+if platform.system() != 'Windows':
+    try:
+        # Linux/WSL2에서는 fork 방식이 기본값이지만 명시적으로 설정
+        multiprocessing.set_start_method('fork', force=False)
+    except RuntimeError:
+        # 이미 설정된 경우 무시
+        pass
 
 # Windows 환경에서 로케일 설정 (FinanceDataReader 내부 오류 방지)
 if platform.system() == 'Windows':
@@ -44,6 +55,41 @@ from logger import log_info, log_critical, log_error, log_warning, log_progress
 # 통일된 경로 사용
 PROJECT_ROOT = str(path_manager.project_root)
 DATA_DIR = str(path_manager.data_dir)
+
+# =================================================================
+# 전역 변수: 피처 계산 시 공유 데이터 (fork 방식에서 Copy-on-Write로 효율적)
+# =================================================================
+# WSL2/Linux에서 fork 방식을 사용할 때, 이 전역 변수들은 각 프로세스에서
+# Copy-on-Write로 공유되어 메모리 효율적이고 빠르게 접근 가능합니다.
+_global_marcap_data = None
+_global_financial_data = None
+
+def set_global_feature_data(marcap_data, financial_data):
+    """
+    전역 피처 데이터 설정 함수
+    
+    ProcessPoolExecutor 사용 전에 메인 프로세스에서 호출하여
+    전역 변수에 데이터를 설정합니다. fork 방식에서는 이 데이터가
+    각 프로세스에 Copy-on-Write로 공유됩니다.
+    
+    Args:
+        marcap_data: 시가총액 데이터 (pandas.DataFrame)
+        financial_data: 재무 데이터 (pandas.DataFrame)
+    """
+    global _global_marcap_data, _global_financial_data
+    _global_marcap_data = marcap_data
+    _global_financial_data = financial_data
+
+def clear_global_feature_data():
+    """
+    전역 피처 데이터 초기화 함수
+    
+    사용 후 메모리 해제를 위해 호출합니다.
+    """
+    global _global_marcap_data, _global_financial_data
+    _global_marcap_data = None
+    _global_financial_data = None
+    gc.collect()
 
 def fetch_stock_list():
     """
@@ -337,28 +383,19 @@ def _fetch_macro_data(start_date, end_date):
         log_error(f"거시경제 데이터 수집 실패: {e}")
         return pd.DataFrame()
 
-def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long, df_financial_long, pbar_lock):
+def fetch_ticker_price_data(stock_info, start_date, end_date):
     """
-    단일 종목 데이터 처리 함수
+    단일 종목 주가 데이터 다운로드 함수 (I/O 작업)
     
-    하나의 종목에 대해 다음 작업을 수행합니다:
-    1. 주가 데이터 수집 (하이브리드 방식: Yahoo → KRX → NAVER)
-    2. 시가총액 데이터 병합
-    3. 재무 데이터 병합
-    4. 기술적 지표 계산 (ATR, OBV, ADX, 볼린저 밴드 등)
-    5. 수익률 및 변동성 계산
-    6. 타겟 변수 생성 (15일 후 5% 상승 여부)
+    ThreadPoolExecutor로 병렬 처리되는 I/O 작업만 수행합니다.
     
     Args:
         stock_info: 종목 정보 (종목코드, 종목명 등)
         start_date: 데이터 수집 시작일
         end_date: 데이터 수집 종료일
-        df_marcap_long: 시가총액 데이터
-        df_financial_long: 재무 데이터
-        pbar_lock: 진행률 표시용 락
         
     Returns:
-        pandas.DataFrame: 처리된 종목 데이터
+        tuple: (ticker, df_price) 또는 (ticker, None) - 실패 시
     """
     ticker = stock_info['종목코드']
     try:
@@ -368,7 +405,6 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         # 1단계: Yahoo Finance (가장 빠르고 안정적)
         # 2단계: KRX (한국 거래소 공식 데이터)
         # 3단계: NAVER (최후의 수단)
-        # 이렇게 하는 이유: 일부 종목은 특정 데이터 소스에서만 제공되기 때문
         df_price = None
         try:
             # 1차 시도: Yahoo Finance (가장 빠름)
@@ -387,19 +423,51 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         # 데이터 품질 검증: 충분한 데이터가 있는지 확인
         # 251일(1년) + 60일(추가 버퍼) = 311일 이상의 데이터 필요
         if df_price is None or df_price.empty or len(df_price) < 251 + 60: 
-            return None
+            return (ticker, None)
             
         df_price.rename(columns={'Open':'시가', 'Close':'종가', 'High': '고가', 'Low': '저가', 'Volume':'거래량'}, inplace=True)
         df = df_price[['시가', '종가', '고가', '저가', '거래량']].copy()
         df.sort_index(inplace=True)
         
         # 메모리 최적화: 원본 데이터프레임 해제
-        # 대용량 데이터 처리 시 메모리 부족을 방지하기 위함
         del df_price
-        import gc
         gc.collect()
         
-        df_marcap_ticker = df_marcap_long[df_marcap_long['Code'] == ticker].copy()
+        return (ticker, df)
+        
+    except Exception as e:
+        log_error(f"종목 {ticker} 데이터 다운로드 중 오류: {e}")
+        return (ticker, None)
+
+
+def calculate_ticker_features(ticker, df_price):
+    """
+    단일 종목 피처 계산 함수 (CPU 작업)
+    
+    ProcessPoolExecutor로 병렬 처리되는 CPU 작업만 수행합니다.
+    전역 변수(_global_marcap_data, _global_financial_data)를 사용하여
+    fork 방식에서 Copy-on-Write로 효율적으로 데이터에 접근합니다.
+    
+    Args:
+        ticker: 종목코드
+        df_price: 다운로드된 주가 데이터 (시가, 종가, 고가, 저가, 거래량)
+        
+    Returns:
+        pandas.DataFrame: 처리된 종목 데이터
+    """
+    global _global_marcap_data, _global_financial_data
+    
+    try:
+        import gc
+        df = df_price.copy()
+        
+        # 전역 변수 검증
+        if _global_marcap_data is None:
+            log_error(f"종목 {ticker} 피처 계산 중 오류: 전역 시가총액 데이터가 설정되지 않았습니다.")
+            return None
+        
+        # 시가총액 데이터 병합 (전역 변수 사용)
+        df_marcap_ticker = _global_marcap_data[_global_marcap_data['Code'] == ticker].copy()
         if df_marcap_ticker.empty: 
             log_warning(f"⚠️ {ticker} 종목의 시가총액 데이터가 없습니다.")
             return None
@@ -412,9 +480,9 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         del df_marcap_ticker
         gc.collect()
         
-        # 재무데이터 병합 (백업 프로젝트와 동일한 방식)
-        if not df_financial_long.empty:
-            df_financial_ticker = df_financial_long[df_financial_long['Code'] == ticker].copy()
+        # 재무데이터 병합 (백업 프로젝트와 동일한 방식, 전역 변수 사용)
+        if _global_financial_data is not None and not _global_financial_data.empty:
+            df_financial_ticker = _global_financial_data[_global_financial_data['Code'] == ticker].copy()
             if not df_financial_ticker.empty:
                 df_financial_ticker.sort_values(by='date', inplace=True)
                 df = pd.merge_asof(left=df, right=df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], 
@@ -569,7 +637,7 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         return df
         
     except Exception as e:
-        log_error(f"종목 {ticker} 처리 중 오류: {e}")
+        log_error(f"종목 {ticker} 피처 계산 중 오류: {e}")
         # 오류 발생 시에도 메모리 정리
         try:
             gc.collect()
@@ -702,37 +770,124 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     
     all_data = []
     stock_records = stock_list.to_dict('records')
+    total_count = len(stock_records)  # 전체 종목 수 저장
     
-    log_info(f"개별 종목 피처 데이터 생성 시작: {len(stock_records)}개 종목")
+    log_info(f"개별 종목 피처 데이터 생성 시작: {total_count}개 종목")
     
-    completed_count = 0
-    total_count = len(stock_records)
+    # =================================================================
+    # 1단계: ThreadPoolExecutor로 데이터 다운로드 (I/O 작업)
+    # =================================================================
+    log_info("📥 1단계: 주가 데이터 다운로드 중...")
+    downloaded_data = {}  # {ticker: df_price}
+    download_failed = []
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
-        future_to_stock = {executor.submit(process_single_ticker_data, row, start_date, end_date, df_marcap_long, df_financial_long, None): row for row in stock_records}
+    thread_workers = min(12, total_count)  # 스레드 수 12로 변경
+    with concurrent.futures.ThreadPoolExecutor(max_workers=thread_workers) as executor:
+        future_to_stock = {executor.submit(fetch_ticker_price_data, row, start_date, end_date): row for row in stock_records}
+        download_completed = 0
         for future in concurrent.futures.as_completed(future_to_stock):
             try:
-                result_df = future.result()
-                if result_df is not None: 
-                    all_data.append(result_df)
-            except Exception: 
-                pass
+                ticker, df_price = future.result(timeout=120)  # 2분 타임아웃
+                if df_price is not None:
+                    downloaded_data[ticker] = df_price
+                else:
+                    download_failed.append(ticker)
+            except concurrent.futures.TimeoutError:
+                stock_info = future_to_stock.get(future, {})
+                ticker = stock_info.get('종목코드', 'Unknown')
+                download_failed.append(ticker)
+                log_error(f"⏱️ 종목 {ticker} 데이터 다운로드 타임아웃 (2분 초과)")
+            except Exception as e:
+                stock_info = future_to_stock.get(future, {})
+                ticker = stock_info.get('종목코드', 'Unknown')
+                download_failed.append(ticker)
+                log_error(f"❌ 종목 {ticker} 데이터 다운로드 중 오류: {e}")
+            
+            download_completed += 1
+            log_progress("주가 데이터 다운로드", download_completed, total_count)
+    
+    log_info(f"✅ 데이터 다운로드 완료: {len(downloaded_data)}/{total_count}개 성공 (실패: {len(download_failed)}개)")
+    
+    if not downloaded_data:
+        log_error("다운로드된 데이터가 없습니다.")
+        raise ValueError("다운로드된 데이터가 없습니다.")
+    
+    # =================================================================
+    # 2단계: ProcessPoolExecutor로 피처 계산 (CPU 작업)
+    # =================================================================
+    log_info("⚙️ 2단계: 피처 계산 중...")
+    failed_count = 0
+    
+    # 전역 변수에 데이터 설정 (fork 방식에서 Copy-on-Write로 효율적으로 공유됨)
+    set_global_feature_data(df_marcap_long, df_financial_long)
+    
+    try:
+        # CPU 코어 수 확인 (최소 2개, 최대 8개)
+        cpu_workers = min(max(2, (os.cpu_count() or 8) // 2), 8)
+        
+        # ProcessPoolExecutor 사용 (CPU 작업 병렬 처리)
+        # WSL2 환경에서는 fork 방식으로 효율적으로 동작
+        # 전역 변수를 사용하므로 큰 데이터를 인자로 전달하지 않아도 됨
+        with concurrent.futures.ProcessPoolExecutor(max_workers=cpu_workers) as executor:
+            # 전역 변수를 사용하므로 df_marcap_long, df_financial_long 인자 제거
+            future_to_ticker = {executor.submit(calculate_ticker_features, ticker, df_price): ticker 
+                               for ticker, df_price in downloaded_data.items()}
+        completed_count = 0
+        total_calc_count = len(downloaded_data)
+        
+        for future in concurrent.futures.as_completed(future_to_ticker):
+            try:
+                result_df = future.result(timeout=300)  # 5분 타임아웃
+                if result_df is not None and isinstance(result_df, pd.DataFrame):
+                    # 데이터 무결성 검증
+                    if not result_df.empty and '종목코드' in result_df.columns:
+                        all_data.append(result_df)
+                    else:
+                        failed_count += 1
+                        ticker = future_to_ticker.get(future, 'Unknown')
+                        log_warning(f"⚠️ 종목 {ticker} 데이터 무결성 검증 실패: 빈 데이터프레임 또는 필수 컬럼 누락")
+                else:
+                    failed_count += 1
+                    ticker = future_to_ticker.get(future, 'Unknown')
+            except concurrent.futures.TimeoutError:
+                failed_count += 1
+                ticker = future_to_ticker.get(future, 'Unknown')
+                log_error(f"⏱️ 종목 {ticker} 피처 계산 타임아웃 (5분 초과)")
+            except Exception as e:
+                failed_count += 1
+                ticker = future_to_ticker.get(future, 'Unknown')
+                log_error(f"❌ 종목 {ticker} 피처 계산 중 오류: {e}")
             
             completed_count += 1
             # 진행률 로그 메시지 (PROGRESS 접두사 자동 추가됨) - 매번 출력하되 같은 줄에서 덮어쓰기
-            log_progress("개별 종목 피처 데이터 생성", completed_count, total_count)
+            log_progress("피처 계산", completed_count, total_calc_count)
             # 주기적 메모리 정리 (10개마다)
             if completed_count % 10 == 0:
                 import gc
                 gc.collect()
+    finally:
+        # 전역 변수 초기화 (메모리 해제)
+        clear_global_feature_data()
+        
+        # 다운로드된 데이터 메모리 해제
+        del downloaded_data
+        import gc
+        gc.collect()
 
     if not all_data: 
         log_error("처리된 데이터가 없습니다.")
         raise ValueError("처리된 데이터가 없습니다.")
     
     # 데이터 검증 로직 추가
-    success_rate = len(all_data) / len(stock_records) * 100
-    log_info(f"✅ 개별 종목 피처 데이터 생성 완료: {len(all_data)}개 종목 처리됨 (성공률: {success_rate:.1f}%)")
+    success_count = len(all_data)
+    total_attempted = total_count  # 전체 시도한 종목 수
+    download_fail_count = len(download_failed)  # 다운로드 실패 수
+    calc_fail_count = failed_count  # 피처 계산 실패 수
+    total_fail_count = download_fail_count + calc_fail_count
+    
+    success_rate = (success_count / total_attempted) * 100 if total_attempted > 0 else 0
+    log_info(f"✅ 개별 종목 피처 데이터 생성 완료: {success_count}/{total_attempted}개 종목 처리됨 (성공률: {success_rate:.1f}%)")
+    log_info(f"   - 다운로드 실패: {download_fail_count}개, 피처 계산 실패: {calc_fail_count}개")
     
     # 성공률이 너무 낮으면 경고
     if success_rate < 50:
