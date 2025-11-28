@@ -21,14 +21,18 @@ from pykrx import stock
 from datetime import datetime, timedelta
 import pandas_ta as ta
 import concurrent.futures
+from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
 import os
 import gc
 import locale
 import platform
+import multiprocessing
 
-# Windows 환경에서 로케일 설정 (FinanceDataReader 내부 오류 방지)
+# Windows 환경에서 multiprocessing 지원
 if platform.system() == 'Windows':
+    # Windows에서 multiprocessing을 사용할 때 필요
+    multiprocessing.freeze_support()
     try:
         os.environ['LC_ALL'] = 'en_US.UTF-8'
         os.environ['LANG'] = 'en_US.UTF-8'
@@ -337,28 +341,19 @@ def _fetch_macro_data(start_date, end_date):
         log_error(f"거시경제 데이터 수집 실패: {e}")
         return pd.DataFrame()
 
-def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long, df_financial_long, pbar_lock):
+def download_ticker_data(stock_info, start_date, end_date):
     """
-    단일 종목 데이터 처리 함수
+    1단계: API 다운로드 함수 (I/O 바운드 작업)
     
-    하나의 종목에 대해 다음 작업을 수행합니다:
-    1. 주가 데이터 수집 (하이브리드 방식: Yahoo → KRX → NAVER)
-    2. 시가총액 데이터 병합
-    3. 재무 데이터 병합
-    4. 기술적 지표 계산 (ATR, OBV, ADX, 볼린저 밴드 등)
-    5. 수익률 및 변동성 계산
-    6. 타겟 변수 생성 (15일 후 5% 상승 여부)
+    하나의 종목에 대해 주가 데이터만 수집합니다.
     
     Args:
         stock_info: 종목 정보 (종목코드, 종목명 등)
         start_date: 데이터 수집 시작일
         end_date: 데이터 수집 종료일
-        df_marcap_long: 시가총액 데이터
-        df_financial_long: 재무 데이터
-        pbar_lock: 진행률 표시용 락
         
     Returns:
-        pandas.DataFrame: 처리된 종목 데이터
+        tuple: (ticker, pandas.DataFrame) 또는 (ticker, None) - 주가 데이터만 포함된 데이터프레임
     """
     ticker = stock_info['종목코드']
     try:
@@ -387,21 +382,61 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         # 데이터 품질 검증: 충분한 데이터가 있는지 확인
         # 251일(1년) + 60일(추가 버퍼) = 311일 이상의 데이터 필요
         if df_price is None or df_price.empty or len(df_price) < 251 + 60: 
-            return None
+            return (ticker, None)
             
         df_price.rename(columns={'Open':'시가', 'Close':'종가', 'High': '고가', 'Low': '저가', 'Volume':'거래량'}, inplace=True)
         df = df_price[['시가', '종가', '고가', '저가', '거래량']].copy()
         df.sort_index(inplace=True)
         
         # 메모리 최적화: 원본 데이터프레임 해제
-        # 대용량 데이터 처리 시 메모리 부족을 방지하기 위함
         del df_price
-        import gc
         gc.collect()
         
-        df_marcap_ticker = df_marcap_long[df_marcap_long['Code'] == ticker].copy()
-        if df_marcap_ticker.empty: 
-            log_warning(f"⚠️ {ticker} 종목의 시가총액 데이터가 없습니다.")
+        # 주가 데이터만 반환 (병합 및 피처 계산은 별도 함수에서 수행)
+        return (ticker, df)
+        
+    except Exception as e:
+        log_error(f"종목 {ticker} 데이터 다운로드 중 오류: {e}")
+        # 오류 발생 시에도 메모리 정리
+        try:
+            gc.collect()
+        except:
+            pass
+        return (ticker, None)
+
+
+def merge_and_calculate_features(args):
+    """
+    2단계: 데이터 병합 및 피처 계산 함수 (CPU 바운드 작업)
+    
+    다운로드된 주가 데이터에 대해 다음 작업을 수행합니다:
+    1. 시가총액 데이터 병합
+    2. 재무 데이터 병합
+    3. 기술적 지표 계산 (ATR, OBV, ADX, 볼린저 밴드 등)
+    4. 수익률 및 변동성 계산
+    5. 타겟 변수 생성 (15일 후 5% 상승 여부)
+    
+    Args:
+        args: (ticker, df, df_marcap_ticker, df_financial_ticker) 튜플
+            - ticker: 종목코드
+            - df: 주가 데이터프레임
+            - df_marcap_ticker: 시가총액 데이터 (해당 종목만, 이미 필터링됨)
+            - df_financial_ticker: 재무 데이터 (해당 종목만, 이미 필터링됨)
+        
+    Returns:
+        pandas.DataFrame: 완전한 피처 데이터프레임 또는 None
+    """
+    ticker, df, df_marcap_ticker, df_financial_ticker = args
+    if df is None or df.empty:
+        return None
+    
+    try:
+        # =================================================================
+        # 데이터 병합 (CPU 작업)
+        # =================================================================
+        
+        # 시가총액 데이터 병합 (이미 필터링된 데이터 사용)
+        if df_marcap_ticker.empty:
             return None
             
         df_marcap_ticker.sort_values(by='date', inplace=True)
@@ -412,32 +447,23 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         del df_marcap_ticker
         gc.collect()
         
-        # 재무데이터 병합 (백업 프로젝트와 동일한 방식)
-        if not df_financial_long.empty:
-            df_financial_ticker = df_financial_long[df_financial_long['Code'] == ticker].copy()
-            if not df_financial_ticker.empty:
-                df_financial_ticker.sort_values(by='date', inplace=True)
-                df = pd.merge_asof(left=df, right=df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], 
-                                   left_index=True, right_on='date', direction='backward')
-                
-                # 재무데이터가 없는 경우 기본값 설정
-                if 'PER' not in df.columns or df['PER'].isnull().all():
-                    df['PER'] = np.nan
-                    df['PBR'] = np.nan
-                    df['ROE'] = np.nan
-                    df['EPS'] = np.nan
-                    df['BPS'] = np.nan
-                
-                # 재무데이터 메모리 해제
-                del df_financial_ticker
-                gc.collect()
-            else:
-                # 재무데이터가 없는 경우 기본값 설정
+        # 재무데이터 병합 (이미 필터링된 데이터 사용)
+        if not df_financial_ticker.empty:
+            df_financial_ticker.sort_values(by='date', inplace=True)
+            df = pd.merge_asof(left=df, right=df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], 
+                               left_index=True, right_on='date', direction='backward')
+            
+            # 재무데이터가 없는 경우 기본값 설정
+            if 'PER' not in df.columns or df['PER'].isnull().all():
                 df['PER'] = np.nan
                 df['PBR'] = np.nan
                 df['ROE'] = np.nan
                 df['EPS'] = np.nan
                 df['BPS'] = np.nan
+            
+            # 재무데이터 메모리 해제
+            del df_financial_ticker
+            gc.collect()
         else:
             # 재무데이터가 없는 경우 기본값 설정
             df['PER'] = np.nan
@@ -446,23 +472,24 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
             df['EPS'] = np.nan
             df['BPS'] = np.nan
         
+        # =================================================================
+        # 피처 계산 (CPU 작업)
+        # =================================================================
+        
         # 기존 방식과 동일한 최소한의 기술적 지표만 사용 (강화된 오류 처리)
         try:
             df.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
         except Exception as e:
-            log_warning(f"ATR 계산 실패 ({ticker}): {e}")
             df['ATRr_14'] = np.nan
         
         try:
             df.ta.obv(close='종가', volume='거래량', append=True)
         except Exception as e:
-            log_warning(f"OBV 계산 실패 ({ticker}): {e}")
             df['OBV'] = np.nan
         
         try:
             df.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
         except Exception as e:
-            log_warning(f"ADX 계산 실패 ({ticker}): {e}")
             df['ADX_14'] = np.nan
         
         # 볼린저 밴드 계산
@@ -501,7 +528,6 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
                 df['BBW_20_2'] = np.nan
                 df['BB_Position'] = np.nan
         except Exception as e:
-            log_warning(f"볼린저 밴드 계산 실패 ({ticker}): {e}")
             df['BBW_20_2'] = np.nan
             df['BB_Position'] = np.nan
         
@@ -512,7 +538,6 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         except:
             pass
         gc.collect()
-        # 기존 방식과 동일한 기본 지표들만 사용 (과도한 기술적 지표 제거)
         
         # 수익률 계산
         df['수익률(1M)'] = df['종가'].pct_change(20)
@@ -565,13 +590,25 @@ def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long,
         return df
         
     except Exception as e:
-        log_error(f"종목 {ticker} 처리 중 오류: {e}")
         # 오류 발생 시에도 메모리 정리
         try:
             gc.collect()
         except:
             pass
         return None
+
+
+def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long, df_financial_long, pbar_lock):
+    """
+    단일 종목 데이터 처리 함수 (기존 호환성 유지용)
+    
+    이 함수는 download_ticker_data와 merge_and_calculate_features를 순차적으로 호출합니다.
+    기존 코드와의 호환성을 위해 유지됩니다.
+    """
+    ticker, df = download_ticker_data(stock_info, start_date, end_date)
+    if df is None:
+        return None
+    return merge_and_calculate_features((ticker, df, df_marcap_long, df_financial_long))
 
 
 
@@ -702,26 +739,94 @@ def _fetch_and_prepare_data(start_date, end_date, calculate_factor_scores=True):
     
     log_info(f"개별 종목 피처 데이터 생성 시작: {len(stock_records)}개 종목")
     
+    # =================================================================
+    # 1단계: API 다운로드 (I/O 바운드 - 스레드 사용)
+    # =================================================================
+    log_info("1단계: API 다운로드 중...")
+    downloaded_data = {}
     completed_count = 0
     total_count = len(stock_records)
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
-        future_to_stock = {executor.submit(process_single_ticker_data, row, start_date, end_date, df_marcap_long, df_financial_long, None): row for row in stock_records}
+        future_to_stock = {executor.submit(download_ticker_data, row, start_date, end_date): row for row in stock_records}
         for future in concurrent.futures.as_completed(future_to_stock):
             try:
-                result_df = future.result()
-                if result_df is not None: 
-                    all_data.append(result_df)
+                ticker, result_df = future.result()
+                if result_df is not None:
+                    downloaded_data[ticker] = result_df
             except Exception: 
                 pass
             
             completed_count += 1
-            # 진행률 로그 메시지 (PROGRESS 접두사 자동 추가됨) - 매번 출력하되 같은 줄에서 덮어쓰기
-            log_progress("개별 종목 피처 데이터 생성", completed_count, total_count)
+            log_progress("API 다운로드", completed_count, total_count)
             # 주기적 메모리 정리 (10개마다)
             if completed_count % 10 == 0:
-                import gc
                 gc.collect()
+    
+    log_info(f"✅ 1단계 완료: {len(downloaded_data)}개 종목 데이터 다운로드 완료")
+    
+    if not downloaded_data:
+        log_error("다운로드된 데이터가 없습니다.")
+        raise ValueError("다운로드된 데이터가 없습니다.")
+    
+    # =================================================================
+    # 2단계: 데이터 병합 및 피처 계산 (CPU 바운드 - 멀티프로세싱 사용)
+    # =================================================================
+    log_info("2단계: 데이터 병합 및 피처 계산 중...")
+    
+    # 논리프로세서 수의 2/3 계산
+    logical_cores = multiprocessing.cpu_count()
+    process_workers = max(1, int(logical_cores * 2 / 3))
+    log_info(f"   멀티프로세싱 워커 수: {process_workers}개 (논리프로세서: {logical_cores}개)")
+    
+    # 다운로드된 데이터를 튜플 리스트로 변환
+    # Windows에서 multiprocessing을 사용할 때는 데이터 전달 최적화 필요
+    # 각 프로세스에 필요한 데이터만 전달 (전체 데이터프레임 대신 필요한 부분만)
+    merge_and_calc_args = []
+    for ticker, df in downloaded_data.items():
+        # 각 종목에 필요한 시가총액/재무데이터만 필터링하여 전달 (메모리 및 전송 오버헤드 감소)
+        df_marcap_ticker = df_marcap_long[df_marcap_long['Code'] == ticker].copy() if not df_marcap_long.empty else pd.DataFrame()
+        df_financial_ticker = df_financial_long[df_financial_long['Code'] == ticker].copy() if not df_financial_long.empty else pd.DataFrame()
+        merge_and_calc_args.append((ticker, df, df_marcap_ticker, df_financial_ticker))
+    
+    completed_count = 0
+    total_count = len(merge_and_calc_args)
+    
+    # Windows에서 ProcessPoolExecutor 사용 시 초기화 확인
+    if platform.system() == 'Windows':
+        # Windows에서는 spawn 방식을 사용하므로 프로세스 생성 오버헤드가 큼
+        log_info(f"   Windows 환경: spawn 방식 사용 (프로세스 생성 오버헤드 있음)")
+        log_info(f"   데이터 전달 최적화: 각 종목별 필요한 데이터만 전달")
+    
+    # 모든 작업을 먼저 제출 (병렬 실행 보장)
+    with ProcessPoolExecutor(max_workers=process_workers) as executor:
+        # 모든 작업을 한 번에 제출하여 병렬 실행 보장
+        future_to_args = {}
+        for args in merge_and_calc_args:
+            future = executor.submit(merge_and_calculate_features, args)
+            future_to_args[future] = args
+        
+        log_info(f"   총 {len(future_to_args)}개 작업 제출 완료 (병렬 처리 시작)")
+        log_info(f"   💡 작업 관리자에서 Python 프로세스가 {process_workers}개 실행되는지 확인하세요")
+        
+        # 완료된 작업부터 처리 (순서와 무관하게)
+        for future in concurrent.futures.as_completed(future_to_args):
+            try:
+                result_df = future.result()
+                if result_df is not None:
+                    all_data.append(result_df)
+            except Exception as e:
+                # 오류 발생 시 로그 출력 (프로세스 간 통신 제한으로 간단히 처리)
+                ticker = future_to_args[future][0] if future in future_to_args else "알 수 없음"
+                log_warning(f"   종목 {ticker} 처리 중 오류 (프로세스 간 통신 제한으로 상세 로그 생략)")
+            
+            completed_count += 1
+            log_progress("데이터 병합 및 피처 계산", completed_count, total_count)
+            # 주기적 메모리 정리 (10개마다)
+            if completed_count % 10 == 0:
+                gc.collect()
+    
+    log_info(f"✅ 2단계 완료: {len(all_data)}개 종목 처리 완료")
 
     if not all_data: 
         log_error("처리된 데이터가 없습니다.")
