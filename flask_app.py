@@ -409,9 +409,39 @@ def model_analysis():
         model = model_data['model']
         features = model_data['features']
         
-        # 피처 중요도 데이터 정리
-        feature_importances = list(zip(features, model.feature_importances_))
-        feature_importances.sort(key=lambda x: x[1], reverse=True)
+        # 피처 중요도 데이터 정리 (3가지 방식 지원)
+        # 새로운 구조: feature_importances가 dict 형태로 저장됨
+        saved_feature_importances = model_data.get('feature_importances', {})
+        
+        if isinstance(saved_feature_importances, dict):
+            # 새로운 구조: 3가지 중요도가 dict로 저장됨
+            feature_importances_dict = {
+                'default': saved_feature_importances.get('default', []),
+                'shap': saved_feature_importances.get('shap', []),
+                'permutation': saved_feature_importances.get('permutation', [])
+            }
+            # 기본 중요도가 없으면 모델에서 계산
+            if not feature_importances_dict['default']:
+                default_importance = list(zip(features, model.feature_importances_))
+                default_importance.sort(key=lambda x: x[1], reverse=True)
+                feature_importances_dict['default'] = default_importance
+        else:
+            # 기존 구조: 단일 리스트 (호환성 유지)
+            if isinstance(saved_feature_importances, list):
+                feature_importances_dict = {
+                    'default': saved_feature_importances,
+                    'shap': [],
+                    'permutation': []
+                }
+            else:
+                # 아무것도 없으면 모델에서 계산
+                default_importance = list(zip(features, model.feature_importances_))
+                default_importance.sort(key=lambda x: x[1], reverse=True)
+                feature_importances_dict = {
+                    'default': default_importance,
+                    'shap': [],
+                    'permutation': []
+                }
         
         # 추가 정보 로드 (기존 모델과의 호환성을 위해 기본값 설정)
         training_config = model_data.get('training_config', {})
@@ -425,7 +455,7 @@ def model_analysis():
             'last_modified': datetime.fromtimestamp(os.path.getmtime(MODEL_PATH)).strftime('%Y-%m-%d %H:%M:%S'),
             'oob_score': getattr(model, 'oob_score_', None),
             'features': features,
-            'feature_importances': feature_importances,
+            'feature_importances': feature_importances_dict,  # 3가지 중요도 dict
             'params': model.get_params(),
             'training_config': training_config,
             'optimization_results': optimization_results,

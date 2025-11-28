@@ -32,6 +32,8 @@ import locale
 import platform
 import optuna
 from optuna.samplers import TPESampler
+from sklearn.utils import resample
+from sklearn.inspection import permutation_importance
 
 # Windows 환경에서 로케일 설정 (FinanceDataReader 내부 오류 방지)
 if platform.system() == 'Windows':
@@ -81,6 +83,153 @@ def check_memory_and_cleanup(threshold_mb=8000):
         log_info(f"   ✅ 메모리 정리 후: {new_memory_mb:.1f} MB")
         return True
     return False
+
+def calculate_shap_importance(model, X_train_scaled, y_train, features, sample_size=1000):
+    """
+    SHAP 중요도 계산 함수 (계층적 샘플링)
+    
+    Args:
+        model: 학습된 모델
+        X_train_scaled: 스케일링된 학습 데이터
+        y_train: 학습 타겟
+        features: 피처 이름 리스트
+        sample_size: 샘플 크기 (기본값: 1000)
+    
+    Returns:
+        list: [(feature, importance), ...] 형태의 리스트
+    """
+    try:
+        import shap
+        log_info(f"   📊 SHAP 중요도 계산 중... (샘플 크기: {sample_size}건)")
+        log_memory_usage("SHAP 계산 시작")
+        
+        # 계층적 샘플링
+        # numpy array를 pandas DataFrame으로 변환 (resample 호환성)
+        if isinstance(X_train_scaled, np.ndarray):
+            X_train_df = pd.DataFrame(X_train_scaled, columns=features)
+        else:
+            X_train_df = X_train_scaled
+        
+        actual_sample_size = min(sample_size, len(X_train_df))
+        if actual_sample_size < len(X_train_df):
+            X_shap_sample, y_shap_sample = resample(
+                X_train_df, 
+                y_train, 
+                n_samples=actual_sample_size, 
+                stratify=y_train, 
+                random_state=42
+            )
+            # numpy array로 변환 (SHAP 입력 형식)
+            if isinstance(X_shap_sample, pd.DataFrame):
+                X_shap_sample = X_shap_sample.values
+            log_info(f"   📊 계층적 샘플링 완료: {len(X_shap_sample):,}건")
+        else:
+            # numpy array로 변환
+            if isinstance(X_train_df, pd.DataFrame):
+                X_shap_sample = X_train_df.values
+            else:
+                X_shap_sample = X_train_scaled
+            y_shap_sample = y_train
+            log_info(f"   📊 전체 데이터 사용: {len(X_shap_sample):,}건")
+        
+        # SHAP TreeExplainer 사용
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(X_shap_sample)
+        
+        # 이진 분류의 경우 shap_values는 리스트 [class_0, class_1] 또는 단일 array
+        # 타입 체크를 더 안전하게 처리
+        if type(shap_values).__name__ == 'list' and len(shap_values) > 1:
+            # 리스트 형태이고 2개 이상의 요소가 있는 경우 (이진 분류)
+            shap_values_class1 = shap_values[1]  # 클래스 1(상승)에 대한 SHAP 값
+        elif type(shap_values).__name__ == 'list' and len(shap_values) == 1:
+            # 리스트 형태이지만 1개만 있는 경우
+            shap_values_class1 = shap_values[0]
+        else:
+            # 단일 numpy array인 경우
+            shap_values_class1 = shap_values
+        
+        # numpy array로 변환 (안전성 확보)
+        if not isinstance(shap_values_class1, np.ndarray):
+            shap_values_class1 = np.array(shap_values_class1)
+        
+        # 피처별 평균 절댓값으로 중요도 계산
+        shap_importance = np.abs(shap_values_class1).mean(axis=0)
+        
+        # 정규화 (합이 1이 되도록, 0으로 나누기 방지)
+        importance_sum = shap_importance.sum()
+        if importance_sum > 0:
+            shap_importance = shap_importance / importance_sum
+        else:
+            log_warning("   ⚠️ SHAP 중요도 합이 0입니다. 정규화를 건너뜁니다.")
+        
+        # 피처 이름과 함께 정렬
+        shap_importance_list = list(zip(features, shap_importance))
+        shap_importance_list.sort(key=lambda x: x[1], reverse=True)
+        
+        log_info(f"   ✅ SHAP 중요도 계산 완료")
+        log_memory_usage("SHAP 계산 완료")
+        
+        # 메모리 정리
+        del explainer, shap_values, shap_values_class1, X_shap_sample, y_shap_sample
+        gc.collect()
+        
+        return shap_importance_list
+        
+    except ImportError:
+        log_warning("   ⚠️ SHAP 라이브러리가 설치되지 않아 SHAP 중요도를 계산할 수 없습니다.")
+        return None
+    except Exception as e:
+        log_error(f"   ❌ SHAP 중요도 계산 중 오류 발생: {e}")
+        return None
+
+def calculate_permutation_importance(model, X_test_scaled, y_test, features, n_repeats=5):
+    """
+    Permutation Importance 계산 함수
+    
+    Args:
+        model: 학습된 모델
+        X_test_scaled: 스케일링된 테스트 데이터
+        y_test: 테스트 타겟
+        features: 피처 이름 리스트
+        n_repeats: 반복 횟수 (기본값: 5)
+    
+    Returns:
+        list: [(feature, importance), ...] 형태의 리스트
+    """
+    try:
+        log_info(f"   📊 Permutation Importance 계산 중... (반복 횟수: {n_repeats})")
+        log_memory_usage("Permutation Importance 계산 시작")
+        
+        # Permutation Importance 계산
+        perm_result = permutation_importance(
+            model, 
+            X_test_scaled, 
+            y_test,
+            n_repeats=n_repeats,
+            random_state=42,
+            n_jobs=1,  # 메모리 절약
+            scoring='roc_auc'
+        )
+        
+        # 평균 중요도 추출
+        perm_importance = perm_result.importances_mean
+        
+        # 피처 이름과 함께 정렬
+        perm_importance_list = list(zip(features, perm_importance))
+        perm_importance_list.sort(key=lambda x: x[1], reverse=True)
+        
+        log_info(f"   ✅ Permutation Importance 계산 완료")
+        log_memory_usage("Permutation Importance 계산 완료")
+        
+        # 메모리 정리
+        del perm_result
+        gc.collect()
+        
+        return perm_importance_list
+        
+    except Exception as e:
+        log_error(f"   ❌ Permutation Importance 계산 중 오류 발생: {e}")
+        return None
 
 def load_training_data_from_file(training_data_path):
     """학습 데이터 파일에서 로드"""
@@ -343,6 +492,7 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
             'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
             'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 20),
             'max_samples': trial.suggest_categorical('max_samples', [0.7, 0.8, 0.9, None]),
+            'max_features': trial.suggest_float('max_features', 0.4, 1.0),  # 피처 선택 비율 최적화
             'random_state': 42,
             'class_weight': 'balanced',
             'oob_score': False,  # OOB 점수 비활성화로 메모리 절약
@@ -419,6 +569,7 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
             min_samples_split=best_params['min_samples_split'],
             min_samples_leaf=best_params['min_samples_leaf'],
             max_samples=best_params['max_samples'],
+            max_features=best_params['max_features'],
             random_state=42,
             class_weight='balanced',
             oob_score=False,
@@ -442,6 +593,7 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
                 'min_samples_split': trial.suggest_int('min_samples_split', 2, 10),
                 'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
                 'max_samples': trial.suggest_categorical('max_samples', [0.8, 0.9]),
+                'max_features': trial.suggest_float('max_features', 0.4, 1.0),  # 피처 선택 비율 최적화
                 'random_state': 42,
                 'class_weight': 'balanced',
                 'oob_score': False,
@@ -491,6 +643,7 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
             min_samples_split=best_params['min_samples_split'],
             min_samples_leaf=best_params['min_samples_leaf'],
             max_samples=best_params['max_samples'],
+            max_features=best_params['max_features'],
             random_state=42,
             class_weight='balanced',
             oob_score=False,
@@ -536,6 +689,33 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
     log_info("\n분류 보고서 (Classification Report):")
     log_info(classification_report(y_test, y_pred, target_names=['하락(0)', '상승(1)']))
 
+    # 피처 중요도 계산 (3가지 방식)
+    log_info("\n📊 피처 중요도 계산 중...")
+    
+    # 1. 기본 피처 중요도 (모델 내장)
+    default_importance = list(zip(features, best_model.feature_importances_))
+    default_importance.sort(key=lambda x: x[1], reverse=True)
+    log_info("   ✅ 기본 피처 중요도 계산 완료")
+    
+    # 2. SHAP 중요도 계산 (1000건 계층적 샘플링)
+    # X_train_scaled와 y_train은 함수 내부에서 유지되고 있음
+    shap_importance = calculate_shap_importance(
+        best_model, 
+        X_train_scaled, 
+        y_train, 
+        features, 
+        sample_size=1000
+    )
+    
+    # 3. Permutation Importance 계산 (테스트 데이터 사용)
+    perm_importance = calculate_permutation_importance(
+        best_model, 
+        X_test_scaled, 
+        y_test, 
+        features, 
+        n_repeats=5
+    )
+    
     log_info("💾 모델 저장 중...")
     log_memory_usage("모델 저장 시작")
     
@@ -563,8 +743,26 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
         'min_samples_split': '노드 분할에 필요한 최소 샘플 수',
         'min_samples_leaf': '리프 노드의 최소 샘플 수',
         'max_samples': '각 트리가 사용할 샘플 비율',
+        'max_features': '각 분할에서 고려할 최대 피처 비율 (0.4~1.0)',
         'class_weight': '클래스 불균형 처리 방법'
     }
+    
+    # 피처 중요도 구조 생성 (3가지 방식)
+    feature_importances = {
+        'default': default_importance
+    }
+    
+    if shap_importance is not None:
+        feature_importances['shap'] = shap_importance
+        log_info("   ✅ SHAP 중요도 저장 준비 완료")
+    else:
+        log_warning("   ⚠️ SHAP 중요도가 없어 기본 중요도만 저장합니다.")
+    
+    if perm_importance is not None:
+        feature_importances['permutation'] = perm_importance
+        log_info("   ✅ Permutation Importance 저장 준비 완료")
+    else:
+        log_warning("   ⚠️ Permutation Importance가 없어 기본 중요도만 저장합니다.")
     
     try:
         joblib.dump({
@@ -574,7 +772,8 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
             'imputation_values': imputation_values,
             'training_config': training_config,
             'optimization_results': optimization_results,
-            'parameter_explanations': parameter_explanations
+            'parameter_explanations': parameter_explanations,
+            'feature_importances': feature_importances  # 3가지 중요도 포함
         }, model_path, compress=3)  # 압축 저장으로 메모리 절약
         log_info(f"\n✅ 새로운 데이터로 학습된 최적 모델, 스케일러, 중앙값을 '{model_path}' 경로에 저장했습니다.")
         log_memory_usage("모델 저장 완료")
@@ -589,7 +788,8 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
             'imputation_values': imputation_values,
             'training_config': training_config,
             'optimization_results': optimization_results,
-            'parameter_explanations': parameter_explanations
+            'parameter_explanations': parameter_explanations,
+            'feature_importances': feature_importances  # 3가지 중요도 포함
         }, model_path, compress=3)  # 압축 저장으로 메모리 절약
         log_info(f"\n✅ 재시도 후 모델 저장 완료: '{model_path}'")
         log_memory_usage("재시도 후 모델 저장 완료")

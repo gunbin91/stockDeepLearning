@@ -13,6 +13,7 @@ finance-datareader
 psutil>=5.9.0
 setuptools==80.0.0
 optuna>=3.0.0
+shap>=0.42.0
 
 # Flask 관련 패키지
 flask>=2.3.0
