@@ -21,7 +21,7 @@ from sklearn.metrics import classification_report, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 import warnings
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import sys
 import io
@@ -301,16 +301,18 @@ def create_training_data(years=None):
         if years is None:
             log_info("🚀 전체 기간 데이터 수집을 통해 학습 데이터 생성을 시작합니다...")
             start_date_for_cacher = '2015-01-01'
+            # 오늘 기준 2개월 전까지만 수집 (학습 데이터는 최신 데이터 제외)
+            end_date_for_cacher = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
+            log_info(f"   📅 수집 기간: {start_date_for_cacher} ~ {end_date_for_cacher} (오늘 기준 2개월 전까지)")
         else:
             # 최근 N년치 데이터 수집
-            from datetime import timedelta
-            end_date = datetime.now()
+            # 오늘 기준 2개월 전까지만 수집 (학습 데이터는 최신 데이터 제외)
+            end_date = datetime.now() - timedelta(days=60)  # 오늘 기준 2개월 전
             start_date = end_date - timedelta(days=years * 365)
             start_date_for_cacher = start_date.strftime('%Y-%m-%d')
+            end_date_for_cacher = end_date.strftime('%Y-%m-%d')
             log_info(f"🚀 최근 {years}년치 데이터 수집을 통해 학습 데이터 생성을 시작합니다...")
-            log_info(f"   📅 수집 기간: {start_date_for_cacher} ~ {end_date.strftime('%Y-%m-%d')}")
-        
-        end_date_for_cacher = datetime.now().strftime('%Y-%m-%d')
+            log_info(f"   📅 수집 기간: {start_date_for_cacher} ~ {end_date_for_cacher} (오늘 기준 2개월 전까지)")
         log_memory_usage("학습 데이터 생성 시작")
         
         try:
