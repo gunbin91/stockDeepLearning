@@ -427,18 +427,21 @@ def prepare_data_and_save(data_path, start_date, end_date):
 
     # 기존 CPU 버전과 동일하게, 검증된 핵심 피처 목록을 하드코딩
     # 제거된 피처: PBR, USDKRW_pct_1d, KOSPI_pct_1d, 이익수익률, 수익률(3M), 수익률(1M), ATRr_14
-    # 추가된 피처: KOSPI_변동성(1W), KOSPI_변동성(1M), KOSPI_변동성(3M), KOSPI_disparity_120, KOSPI_disparity_240
+    # 제거된 피처: KOSPI_disparity_240, USDKRW_pct_5d, VIX_pct_1d, VIX_pct_5d, KOSPI_pct_5d
+    # 추가된 피처: KOSPI_변동성(1W), KOSPI_변동성(1M), KOSPI_변동성(3M), KOSPI_disparity_120
+    # 추가된 피처: KOSPI_disparity_5, KOSPI_disparity_20, KOSPI_disparity_60
+    # 추가된 피처: disparity_5, disparity_10, disparity_60
+    # 추가된 피처: 거래량 변동성 계수(1W), 거래량 변동성 계수(1M), 거래량 변동성 계수(3M)
     features = [
         'log_mktcap', 'BPS',
         '52주_신고가_비율',
         'ADX_14',
         '변동성(1W)', '변동성(1M)', '변동성(3M)', 'BBW_20_2', 'BB_Position',
-        'disparity_120', 'disparity_240',
+        'disparity_5', 'disparity_10', 'disparity_60', 'disparity_120', 'disparity_240',
         '거래대금_MA5', '거래대금_MA20', 'OBV',
-        'KOSPI_pct_5d', 'USDKRW_pct_5d',
-        'VIX_pct_1d', 'VIX_pct_5d',
+        '거래량 변동성 계수(1W)', '거래량 변동성 계수(1M)', '거래량 변동성 계수(3M)',
         'KOSPI_변동성(1W)', 'KOSPI_변동성(1M)', 'KOSPI_변동성(3M)',
-        'KOSPI_disparity_120', 'KOSPI_disparity_240'
+        'KOSPI_disparity_5', 'KOSPI_disparity_20', 'KOSPI_disparity_60', 'KOSPI_disparity_120'
     ]
 
     try:
@@ -1467,8 +1470,9 @@ def main():
 
     if run_preparation:
         start_date = (datetime.now() - timedelta(days=years*365)).strftime('%Y-%m-%d')
-        end_date = datetime.now().strftime('%Y-%m-%d')
-        log_info(f"   데이터 수집 기간: {start_date} ~ {end_date} ({years}년)")
+        # 학습 데이터는 오늘에서 2개월 전까지만 수집 (백테스팅에는 영향 없음)
+        end_date = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
+        log_info(f"   데이터 수집 기간: {start_date} ~ {end_date} ({years}년, 최근 2개월 제외)")
         
         # 데이터 재생성 시 기존 imputation_values 파일 삭제
         imputation_values_dir = os.path.dirname(os.path.expanduser(data_path))
@@ -1498,18 +1502,21 @@ def main():
 
     # 기존 CPU 버전과 동일하게, 검증된 핵심 피처 목록을 하드코딩
     # 제거된 피처: PBR, USDKRW_pct_1d, KOSPI_pct_1d, 이익수익률, 수익률(3M), 수익률(1M), ATRr_14
-    # 추가된 피처: KOSPI_변동성(1W), KOSPI_변동성(1M), KOSPI_변동성(3M), KOSPI_disparity_120, KOSPI_disparity_240
+    # 제거된 피처: KOSPI_disparity_240, USDKRW_pct_5d, VIX_pct_1d, VIX_pct_5d, KOSPI_pct_5d
+    # 추가된 피처: KOSPI_변동성(1W), KOSPI_변동성(1M), KOSPI_변동성(3M), KOSPI_disparity_120
+    # 추가된 피처: KOSPI_disparity_5, KOSPI_disparity_20, KOSPI_disparity_60
+    # 추가된 피처: disparity_5, disparity_10, disparity_60
+    # 추가된 피처: 거래량 변동성 계수(1W), 거래량 변동성 계수(1M), 거래량 변동성 계수(3M)
     features = [
         'log_mktcap', 'BPS',
         '52주_신고가_비율',
         'ADX_14',
         '변동성(1W)', '변동성(1M)', '변동성(3M)', 'BBW_20_2', 'BB_Position',
-        'disparity_120', 'disparity_240',
+        'disparity_5', 'disparity_10', 'disparity_60', 'disparity_120', 'disparity_240',
         '거래대금_MA5', '거래대금_MA20', 'OBV',
-        'KOSPI_pct_5d', 'USDKRW_pct_5d',
-        'VIX_pct_1d', 'VIX_pct_5d',
+        '거래량 변동성 계수(1W)', '거래량 변동성 계수(1M)', '거래량 변동성 계수(3M)',
         'KOSPI_변동성(1W)', 'KOSPI_변동성(1M)', 'KOSPI_변동성(3M)',
-        'KOSPI_disparity_120', 'KOSPI_disparity_240'
+        'KOSPI_disparity_5', 'KOSPI_disparity_20', 'KOSPI_disparity_60', 'KOSPI_disparity_120'
     ]
     
     # imputation_values 파일 경로 설정 (data_path와 같은 레벨)

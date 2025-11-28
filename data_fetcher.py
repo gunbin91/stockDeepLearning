@@ -233,9 +233,14 @@ def _fetch_macro_data(start_date, end_date):
             
         if macro_data:
             macro_df = pd.concat(macro_data.values(), axis=1, keys=macro_data.keys()).ffill()
-            for col in macro_df.columns:
-                macro_df[f'{col}_pct_1d'] = macro_df[col].pct_change(1)
-                macro_df[f'{col}_pct_5d'] = macro_df[col].pct_change(5)
+            # pct_1d는 KOSPI, USDKRW만 생성 (VIX는 생성하지 않음)
+            if 'KOSPI' in macro_df.columns:
+                macro_df['KOSPI_pct_1d'] = macro_df['KOSPI'].pct_change(1)
+            if 'USDKRW' in macro_df.columns:
+                macro_df['USDKRW_pct_1d'] = macro_df['USDKRW'].pct_change(1)
+            if 'VIX' in macro_df.columns:
+                # VIX_pct_1d는 생성하지 않음 (삭제 요청)
+                pass
             
             # KOSPI 변동성 및 이격도 계산 (종목 데이터와 동일한 방식)
             if 'KOSPI' in macro_df.columns:
@@ -251,7 +256,7 @@ def _fetch_macro_data(start_date, end_date):
                 
                 # 이격도 계산 (종목 데이터와 동일한 방식)
                 # 이격도 = (현재가 / 이동평균) * 100
-                for period in [120, 240]:
+                for period in [5, 20, 60, 120]:
                     ma = kospi_close.rolling(window=period).mean()
                     macro_df[f'KOSPI_disparity_{period}'] = (kospi_close / ma) * 100
             
@@ -351,9 +356,22 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
              latest_data['BBW_20_2'] = np.nan
              latest_data['BB_Position'] = np.nan
 
-        for p in [120, 240]:
+        for p in [5, 10, 60, 120, 240]:
             ma = df_for_indicators['종가'].rolling(window=p).mean()
             latest_data[f'disparity_{p}'] = ((df_for_indicators['종가'] / ma) * 100).iloc[-1]
+
+        # 거래량 변동성 계수 계산 (1W, 1M, 3M)
+        volume_std_5 = df_for_indicators['거래량'].rolling(5).std()
+        volume_mean_5 = df_for_indicators['거래량'].rolling(5).mean()
+        latest_data['거래량 변동성 계수(1W)'] = (volume_std_5 / volume_mean_5).iloc[-1] if volume_mean_5.iloc[-1] != 0 else np.nan
+        
+        volume_std_20 = df_for_indicators['거래량'].rolling(20).std()
+        volume_mean_20 = df_for_indicators['거래량'].rolling(20).mean()
+        latest_data['거래량 변동성 계수(1M)'] = (volume_std_20 / volume_mean_20).iloc[-1] if volume_mean_20.iloc[-1] != 0 else np.nan
+        
+        volume_std_60 = df_for_indicators['거래량'].rolling(60).std()
+        volume_mean_60 = df_for_indicators['거래량'].rolling(60).mean()
+        latest_data['거래량 변동성 계수(3M)'] = (volume_std_60 / volume_mean_60).iloc[-1] if volume_mean_60.iloc[-1] != 0 else np.nan
 
         latest_data['52주_신고가_비율'] = (df_for_indicators['종가'] / df_for_indicators['종가'].rolling(250).max()).iloc[-1]
 

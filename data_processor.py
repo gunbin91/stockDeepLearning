@@ -369,9 +369,14 @@ def _fetch_macro_data(start_date, end_date):
         
         if macro_data:
             macro_df = pd.concat(macro_data.values(), axis=1, keys=macro_data.keys()).ffill()
-            for col in macro_df.columns:
-                macro_df[f'{col}_pct_1d'] = macro_df[col].pct_change(1)
-                macro_df[f'{col}_pct_5d'] = macro_df[col].pct_change(5)
+            # pct_1d는 KOSPI만 생성 (USDKRW, VIX는 생성하지 않음)
+            if 'KOSPI' in macro_df.columns:
+                macro_df['KOSPI_pct_1d'] = macro_df['KOSPI'].pct_change(1)
+            if 'USDKRW' in macro_df.columns:
+                macro_df['USDKRW_pct_1d'] = macro_df['USDKRW'].pct_change(1)
+            if 'VIX' in macro_df.columns:
+                # VIX_pct_1d는 생성하지 않음 (삭제 요청)
+                pass
             
             # KOSPI 변동성 및 이격도 계산 (종목 데이터와 동일한 방식)
             if 'KOSPI' in macro_df.columns:
@@ -387,7 +392,7 @@ def _fetch_macro_data(start_date, end_date):
                 
                 # 이격도 계산 (종목 데이터와 동일한 방식)
                 # 이격도 = (현재가 / 이동평균) * 100
-                for period in [120, 240]:
+                for period in [5, 20, 60, 120]:
                     ma = kospi_close.rolling(window=period).mean()
                     macro_df[f'KOSPI_disparity_{period}'] = (kospi_close / ma) * 100
             
@@ -631,12 +636,17 @@ def calculate_ticker_features(ticker, df_price):
         # 1. log_mktcap (시가총액 로그 변환)
         df['log_mktcap'] = np.log(df['시가총액'])
         
-        # 2. 이격도 계산 (120일, 240일)
-        for p in [120, 240]:
+        # 2. 이격도 계산 (5일, 10일, 60일, 120일, 240일)
+        for p in [5, 10, 60, 120, 240]:
             ma = df['종가'].rolling(window=p).mean()
             df[f'disparity_{p}'] = (df['종가'] / ma) * 100
         
-        # 3. 52주 신고가 비율
+        # 3. 거래량 변동성 계수 계산 (1W, 1M, 3M)
+        df['거래량 변동성 계수(1W)'] = df['거래량'].rolling(5).std() / df['거래량'].rolling(5).mean()
+        df['거래량 변동성 계수(1M)'] = df['거래량'].rolling(20).std() / df['거래량'].rolling(20).mean()
+        df['거래량 변동성 계수(3M)'] = df['거래량'].rolling(60).std() / df['거래량'].rolling(60).mean()
+        
+        # 4. 52주 신고가 비율
         df['52주_최고가'] = df['종가'].rolling(250).max()
         df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
         
@@ -841,8 +851,8 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     set_global_feature_data(df_marcap_long, df_financial_long)
     
     try:
-        # CPU 코어 수 확인 (최소 2개, 최대 8개)
-        cpu_workers = min(max(2, (os.cpu_count() or 8) // 2), 8)
+        # 논리 프로세서 수의 2/3 사용 (최소 2개)
+        cpu_workers = max(2, int((os.cpu_count() or 8) * 2 / 3))
         
         # ProcessPoolExecutor 사용 (CPU 작업 병렬 처리)
         # WSL2 환경에서는 fork 방식으로 효율적으로 동작

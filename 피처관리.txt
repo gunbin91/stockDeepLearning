@@ -13,12 +13,32 @@ disparity_240
 거래대금_MA5
 거래대금_MA20
 OBV
-KOSPI_pct_5d
-USDKRW_pct_5d
-VIX_pct_1d
-VIX_pct_5d
 
+KOSPI_변동성(1M)
+KOSPI_변동성(3M)
+KOSPI_변동성(1W)
+KOSPI_disparity_120
+KOSPI_disparity_5
+KOSPI_disparity_20
+KOSPI_disparity_60
 
+disparity_5
+disparity_10
+disparity_60
+거래량 변동성 계수(3M)
+거래량 변동성 계수(1M)
+거래량 변동성 계수(1W)
+
+--- 고려중
+pytrends - 구글 검색량 => 구현어려움
+외국인/기관 순매수,순매도
+이격도기울기(선형회귀기울기0
+등락율
+기울기가속도(어제기울기-오늘기울기)
+
+obv, bps정규화도 필요
+
+--- 제거
 PBR (GPU에서 제거됨)
 이익수익률 (GPU에서 제거됨)
 수익률(1M) (GPU에서 제거됨)
@@ -26,3 +46,9 @@ PBR (GPU에서 제거됨)
 ATRr_14 (GPU에서 제거됨)
 KOSPI_pct_1d (GPU에서 제거됨)
 USDKRW_pct_1d (GPU에서 제거됨)
+KOSPI_pct_5d
+USDKRW_pct_5d
+VIX_pct_1d
+VIX_pct_5d
+
+
