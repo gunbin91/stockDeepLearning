@@ -110,18 +110,45 @@ def calculate_shap_importance(model, X_train_scaled, y_train, features, sample_s
         else:
             X_train_df = X_train_scaled
         
+        # y_train을 pandas Series로 변환 (stratify 호환성)
+        if isinstance(y_train, np.ndarray):
+            y_train_series = pd.Series(y_train)
+        else:
+            y_train_series = y_train
+        
         actual_sample_size = min(sample_size, len(X_train_df))
         if actual_sample_size < len(X_train_df):
-            X_shap_sample, y_shap_sample = resample(
-                X_train_df, 
-                y_train, 
-                n_samples=actual_sample_size, 
-                stratify=y_train, 
-                random_state=42
-            )
+            # stratify를 안전하게 처리하기 위해 y_train을 1D 배열로 보장
+            if isinstance(y_train_series, pd.Series):
+                y_train_1d = y_train_series.values
+            elif isinstance(y_train_series, np.ndarray):
+                y_train_1d = y_train_series.flatten() if y_train_series.ndim > 1 else y_train_series
+            else:
+                y_train_1d = np.array(y_train_series).flatten()
+            
+            # resample 호출 (stratify는 1D 배열이어야 함)
+            try:
+                X_shap_sample, y_shap_sample = resample(
+                    X_train_df, 
+                    y_train_1d, 
+                    n_samples=actual_sample_size, 
+                    stratify=y_train_1d, 
+                    random_state=42
+                )
+            except Exception as e:
+                # stratify 실패 시 stratify 없이 재시도
+                log_warning(f"   ⚠️ 계층적 샘플링 실패, 일반 샘플링으로 재시도: {e}")
+                X_shap_sample, y_shap_sample = resample(
+                    X_train_df, 
+                    y_train_1d, 
+                    n_samples=actual_sample_size, 
+                    random_state=42
+                )
             # numpy array로 변환 (SHAP 입력 형식)
             if isinstance(X_shap_sample, pd.DataFrame):
                 X_shap_sample = X_shap_sample.values
+            if isinstance(y_shap_sample, pd.Series):
+                y_shap_sample = y_shap_sample.values
             log_info(f"   📊 계층적 샘플링 완료: {len(X_shap_sample):,}건")
         else:
             # numpy array로 변환
@@ -129,7 +156,10 @@ def calculate_shap_importance(model, X_train_scaled, y_train, features, sample_s
                 X_shap_sample = X_train_df.values
             else:
                 X_shap_sample = X_train_scaled
-            y_shap_sample = y_train
+            if isinstance(y_train_series, pd.Series):
+                y_shap_sample = y_train_series.values
+            else:
+                y_shap_sample = y_train_series
             log_info(f"   📊 전체 데이터 사용: {len(X_shap_sample):,}건")
         
         # SHAP TreeExplainer 사용
@@ -138,12 +168,17 @@ def calculate_shap_importance(model, X_train_scaled, y_train, features, sample_s
         
         # 이진 분류의 경우 shap_values는 리스트 [class_0, class_1] 또는 단일 array
         # 타입 체크를 더 안전하게 처리
-        if type(shap_values).__name__ == 'list' and len(shap_values) > 1:
-            # 리스트 형태이고 2개 이상의 요소가 있는 경우 (이진 분류)
-            shap_values_class1 = shap_values[1]  # 클래스 1(상승)에 대한 SHAP 값
-        elif type(shap_values).__name__ == 'list' and len(shap_values) == 1:
-            # 리스트 형태이지만 1개만 있는 경우
-            shap_values_class1 = shap_values[0]
+        if isinstance(shap_values, list):
+            if len(shap_values) > 1:
+                # 리스트 형태이고 2개 이상의 요소가 있는 경우 (이진 분류)
+                shap_values_class1 = shap_values[1]  # 클래스 1(상승)에 대한 SHAP 값
+            elif len(shap_values) == 1:
+                # 리스트 형태이지만 1개만 있는 경우
+                shap_values_class1 = shap_values[0]
+            else:
+                # 빈 리스트인 경우
+                log_warning("   ⚠️ SHAP 값이 빈 리스트입니다.")
+                return None
         else:
             # 단일 numpy array인 경우
             shap_values_class1 = shap_values
