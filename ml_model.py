@@ -228,35 +228,69 @@ def predict_with_ml_model(df):
             X_pred_scaled = X_pred.values
 
     try:
+        # 예측 시작 로그
+        log_info(f"   🔄 모델 예측 실행 중... (입력 데이터: {len(X_pred_scaled):,}개)")
+        
         # cuML 모델인 경우 래퍼가 자동으로 처리
-        pred_proba = model.predict_proba(X_pred_scaled)
+        try:
+            pred_proba = model.predict_proba(X_pred_scaled)
+        except Exception as predict_error:
+            # 예측 중 발생한 예외를 상세히 로깅
+            error_detail = f"predict_proba 호출 중 오류: {type(predict_error).__name__}: {str(predict_error)}"
+            log_error(f"   ❌ {error_detail}")
+            log_error(f"   ❌ 입력 데이터 형태: {type(X_pred_scaled)}, 크기: {getattr(X_pred_scaled, 'shape', 'N/A')}")
+            log_error(f"   ❌ 모델 타입: {type(model).__name__}")
+            if hasattr(model, 'n_features_in_'):
+                log_error(f"   ❌ 모델 기대 피처 수: {model.n_features_in_}")
+            raise ModelPredictionError(f"모델 예측 실행 중 오류: {error_detail}", model_name="RandomForest")
         
-        # 반환 형태에 따라 처리 (cuML 모델은 cuDF DataFrame 반환)
-        if isinstance(pred_proba, np.ndarray):
-            if pred_proba.ndim == 2:
-                y_pred_proba = pred_proba[:, 1]
+        # 예측 결과 처리
+        try:
+            # 반환 형태에 따라 처리 (cuML 모델은 cuDF DataFrame 반환)
+            if isinstance(pred_proba, np.ndarray):
+                if pred_proba.ndim == 2:
+                    y_pred_proba = pred_proba[:, 1]
+                else:
+                    y_pred_proba = pred_proba
+            elif hasattr(pred_proba, 'iloc'):
+                # cuDF DataFrame인 경우
+                if hasattr(pred_proba.iloc[:, 1], 'to_pandas'):
+                    y_pred_proba = pred_proba.iloc[:, 1].to_pandas().values
+                elif hasattr(pred_proba.iloc[:, 1], 'to_numpy'):
+                    y_pred_proba = pred_proba.iloc[:, 1].to_numpy()
+                else:
+                    y_pred_proba = pred_proba.iloc[:, 1].values
             else:
-                y_pred_proba = pred_proba
-        elif hasattr(pred_proba, 'iloc'):
-            # cuDF DataFrame인 경우
-            if hasattr(pred_proba.iloc[:, 1], 'to_pandas'):
-                y_pred_proba = pred_proba.iloc[:, 1].to_pandas().values
-            elif hasattr(pred_proba.iloc[:, 1], 'to_numpy'):
-                y_pred_proba = pred_proba.iloc[:, 1].to_numpy()
-            else:
-                y_pred_proba = pred_proba.iloc[:, 1].values
-        else:
-            # 기타 형태는 그대로 사용
-            y_pred_proba = pred_proba[:, 1] if hasattr(pred_proba, '__getitem__') else pred_proba
+                # 기타 형태는 그대로 사용
+                y_pred_proba = pred_proba[:, 1] if hasattr(pred_proba, '__getitem__') else pred_proba
+            
+            # 예측 결과 검증
+            if y_pred_proba is None:
+                raise ModelPredictionError("예측 결과가 None입니다.", model_name="RandomForest")
+            
+            if len(y_pred_proba) != len(result_df):
+                log_warning(f"   ⚠️ 예측 결과 길이 불일치: 예측={len(y_pred_proba)}, 종목={len(result_df)}")
+            
+            # 예측 결과 통계
+            avg_proba = np.mean(y_pred_proba)
+            high_proba_count = np.sum(y_pred_proba > 0.7)
+            log_info(f"   ✅ 예측 완료 (평균 확률: {avg_proba:.3f}, 고확률: {high_proba_count:,}개)")
+            
+        except Exception as process_error:
+            error_detail = f"예측 결과 처리 중 오류: {type(process_error).__name__}: {str(process_error)}"
+            log_error(f"   ❌ {error_detail}")
+            log_error(f"   ❌ 예측 결과 타입: {type(pred_proba)}")
+            raise ModelPredictionError(f"예측 결과 처리 중 오류: {error_detail}", model_name="RandomForest")
         
-        # 예측 결과 통계
-        avg_proba = np.mean(y_pred_proba)
-        high_proba_count = np.sum(y_pred_proba > 0.7)
-        log_info(f"   ✅ 예측 완료 (평균 확률: {avg_proba:.3f}, 고확률: {high_proba_count:,}개)")
-        
+    except ModelPredictionError:
+        # ModelPredictionError는 그대로 재발생
+        raise
     except Exception as e:
-        error_msg = f"모델 예측 중 오류 발생: {e}"
-        log_error(error_msg)
+        # 기타 예외는 ModelPredictionError로 변환
+        error_msg = f"모델 예측 중 예상치 못한 오류 발생: {type(e).__name__}: {str(e)}"
+        log_error(f"   ❌ {error_msg}")
+        import traceback
+        log_error(f"   ❌ 스택 트레이스:\n{traceback.format_exc()}")
         raise ModelPredictionError(error_msg, model_name="RandomForest")
     
     result_df['ml_pred_proba'] = y_pred_proba

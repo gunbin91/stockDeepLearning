@@ -131,7 +131,7 @@
                         <td>{{ "{:,.0f}".format(row['기준일가(원)']) }}</td>
                         <td>{{ "{:.2f}".format(row['최종점수(점)']) }}</td>
                         <td>{{ "{:.2f}".format(row['상승확률(%)']) }}</td>
-                        <td>{{ "{:.2f}".format(row['변동성(점)']) }}</td>
+                        <td>{% if row.get('변동성(점)') is defined %}{{ "{:.2f}".format(row['변동성(점)']) }}{% else %}0.00{% endif %}</td>
                         <td>{{ "{:,.0f}".format(row['시가총액(억)']) }}</td>
                     </tr>
                     {% endfor %}

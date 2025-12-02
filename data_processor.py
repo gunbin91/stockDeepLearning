@@ -27,6 +27,7 @@ import gc
 import locale
 import platform
 import multiprocessing
+import time
 
 # WSL2/Linux 환경에서 multiprocessing 최적화
 # fork 방식 사용 (spawn보다 빠르고 메모리 효율적)
@@ -51,6 +52,66 @@ if platform.system() == 'Windows':
 from scoring import calculate_factor_scores
 from path_manager import path_manager
 from logger import log_info, log_critical, log_error, log_warning, log_progress
+
+# =================================================================
+# 유틸리티 함수: 정규화된 선형회귀기울기 계산
+# =================================================================
+
+def calculate_normalized_linear_regression_slope(series, window=5):
+    """
+    정규화된 선형회귀기울기 계산 (NumPy 벡터화)
+    
+    Args:
+        series: pandas Series (예: 변동성 값)
+        window: 선형회귀에 사용할 기간
+    
+    Returns:
+        정규화된 기울기 시계열 (백분율, %)
+    
+    계산식:
+        기울기 = LINEARREG_SLOPE(series, window) / series * 100
+    """
+    if len(series) < window:
+        return pd.Series([np.nan] * len(series), index=series.index)
+    
+    values = series.values
+    n = len(values)
+    slopes = np.full(n, np.nan, dtype=np.float64)
+    
+    # 시간 인덱스 (고정, 재사용)
+    x = np.arange(window, dtype=np.float64)
+    x_mean = x.mean()
+    x_centered = x - x_mean
+    x_centered_sq_sum = np.sum(x_centered ** 2)
+    
+    # 슬라이딩 윈도우 계산
+    for i in range(window - 1, n):
+        # 현재 윈도우의 값
+        y = values[i - window + 1:i + 1]
+        current_value = values[i]
+        
+        # 안전성 검사: 0으로 나누기 및 NaN 방지
+        if current_value == 0 or np.isnan(current_value):
+            continue
+        if np.isnan(y).any():
+            continue
+        
+        # 선형회귀 기울기 계산
+        y_mean = np.nanmean(y)
+        y_centered = y - y_mean
+        numerator = np.sum(x_centered * y_centered)
+        
+        if x_centered_sq_sum == 0:
+            continue
+        
+        # 절대 기울기
+        abs_slope = numerator / x_centered_sq_sum
+        
+        # 정규화: 현재 값으로 나누고 100 곱하기 (백분율)
+        normalized_slope = (abs_slope / current_value) * 100
+        slopes[i] = normalized_slope
+    
+    return pd.Series(slopes, index=series.index)
 
 # 통일된 경로 사용
 PROJECT_ROOT = str(path_manager.project_root)
@@ -202,6 +263,9 @@ def _fetch_financial_data(start_date, end_date):
                 except Exception as e:
                     failed_count += 1
                     log_error(f"재무데이터 수집 오류 ({date_str.strftime('%Y-%m-%d')}): {e}")
+                
+                # API 부하 방지를 위한 지연 추가
+                time.sleep(0.2)
                 
                 # 진행률 로그 메시지 - 매번 출력하되 같은 줄에서 덮어쓰기
                 log_progress("월초 재무데이터 수집", completed_count + failed_count, total_dates)
@@ -382,19 +446,20 @@ def _fetch_macro_data(start_date, end_date):
             if 'KOSPI' in macro_df.columns:
                 kospi_close = macro_df['KOSPI']
                 
-                # 변동성 계산 (종목 데이터와 동일한 방식)
-                # 변동성(1W) = 5일 롤링 표준편차 / 5일 롤링 평균
-                macro_df['KOSPI_변동성(1W)'] = kospi_close.rolling(5).std() / kospi_close.rolling(5).mean()
-                # 변동성(1M) = 20일 롤링 표준편차 / 20일 롤링 평균
-                macro_df['KOSPI_변동성(1M)'] = kospi_close.rolling(20).std() / kospi_close.rolling(20).mean()
-                # 변동성(3M) = 60일 롤링 표준편차 / 60일 롤링 평균
-                macro_df['KOSPI_변동성(3M)'] = kospi_close.rolling(60).std() / kospi_close.rolling(60).mean()
-                
                 # 이격도 계산 (종목 데이터와 동일한 방식)
                 # 이격도 = (현재가 / 이동평균) * 100
-                for period in [5, 20, 60, 120]:
+                for period in [60]:
                     ma = kospi_close.rolling(window=period).mean()
                     macro_df[f'KOSPI_disparity_{period}'] = (kospi_close / ma) * 100
+                
+                # KOSPI 변동성 1M 계산 (20일 기준)
+                try:
+                    kospi_std_20 = kospi_close.rolling(window=20).std()
+                    kospi_mean_20 = kospi_close.rolling(window=20).mean()
+                    macro_df['KOSPI_변동성(1M)'] = kospi_std_20 / kospi_mean_20
+                except Exception as e:
+                    log_warning(f"KOSPI 변동성(1M) 계산 실패: {e}")
+                    macro_df['KOSPI_변동성(1M)'] = np.nan
             
             macro_df.reset_index(inplace=True)
             macro_df.rename(columns={'index': 'date'}, inplace=True)
@@ -412,6 +477,7 @@ def fetch_ticker_price_data(stock_info, start_date, end_date):
     단일 종목 주가 데이터 다운로드 함수 (I/O 작업)
     
     ThreadPoolExecutor로 병렬 처리되는 I/O 작업만 수행합니다.
+    외부 future.result(timeout=120)로 타임아웃이 관리됩니다.
     
     Args:
         stock_info: 종목 정보 (종목코드, 종목명 등)
@@ -430,19 +496,26 @@ def fetch_ticker_price_data(stock_info, start_date, end_date):
         # 2단계: KRX (한국 거래소 공식 데이터)
         # 3단계: NAVER (최후의 수단)
         df_price = None
+        
+        # 1차 시도: Yahoo Finance (가장 빠름)
         try:
-            # 1차 시도: Yahoo Finance (가장 빠름)
             df_price = fdr.DataReader(ticker, start_date, end_date)
         except:
+            df_price = None
+        
+        if df_price is None or df_price.empty:
+            # 2차 시도: KRX (한국 거래소 공식 데이터)
             try:
-                # 2차 시도: KRX (한국 거래소 공식 데이터)
                 df_price = fdr.DataReader(f'KRX:{ticker}', start_date, end_date)
             except:
-                try:
-                    # 3차 시도: NAVER (최후의 수단)
-                    df_price = fdr.DataReader(f'NAVER:{ticker}', start_date, end_date)
-                except:
-                    df_price = None
+                df_price = None
+        
+        if df_price is None or df_price.empty:
+            # 3차 시도: NAVER (최후의 수단)
+            try:
+                df_price = fdr.DataReader(f'NAVER:{ticker}', start_date, end_date)
+            except:
+                df_price = None
         
         # 데이터 품질 검증: 충분한 데이터가 있는지 확인
         # 251일(1년) + 60일(추가 버퍼) = 311일 이상의 데이터 필요
@@ -462,6 +535,7 @@ def fetch_ticker_price_data(stock_info, start_date, end_date):
     except Exception as e:
         log_error(f"종목 {ticker} 데이터 다운로드 중 오류: {e}")
         return (ticker, None)
+
 
 
 def calculate_ticker_features(ticker, df_price):
@@ -545,11 +619,61 @@ def calculate_ticker_features(ticker, df_price):
             log_warning(f"ATR 계산 실패 ({ticker}): {e}")
             df['ATRr_14'] = np.nan
         
+        # ATR 추가 계산 (5, 20, 60일)
+        # pandas-ta는 ATRr_5, ATRr_20, ATRr_60 형식으로 컬럼을 생성합니다
+        try:
+            df.ta.atr(high='고가', low='저가', close='종가', length=5, append=True)
+            df.ta.atr(high='고가', low='저가', close='종가', length=20, append=True)
+            df.ta.atr(high='고가', low='저가', close='종가', length=60, append=True)
+        except Exception as e:
+            log_warning(f"ATR 추가 계산 실패 ({ticker}): {e}")
+            # pandas-ta가 생성하는 실제 컬럼명 사용
+            if 'ATRr_5' not in df.columns:
+                df['ATRr_5'] = np.nan
+            if 'ATRr_20' not in df.columns:
+                df['ATRr_20'] = np.nan
+            if 'ATRr_60' not in df.columns:
+                df['ATRr_60'] = np.nan
+        
+        # ATRr_20 확인 및 처리 (pandas-ta가 이미 비율 형태로 생성)
+        # ATRr_20은 이미 (ATR / 종가) * 100 형태이므로 그대로 사용
+        if 'ATRr_20' not in df.columns:
+            df['ATRr_20'] = np.nan
+        
+        # ATR_Ratio_Short 계산 (단기 응축: ATRr_5 / ATRr_20)
+        try:
+            if 'ATRr_5' in df.columns and 'ATRr_20' in df.columns:
+                df['ATR_Ratio_Short'] = df['ATRr_5'] / df['ATRr_20']
+            else:
+                df['ATR_Ratio_Short'] = np.nan
+        except Exception as e:
+            log_warning(f"ATR_Ratio_Short 계산 실패 ({ticker}): {e}")
+            df['ATR_Ratio_Short'] = np.nan
+        
+        # ATR_Ratio_Trend 계산 (에너지 추세: ATRr_20 / ATRr_60)
+        try:
+            if 'ATRr_20' in df.columns and 'ATRr_60' in df.columns:
+                df['ATR_Ratio_Trend'] = df['ATRr_20'] / df['ATRr_60']
+            else:
+                df['ATR_Ratio_Trend'] = np.nan
+        except Exception as e:
+            log_warning(f"ATR_Ratio_Trend 계산 실패 ({ticker}): {e}")
+            df['ATR_Ratio_Trend'] = np.nan
+        
         try:
             df.ta.obv(close='종가', volume='거래량', append=True)
         except Exception as e:
             log_warning(f"OBV 계산 실패 ({ticker}): {e}")
             df['OBV'] = np.nan
+        
+        # OBV_Slope 계산 (매집 강도)
+        try:
+            obv_5d_ago = df['OBV'].shift(5)
+            obv_abs_5d_ago = obv_5d_ago.abs()
+            df['OBV_Slope'] = np.where(obv_abs_5d_ago != 0, (df['OBV'] - obv_5d_ago) / obv_abs_5d_ago, 0)
+        except Exception as e:
+            log_warning(f"OBV_Slope 계산 실패 ({ticker}): {e}")
+            df['OBV_Slope'] = np.nan
         
         try:
             df.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
@@ -557,45 +681,19 @@ def calculate_ticker_features(ticker, df_price):
             log_warning(f"ADX 계산 실패 ({ticker}): {e}")
             df['ADX_14'] = np.nan
         
-        # 볼린저 밴드 계산
+        # RSI_14 계산
+        try:
+            df.ta.rsi(close='종가', length=14, append=True)
+        except Exception as e:
+            log_warning(f"RSI 계산 실패 ({ticker}): {e}")
+            df['RSI_14'] = np.nan
+        
+        # 볼린저 밴드 계산 (BB_Position 제거됨 - 다른 용도로 사용 가능)
         try:
             bbands = df.ta.bbands(close='종가', length=20, std=2)
-            if bbands is not None and not bbands.empty:
-                # 새로운 컬럼명 형식 확인 (pandas-ta 최신 버전)
-                if all(col in bbands.columns for col in ['BBL_20_2.0_2.0', 'BBU_20_2.0_2.0', 'BBM_20_2.0_2.0']):
-                    df['BBW_20_2'] = (bbands['BBU_20_2.0_2.0'] - bbands['BBL_20_2.0_2.0']) / bbands['BBM_20_2.0_2.0']
-                    # BB_Position 계산: (현재가 - 하단밴드) / (상단밴드 - 하단밴드)
-                    current_price = df['종가']
-                    bb_lower = bbands['BBL_20_2.0_2.0']
-                    bb_upper = bbands['BBU_20_2.0_2.0']
-                    # 0으로 나누기 방지
-                    bb_range = bb_upper - bb_lower
-                    df['BB_Position'] = np.where(bb_range != 0, (current_price - bb_lower) / bb_range, 0.5)
-                    # 0~1 범위로 제한
-                    df['BB_Position'] = df['BB_Position'].clip(0, 1)
-                # 기존 컬럼명 형식 확인 (pandas-ta 이전 버전)
-                elif all(col in bbands.columns for col in ['BBL_20_2.0', 'BBU_20_2.0', 'BBM_20_2.0']):
-                    df['BBW_20_2'] = (bbands['BBU_20_2.0'] - bbands['BBL_20_2.0']) / bbands['BBM_20_2.0']
-                    current_price = df['종가']
-                    bb_lower = bbands['BBL_20_2.0']
-                    bb_upper = bbands['BBU_20_2.0']
-                    # 0으로 나누기 방지
-                    bb_range = bb_upper - bb_lower
-                    df['BB_Position'] = np.where(bb_range != 0, (current_price - bb_lower) / bb_range, 0.5)
-                    # 0~1 범위로 제한
-                    df['BB_Position'] = df['BB_Position'].clip(0, 1)
-                else:
-                    # 컬럼명을 찾을 수 없는 경우 기본값 설정
-                    df['BBW_20_2'] = np.nan
-                    df['BB_Position'] = np.nan
-            else:
-                # 볼린저 밴드 계산 실패 시 기본값 설정
-                df['BBW_20_2'] = np.nan
-                df['BB_Position'] = np.nan
+            # BB_Position 피처는 제거됨
         except Exception as e:
             log_warning(f"볼린저 밴드 계산 실패 ({ticker}): {e}")
-            df['BBW_20_2'] = np.nan
-            df['BB_Position'] = np.nan
         
         # 볼린저 밴드 데이터 메모리 해제 (안전하게)
         try:
@@ -610,15 +708,45 @@ def calculate_ticker_features(ticker, df_price):
         df['수익률(1M)'] = df['종가'].pct_change(20)
         df['수익률(3M)'] = df['종가'].pct_change(60)
         
-        # 변동성 계산
-        df['변동성(1W)'] = df['종가'].rolling(5).std() / df['종가'].rolling(5).mean()
-        df['변동성(1M)'] = df['종가'].rolling(20).std() / df['종가'].rolling(20).mean()
-        df['변동성(3M)'] = df['종가'].rolling(60).std() / df['종가'].rolling(60).mean()
-        
         # 거래대금 계산
         df['거래대금'] = df['종가'] * df['거래량']
-        df['거래대금_MA5'] = df['거래대금'].rolling(5).mean()
-        df['거래대금_MA20'] = df['거래대금'].rolling(20).mean()
+        
+        # RVOL 계산 (상대 거래량)
+        try:
+            df['RVOL'] = df['거래량'] / df['거래량'].rolling(20).mean()
+        except Exception as e:
+            log_warning(f"RVOL 계산 실패 ({ticker}): {e}")
+            df['RVOL'] = np.nan
+        
+        # Z_Score_20 계산 (표준화 이격)
+        try:
+            mean_20 = df['종가'].rolling(20).mean()
+            std_20 = df['종가'].rolling(20).std()
+            df['Z_Score_20'] = (df['종가'] - mean_20) / std_20
+        except Exception as e:
+            log_warning(f"Z_Score_20 계산 실패 ({ticker}): {e}")
+            df['Z_Score_20'] = np.nan
+        
+        # Position_Range_60 계산 (Donchian)
+        try:
+            high_60 = df['고가'].rolling(60).max()
+            low_60 = df['저가'].rolling(60).min()
+            range_60 = high_60 - low_60
+            df['Position_Range_60'] = np.where(range_60 != 0, (df['종가'] - low_60) / range_60, 0.5)
+            df['Position_Range_60'] = df['Position_Range_60'].clip(0, 1)
+        except Exception as e:
+            log_warning(f"Position_Range_60 계산 실패 ({ticker}): {e}")
+            df['Position_Range_60'] = np.nan
+        
+        # Eff_Ratio_10 계산 (효율 비율)
+        try:
+            price_change = df['종가'].diff(10).abs()
+            daily_changes = df['종가'].diff().abs()
+            price_range = daily_changes.rolling(10).sum()
+            df['Eff_Ratio_10'] = np.where(price_range != 0, price_change / price_range, 0)
+        except Exception as e:
+            log_warning(f"Eff_Ratio_10 계산 실패 ({ticker}): {e}")
+            df['Eff_Ratio_10'] = np.nan
         
         # 재무데이터 관련 지표 (백업 프로젝트와 동일)
         if 'PER' in df.columns and not df['PER'].isnull().all():
@@ -636,26 +764,31 @@ def calculate_ticker_features(ticker, df_price):
         # 1. log_mktcap (시가총액 로그 변환)
         df['log_mktcap'] = np.log(df['시가총액'])
         
-        # 2. 이격도 계산 (5일, 10일, 60일, 120일, 240일)
-        for p in [5, 10, 60, 120, 240]:
+        # 2. 이격도 계산 (60일, 120일, 240일)
+        for p in [60, 120, 240]:
             ma = df['종가'].rolling(window=p).mean()
             df[f'disparity_{p}'] = (df['종가'] / ma) * 100
         
-        # 3. 거래량 변동성 계수 계산 (1W, 1M, 3M)
-        df['거래량 변동성 계수(1W)'] = df['거래량'].rolling(5).std() / df['거래량'].rolling(5).mean()
-        df['거래량 변동성 계수(1M)'] = df['거래량'].rolling(20).std() / df['거래량'].rolling(20).mean()
-        df['거래량 변동성 계수(3M)'] = df['거래량'].rolling(60).std() / df['거래량'].rolling(60).mean()
+        # MA60_Slope 계산 (60일 이동평균선 기울기)
+        try:
+            ma60 = df['종가'].rolling(window=60).mean()
+            df['MA60_Slope'] = calculate_normalized_linear_regression_slope(ma60, window=5)
+        except Exception as e:
+            log_warning(f"MA60_Slope 계산 실패 ({ticker}): {e}")
+            df['MA60_Slope'] = np.nan
         
-        # 4. 52주 신고가 비율
+        # 3. 52주 신고가 비율
         df['52주_최고가'] = df['종가'].rolling(250).max()
         df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
         
-        # target 변수 생성 (10일 사이 한번이라도 8% 상승이 있었는지 확인)
-        # 10일 후부터 역방향으로 10일 윈도우의 최대값 계산
+        # target 변수 생성 (10일 내 5% 이하로 떨어지지 않고 8% 이상 상승)
+        # 10일 후부터 역방향으로 10일 윈도우의 최소값과 최대값 계산
+        min_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).min()
         max_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).max()
-        df['target'] = (max_price_10d / df['종가'] > 1.08).astype(int)
+        # 조건: 최소값 >= 현재가격 * 0.95 (5% 이하로 떨어지지 않음) AND 최대값 >= 현재가격 * 1.08 (8% 이상 상승)
+        df['target'] = ((min_price_10d / df['종가'] >= 0.95) & (max_price_10d / df['종가'] > 1.08)).astype(int)
         # 중간 변수 삭제 (메모리 최적화)
-        del max_price_10d
+        del min_price_10d, max_price_10d
         df['종목코드'] = ticker
         
         # 데이터 구조 설정
@@ -733,6 +866,9 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
                 except Exception: 
                     continue
                 
+                # API 부하 방지를 위한 지연 추가
+                time.sleep(0.2)
+                
                 completed_count += 1
                 # PROGRESS 접두사로 진행률 로그 출력 - 매번 출력하되 같은 줄에서 덮어쓰기
                 log_progress("시가총액 데이터 수집", completed_count, total_dates)
@@ -805,35 +941,58 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     
     # =================================================================
     # 1단계: ThreadPoolExecutor로 데이터 다운로드 (I/O 작업)
+    # 배치 처리로 멈춘 future 문제 해결
     # =================================================================
     log_info("📥 1단계: 주가 데이터 다운로드 중...")
     downloaded_data = {}  # {ticker: df_price}
     download_failed = []
     
-    thread_workers = min(12, total_count)  # 스레드 수 12로 변경
-    with concurrent.futures.ThreadPoolExecutor(max_workers=thread_workers) as executor:
-        future_to_stock = {executor.submit(fetch_ticker_price_data, row, start_date, end_date): row for row in stock_records}
-        download_completed = 0
-        for future in concurrent.futures.as_completed(future_to_stock):
-            try:
-                ticker, df_price = future.result(timeout=120)  # 2분 타임아웃
-                if df_price is not None:
-                    downloaded_data[ticker] = df_price
-                else:
-                    download_failed.append(ticker)
-            except concurrent.futures.TimeoutError:
-                stock_info = future_to_stock.get(future, {})
-                ticker = stock_info.get('종목코드', 'Unknown')
-                download_failed.append(ticker)
-                log_error(f"⏱️ 종목 {ticker} 데이터 다운로드 타임아웃 (2분 초과)")
-            except Exception as e:
-                stock_info = future_to_stock.get(future, {})
-                ticker = stock_info.get('종목코드', 'Unknown')
-                download_failed.append(ticker)
-                log_error(f"❌ 종목 {ticker} 데이터 다운로드 중 오류: {e}")
+    # 배치 단위로 처리하여 멈춘 future 문제 해결
+    batch_size = 100
+    total_batches = (total_count + batch_size - 1) // batch_size
+    download_completed = 0
+    
+    log_info(f"총 {total_count}개 종목을 {total_batches}개 배치로 처리합니다.")
+    
+    for batch_idx in range(0, total_count, batch_size):
+        batch = stock_records[batch_idx:batch_idx + batch_size]
+        current_batch = batch_idx // batch_size + 1
+        
+        thread_workers = min(12, len(batch))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=thread_workers) as executor:
+            future_to_stock = {executor.submit(fetch_ticker_price_data, row, start_date, end_date): row for row in batch}
             
-            download_completed += 1
-            log_progress("주가 데이터 다운로드", download_completed, total_count)
+            # 배치 내 완료된 future 처리
+            batch_completed = 0
+            for future in concurrent.futures.as_completed(future_to_stock):
+                try:
+                    ticker, df_price = future.result(timeout=120)  # 2분 타임아웃
+                    if df_price is not None:
+                        downloaded_data[ticker] = df_price
+                    else:
+                        download_failed.append(ticker)
+                except concurrent.futures.TimeoutError:
+                    stock_info = future_to_stock.get(future, {})
+                    ticker = stock_info.get('종목코드', 'Unknown')
+                    download_failed.append(ticker)
+                    log_warning(f"⏱️ 종목 {ticker} 전체 작업 타임아웃 (2분 초과) - 스킵하고 다음 종목으로 진행")
+                except Exception as e:
+                    stock_info = future_to_stock.get(future, {})
+                    ticker = stock_info.get('종목코드', 'Unknown')
+                    download_failed.append(ticker)
+                    log_error(f"❌ 종목 {ticker} 데이터 다운로드 중 오류: {e}")
+                
+                batch_completed += 1
+                download_completed += 1
+                log_progress("주가 데이터 다운로드", download_completed, total_count)
+            
+            # 배치 완료 로그
+            log_info(f"배치 {current_batch}/{total_batches} 완료 ({batch_completed}/{len(batch)}개 종목)")
+        
+        # 배치 간 메모리 정리 및 API 부하 방지
+        gc.collect()
+        if current_batch < total_batches:
+            time.sleep(0.5)  # 배치 간 0.5초 대기
     
     log_info(f"✅ 데이터 다운로드 완료: {len(downloaded_data)}/{total_count}개 성공 (실패: {len(download_failed)}개)")
     
@@ -841,14 +1000,14 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
         log_error("다운로드된 데이터가 없습니다.")
         raise ValueError("다운로드된 데이터가 없습니다.")
     
+    # 전역 변수에 데이터 설정 (fork 방식에서 Copy-on-Write로 효율적으로 공유됨)
+    set_global_feature_data(df_marcap_long, df_financial_long)
+    
     # =================================================================
     # 2단계: ProcessPoolExecutor로 피처 계산 (CPU 작업)
     # =================================================================
     log_info("⚙️ 2단계: 피처 계산 중...")
     failed_count = 0
-    
-    # 전역 변수에 데이터 설정 (fork 방식에서 Copy-on-Write로 효율적으로 공유됨)
-    set_global_feature_data(df_marcap_long, df_financial_long)
     
     try:
         # 논리 프로세서 수의 2/3 사용 (최소 2개)

@@ -428,20 +428,29 @@ def prepare_data_and_save(data_path, start_date, end_date):
     # 기존 CPU 버전과 동일하게, 검증된 핵심 피처 목록을 하드코딩
     # 제거된 피처: PBR, USDKRW_pct_1d, KOSPI_pct_1d, 이익수익률, 수익률(3M), 수익률(1M), ATRr_14
     # 제거된 피처: KOSPI_disparity_240, USDKRW_pct_5d, VIX_pct_1d, VIX_pct_5d, KOSPI_pct_5d
-    # 추가된 피처: KOSPI_변동성(1W), KOSPI_변동성(1M), KOSPI_변동성(3M), KOSPI_disparity_120
-    # 추가된 피처: KOSPI_disparity_5, KOSPI_disparity_20, KOSPI_disparity_60
-    # 추가된 피처: disparity_5, disparity_10, disparity_60
-    # 추가된 피처: 거래량 변동성 계수(1W), 거래량 변동성 계수(1M), 거래량 변동성 계수(3M)
+    # 추가된 피처: KOSPI_disparity_60
+    # 추가된 피처: disparity_60
+    # 제거된 피처: BBW_20_2, 거래량 변동성 계수, 변동성 기울기, 거래량 변동성 계수 기울기
+    # 제거된 피처: 등락율, 주가_기울기(1W/1M/3M), disparity_5/10, 변동성(5M), KOSPI_변동성(3D/5M), KOSPI_disparity_5
+    # 제거된 피처: 변동성(3D/3M/1M/1W), KOSPI_변동성(3M/1W), KOSPI_disparity_120/20, BPS, 거래대금_MA20/MA5, BB_Position
     features = [
-        'log_mktcap', 'BPS',
+        'log_mktcap',
         '52주_신고가_비율',
         'ADX_14',
-        '변동성(1W)', '변동성(1M)', '변동성(3M)', 'BBW_20_2', 'BB_Position',
-        'disparity_5', 'disparity_10', 'disparity_60', 'disparity_120', 'disparity_240',
-        '거래대금_MA5', '거래대금_MA20', 'OBV',
-        '거래량 변동성 계수(1W)', '거래량 변동성 계수(1M)', '거래량 변동성 계수(3M)',
-        'KOSPI_변동성(1W)', 'KOSPI_변동성(1M)', 'KOSPI_변동성(3M)',
-        'KOSPI_disparity_5', 'KOSPI_disparity_20', 'KOSPI_disparity_60', 'KOSPI_disparity_120'
+        'disparity_60', 'disparity_120', 'disparity_240',
+        'KOSPI_disparity_60',
+        # 추가된 피처
+        'ATRr_20',
+        'ATR_Ratio_Short',
+        'ATR_Ratio_Trend',
+        'Eff_Ratio_10',
+        'RVOL',
+        'Z_Score_20',
+        'Position_Range_60',
+        'RSI_14',
+        'OBV_Slope',
+        'KOSPI_변동성(1M)',
+        'MA60_Slope'
     ]
 
     try:
@@ -1503,20 +1512,29 @@ def main():
     # 기존 CPU 버전과 동일하게, 검증된 핵심 피처 목록을 하드코딩
     # 제거된 피처: PBR, USDKRW_pct_1d, KOSPI_pct_1d, 이익수익률, 수익률(3M), 수익률(1M), ATRr_14
     # 제거된 피처: KOSPI_disparity_240, USDKRW_pct_5d, VIX_pct_1d, VIX_pct_5d, KOSPI_pct_5d
-    # 추가된 피처: KOSPI_변동성(1W), KOSPI_변동성(1M), KOSPI_변동성(3M), KOSPI_disparity_120
-    # 추가된 피처: KOSPI_disparity_5, KOSPI_disparity_20, KOSPI_disparity_60
-    # 추가된 피처: disparity_5, disparity_10, disparity_60
-    # 추가된 피처: 거래량 변동성 계수(1W), 거래량 변동성 계수(1M), 거래량 변동성 계수(3M)
+    # 추가된 피처: KOSPI_disparity_60
+    # 추가된 피처: disparity_60
+    # 제거된 피처: BBW_20_2, 거래량 변동성 계수, 변동성 기울기, 거래량 변동성 계수 기울기
+    # 제거된 피처: 등락율, 주가_기울기(1W/1M/3M), disparity_5/10, 변동성(5M), KOSPI_변동성(3D/5M), KOSPI_disparity_5
+    # 제거된 피처: 변동성(3D/3M/1M/1W), KOSPI_변동성(3M/1W), KOSPI_disparity_120/20, BPS, 거래대금_MA20/MA5, BB_Position
     features = [
-        'log_mktcap', 'BPS',
+        'log_mktcap',
         '52주_신고가_비율',
         'ADX_14',
-        '변동성(1W)', '변동성(1M)', '변동성(3M)', 'BBW_20_2', 'BB_Position',
-        'disparity_5', 'disparity_10', 'disparity_60', 'disparity_120', 'disparity_240',
-        '거래대금_MA5', '거래대금_MA20', 'OBV',
-        '거래량 변동성 계수(1W)', '거래량 변동성 계수(1M)', '거래량 변동성 계수(3M)',
-        'KOSPI_변동성(1W)', 'KOSPI_변동성(1M)', 'KOSPI_변동성(3M)',
-        'KOSPI_disparity_5', 'KOSPI_disparity_20', 'KOSPI_disparity_60', 'KOSPI_disparity_120'
+        'disparity_60', 'disparity_120', 'disparity_240',
+        'KOSPI_disparity_60',
+        # 추가된 피처
+        'ATRr_20',
+        'ATR_Ratio_Short',
+        'ATR_Ratio_Trend',
+        'Eff_Ratio_10',
+        'RVOL',
+        'Z_Score_20',
+        'Position_Range_60',
+        'RSI_14',
+        'OBV_Slope',
+        'KOSPI_변동성(1M)',
+        'MA60_Slope'
     ]
     
     # imputation_values 파일 경로 설정 (data_path와 같은 레벨)
@@ -1796,7 +1814,7 @@ def main():
         # 모델 목표 정보 (메타데이터)
         'target_days': 10,  # 거래일 기준
         'target_percentage': 8,  # 퍼센트
-        'target_description': '10거래일 사이 한번이라도 8% 상승이 있었는지 확인'
+        'target_description': '10거래일 내 5% 이하로 떨어지지 않고 8% 이상 상승'
     }
 
     # --- 4. 최종 모델 훈련 및 저장 (캐시 데이터 재사용) ---

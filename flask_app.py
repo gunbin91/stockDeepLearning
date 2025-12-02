@@ -25,6 +25,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import subprocess
 import re
+import time
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_from_directory
 from flask_socketio import SocketIO, emit
 import plotly.graph_objects as go
@@ -39,6 +40,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # 기존 모듈들 임포트
 import data_fetcher
+import data_processor
 import scoring
 import ml_model
 import ensemble
@@ -197,6 +199,10 @@ def load_cached_analysis_result():
             
             if 'ml_pred_proba' in display_df.columns:
                 display_df['ml_pred_proba'] = display_df['ml_pred_proba'] * 100
+            
+            # volatility_score가 없을 때 기본값 설정
+            if 'volatility_score' not in display_df.columns:
+                display_df['volatility_score'] = 50.0
             
             display_df['등락율'] = ((display_df['현재가'] - display_df['기준일가']) / display_df['기준일가']) * 100
             display_df['현재가(원)_formatted'] = display_df.apply(format_price_with_change, axis=1)
@@ -827,68 +833,131 @@ def start_analysis():
                 # 실시간 로그 전송
                 PROGRESS_REGEX = re.compile(r'\[PROGRESS\].*\(\d+/\d+ - \d+\.\d+%\)')
                 last_line_was_tqdm = False
+                last_log_time = time.time()
+                process_timeout = 7200  # 2시간 타임아웃
+                no_output_timeout = 600  # 10분간 출력이 없으면 타임아웃
                 
-                for line in iter(process.stdout.readline, ''):
-                    # 터미널 출력 (진행률 메시지만 특별 처리)
-                    if PROGRESS_REGEX.search(line):
-                        # 진행률 메시지만 덮어쓰기 처리
-                        sys.stdout.write(line.strip() + '\r')
-                        last_line_was_tqdm = True
-                    else:
-                        if last_line_was_tqdm:
-                            sys.stdout.write('\n')
-                        sys.stdout.write(line)
-                        last_line_was_tqdm = False
-                    sys.stdout.flush()
-                    
-                    # 이모지 대체
-                    emoji_replacements = {
-                        '🎉': '[SUCCESS]',
-                        '✅': '[OK]',
-                        '⚠️': '[WARN]',
-                        '🔄': '[PROC]',
-                        '🌐': '[NET]',
-                        '📅': '[DATE]',
-                        '❌': '[ERROR]',
-                        '🔍': '[SEARCH]',
-                        '💾': '[SAVE]',
-                        '📊': '[DATA]',
-                        '💰': '[PRICE]',
-                        '📈': '[CHART]',
-                        '🎯': '[TARGET]',
-                        '📋': '[LIST]',
-                        '🔧': '[TOOL]',
-                        '⚡': '[FAST]',
-                        '🛡️': '[SAFE]',
-                        '🎪': '[SHOW]',
-                        '🏆': '[WIN]',
-                        '💡': '[IDEA]'
-                    }
-                    
-                    # 이모지 대체 적용
-                    processed_line = line.strip()
-                    for emoji, replacement in emoji_replacements.items():
-                        processed_line = processed_line.replace(emoji, replacement)
-                    
-                    # 진행률 메시지 감지 및 접두사 추가
-                    if PROGRESS_REGEX.search(line):
-                        message = f"[PROGRESS] {processed_line}"
-                    else:
-                        message = processed_line
-                    
-                    # WebSocket으로 로그 전송 (터미널과 동시)
-                    socketio.emit('analysis_log', {'message': message})
-                    
-                    # 실행 양보 (이벤트 루프가 블로킹되지 않도록)
-                    socketio.sleep(0.01)
+                # 프로세스 상태 모니터링을 위한 변수
+                process_start_time = time.time()
+                last_activity_time = time.time()
                 
-                process.stdout.close()
-                return_code = process.wait()
+                while True:
+                    # 프로세스가 종료되었는지 확인
+                    if process.poll() is not None:
+                        # 프로세스가 종료됨
+                        break
+                    
+                    # 전체 타임아웃 확인 (2시간)
+                    elapsed_time = time.time() - process_start_time
+                    if elapsed_time > process_timeout:
+                        error_msg = f"분석 프로세스가 타임아웃되었습니다 (최대 {process_timeout//60}분 초과)"
+                        socketio.emit('analysis_log', {'message': f"[ERROR] {error_msg}"})
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                        socketio.emit('analysis_complete', {'success': False, 'error': error_msg})
+                        return
+                    
+                    # 출력이 없는 시간 확인 (10분)
+                    if time.time() - last_activity_time > no_output_timeout:
+                        error_msg = f"분석 프로세스가 응답하지 않습니다 (10분간 출력 없음)"
+                        socketio.emit('analysis_log', {'message': f"[ERROR] {error_msg}"})
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                        socketio.emit('analysis_complete', {'success': False, 'error': error_msg})
+                        return
+                    
+                    # stdout에서 읽기 (논블로킹)
+                    try:
+                        # Windows에서는 select가 작동하지 않으므로 직접 읽기 시도
+                        line = process.stdout.readline()
+                        if line:
+                            last_activity_time = time.time()
+                            last_log_time = time.time()
+                            
+                            # 터미널 출력 (진행률 메시지만 특별 처리)
+                            if PROGRESS_REGEX.search(line):
+                                # 진행률 메시지만 덮어쓰기 처리
+                                sys.stdout.write(line.strip() + '\r')
+                                last_line_was_tqdm = True
+                            else:
+                                if last_line_was_tqdm:
+                                    sys.stdout.write('\n')
+                                sys.stdout.write(line)
+                                last_line_was_tqdm = False
+                            sys.stdout.flush()
+                            
+                            # 이모지 대체
+                            emoji_replacements = {
+                                '🎉': '[SUCCESS]',
+                                '✅': '[OK]',
+                                '⚠️': '[WARN]',
+                                '🔄': '[PROC]',
+                                '🌐': '[NET]',
+                                '📅': '[DATE]',
+                                '❌': '[ERROR]',
+                                '🔍': '[SEARCH]',
+                                '💾': '[SAVE]',
+                                '📊': '[DATA]',
+                                '💰': '[PRICE]',
+                                '📈': '[CHART]',
+                                '🎯': '[TARGET]',
+                                '📋': '[LIST]',
+                                '🔧': '[TOOL]',
+                                '⚡': '[FAST]',
+                                '🛡️': '[SAFE]',
+                                '🎪': '[SHOW]',
+                                '🏆': '[WIN]',
+                                '💡': '[IDEA]'
+                            }
+                            
+                            # 이모지 대체 적용
+                            processed_line = line.strip()
+                            for emoji, replacement in emoji_replacements.items():
+                                processed_line = processed_line.replace(emoji, replacement)
+                            
+                            # 진행률 메시지 감지 및 접두사 추가
+                            if PROGRESS_REGEX.search(line):
+                                message = f"[PROGRESS] {processed_line}"
+                            else:
+                                message = processed_line
+                            
+                            # WebSocket으로 로그 전송 (터미널과 동시)
+                            socketio.emit('analysis_log', {'message': message})
+                        else:
+                            # 더 이상 읽을 데이터가 없으면 잠시 대기
+                            socketio.sleep(0.1)
+                    except Exception as e:
+                        # 읽기 오류 발생 시 로그 출력
+                        error_msg = f"프로세스 출력 읽기 오류: {e}"
+                        socketio.emit('analysis_log', {'message': f"[ERROR] {error_msg}"})
+                        socketio.sleep(0.1)
+                
+                # 프로세스 종료 대기 (타임아웃 10초)
+                try:
+                    process.stdout.close()
+                    return_code = process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    # 타임아웃 발생 시 강제 종료
+                    process.kill()
+                    return_code = process.wait()
+                    error_msg = "분석 프로세스가 정상적으로 종료되지 않아 강제 종료되었습니다."
+                    socketio.emit('analysis_log', {'message': f"[ERROR] {error_msg}"})
+                    socketio.emit('analysis_complete', {'success': False, 'error': error_msg})
+                    return
                 
                 if return_code == 0:
                     socketio.emit('analysis_complete', {'success': True})
                 else:
-                    socketio.emit('analysis_complete', {'success': False, 'error': '분석 실행 중 오류가 발생했습니다.'})
+                    error_msg = f'분석 실행 중 오류가 발생했습니다. (종료 코드: {return_code})'
+                    socketio.emit('analysis_complete', {'success': False, 'error': error_msg})
                     
             except Exception as e:
                 socketio.emit('analysis_complete', {'success': False, 'error': str(e)})
@@ -952,6 +1021,25 @@ def start_backtest():
             if param not in data:
                 return jsonify({'error': f'{param} 파라미터가 필요합니다.'}), 400
         
+        # 날짜 파라미터 검증 (선택적이지만 제공되면 유효성 검증)
+        from datetime import datetime as dt
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+        
+        if start_date and end_date:
+            try:
+                start_dt = dt.strptime(start_date, '%Y-%m-%d')
+                end_dt = dt.strptime(end_date, '%Y-%m-%d')
+                today = dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                
+                if end_dt > today:
+                    return jsonify({'error': '종료일은 오늘 이전이어야 합니다.'}), 400
+                
+                if start_dt >= end_dt:
+                    return jsonify({'error': '시작일은 종료일보다 이전이어야 합니다.'}), 400
+            except ValueError as e:
+                return jsonify({'error': f'날짜 형식이 올바르지 않습니다: {str(e)}'}), 400
+        
         # 기존 백테스팅 프로세스 정리
         global current_backtest_process
         if current_backtest_process and is_backtest_process_running(current_backtest_process):
@@ -980,6 +1068,12 @@ def start_backtest():
                     '--buy-universe', str(data['buy_universe']),
                     '--fee', str(data['transaction_fee'])
                 ]
+                
+                # 날짜 파라미터 추가 (제공된 경우)
+                if start_date:
+                    command.extend(['--start-date', start_date])
+                if end_date:
+                    command.extend(['--end-date', end_date])
                 
                 env = os.environ.copy()
                 env['PYTHONIOENCODING'] = 'utf-8'
@@ -1155,13 +1249,43 @@ def get_stock_features(ticker_code):
         if selected_stock_features.empty:
             return jsonify({'error': '해당 종목의 피처 데이터를 찾을 수 없습니다.'}), 404
         
+        # 학습 모델에서 사용하는 피처 리스트 (train_gpu_main.py와 동일)
+        model_features = [
+            'log_mktcap',
+            '52주_신고가_비율',
+            'ADX_14',
+            'disparity_60', 'disparity_120', 'disparity_240',
+            'KOSPI_disparity_60',
+            # 추가된 피처
+            'ATRr_20',
+            'ATR_Ratio_Short',
+            'ATR_Ratio_Trend',
+            'Eff_Ratio_10',
+            'RVOL',
+            'Z_Score_20',
+            'Position_Range_60',
+            'RSI_14',
+            'OBV_Slope',
+            'KOSPI_변동성(1M)',
+            'MA60_Slope'
+        ]
+        
+        # 등락율 계산 등 다른 부분에 영향있는 필수 피처 (표시용)
+        essential_features = ['시가', '종가', '현재가', '기준일가', '전날종가', '종목명', '시가총액']
+        
+        # 학습 모델 피처 + 필수 피처만 필터링
+        allowed_features = set(model_features + essential_features)
+        
         # 피처 데이터 정리
         display_features = selected_stock_features.drop(columns=['종목코드', 'date'], errors='ignore')
         
+        # 학습 모델에서 사용하는 피처만 필터링
+        filtered_features = {col: display_features[col] for col in display_features.columns if col in allowed_features}
+        
         # 객체를 문자열로 변환
         features_dict = {}
-        for column in display_features.columns:
-            value = display_features.iloc[0][column]
+        for column, series in filtered_features.items():
+            value = series.iloc[0]
             if pd.isna(value):
                 features_dict[column] = "N/A"
             elif isinstance(value, (dict, list)):
@@ -1228,6 +1352,149 @@ def get_backtest_status():
         'process_running': is_backtest_process_running(current_backtest_process) if current_backtest_process else False,
         'timestamp': datetime.now().isoformat()
     })
+
+@app.route('/api/feature_correlation/calculate', methods=['POST'])
+def calculate_feature_correlation():
+    """피처 상관관계 계산 API"""
+    try:
+        import glob
+        from pathlib import Path
+        
+        # 학습 데이터 경로 확인
+        data_path = os.path.expanduser("~/stock_data/processed_feather")
+        feather_files = glob.glob(os.path.join(data_path, "*.feather"))
+        
+        # 학습 모델에서 사용하는 피처 리스트 (train_gpu_main.py와 동일)
+        model_features = [
+            'log_mktcap',
+            '52주_신고가_비율',
+            'ADX_14',
+            'disparity_60', 'disparity_120', 'disparity_240',
+            'KOSPI_disparity_60',
+            # 추가된 피처
+            'ATRr_20',
+            'ATR_Ratio_Short',
+            'ATR_Ratio_Trend',
+            'Eff_Ratio_10',
+            'RVOL',
+            'Z_Score_20',
+            'Position_Range_60',
+            'RSI_14',
+            'OBV_Slope',
+            'KOSPI_변동성(1M)',
+            'MA60_Slope'
+        ]
+        
+        data_source = None
+        correlation_matrix = None
+        feature_data = None
+        
+        # 1단계: 학습 데이터 파일이 있으면 사용
+        if feather_files and len(feather_files) > 0:
+            log_info(f"학습 데이터 파일 사용: {len(feather_files)}개 파일")
+            data_source = "training_data"
+            
+            # 모든 feather 파일 로드 및 합치기
+            dfs = []
+            loaded_count = 0
+            for feather_file in feather_files[:500]:  # 최대 500개 파일만 로드 (메모리 절약)
+                try:
+                    df = pd.read_feather(feather_file)
+                    # model_features에 있는 피처만 선택
+                    available_features = [f for f in model_features if f in df.columns]
+                    if available_features:
+                        df_subset = df[available_features].copy()
+                        dfs.append(df_subset)
+                        loaded_count += 1
+                except Exception as e:
+                    log_warning(f"Feather 파일 로드 실패: {feather_file}, {e}")
+                    continue
+            
+            if dfs:
+                feature_data = pd.concat(dfs, ignore_index=True)
+                log_info(f"학습 데이터 로드 완료: {len(feature_data):,}행, {loaded_count}개 파일")
+            else:
+                log_warning("학습 데이터 파일을 로드할 수 없습니다. 실시간 데이터 수집으로 전환합니다.")
+                data_source = None
+        
+        # 2단계: 학습 데이터가 없으면 1년치 실시간 데이터 수집
+        if data_source is None or feature_data is None or feature_data.empty:
+            log_info("1년치 실시간 데이터 수집 시작...")
+            data_source = "realtime_data"
+            
+            # 1년 전 날짜 계산
+            end_date = datetime.now().strftime('%Y-%m-%d')
+            start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+            
+            # data_processor를 통해 데이터 수집
+            feature_data = data_processor.get_preprocessed_data(start_date, end_date, skip_factor_scores=True)
+            
+            if feature_data is None or feature_data.empty:
+                return jsonify({'error': '데이터를 수집할 수 없습니다.'}), 500
+            
+            # model_features에 있는 피처만 선택
+            available_features = [f for f in model_features if f in feature_data.columns]
+            if available_features:
+                feature_data = feature_data[available_features].copy()
+            else:
+                return jsonify({'error': '필요한 피처가 데이터에 없습니다.'}), 500
+            
+            log_info(f"실시간 데이터 수집 완료: {len(feature_data):,}행")
+        
+        # 3단계: 상관관계 계산
+        log_info("상관관계 계산 중...")
+        
+        # 숫자형 컬럼만 선택
+        numeric_cols = feature_data.select_dtypes(include=[np.number]).columns.tolist()
+        feature_data_numeric = feature_data[numeric_cols].copy()
+        
+        # 결측치 처리 (중앙값으로 대체)
+        feature_data_numeric = feature_data_numeric.fillna(feature_data_numeric.median())
+        
+        # 상관관계 계산
+        correlation_matrix = feature_data_numeric.corr()
+        
+        # NaN이나 Inf 값 처리
+        correlation_matrix = correlation_matrix.replace([np.inf, -np.inf], np.nan)
+        correlation_matrix = correlation_matrix.fillna(0)
+        
+        # 상관관계 행렬을 JSON으로 변환 가능한 형태로 변환
+        correlation_dict = correlation_matrix.to_dict()
+        
+        # 피처 리스트 (행/열 순서)
+        feature_list = list(correlation_matrix.columns)
+        
+        # 상관관계 높은 쌍 찾기 (|r| > 0.7)
+        high_correlation_pairs = []
+        for i, feat1 in enumerate(feature_list):
+            for j, feat2 in enumerate(feature_list):
+                if i < j:  # 중복 방지
+                    corr_value = correlation_matrix.loc[feat1, feat2]
+                    if abs(corr_value) > 0.7:
+                        high_correlation_pairs.append({
+                            'feature1': feat1,
+                            'feature2': feat2,
+                            'correlation': float(corr_value)
+                        })
+        
+        # 상관계수 절댓값 기준으로 정렬
+        high_correlation_pairs.sort(key=lambda x: abs(x['correlation']), reverse=True)
+        
+        log_info(f"상관관계 계산 완료: {len(feature_list)}개 피처, {len(high_correlation_pairs)}개 높은 상관관계 쌍")
+        
+        return jsonify({
+            'success': True,
+            'data_source': data_source,
+            'feature_list': feature_list,
+            'correlation_matrix': correlation_dict,
+            'high_correlation_pairs': high_correlation_pairs,
+            'data_rows': len(feature_data),
+            'message': f'상관관계 계산 완료 ({data_source}, {len(feature_data):,}행)'
+        })
+        
+    except Exception as e:
+        log_error(f"피처 상관관계 계산 중 오류: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 # =============================================================================

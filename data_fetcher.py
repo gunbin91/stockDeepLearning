@@ -44,6 +44,54 @@ from exceptions import DataFetchError, DataValidationError
 
 from path_manager import path_manager
 
+# =================================================================
+# 유틸리티 함수: 정규화된 선형회귀기울기 계산 (최신 값만)
+# =================================================================
+
+def calculate_normalized_linear_regression_slope_latest(series, window=5):
+    """
+    정규화된 선형회귀기울기 계산 (최신 값만 반환)
+    
+    Args:
+        series: pandas Series (예: 변동성 값)
+        window: 선형회귀에 사용할 기간
+    
+    Returns:
+        최신 기울기 값 (스칼라) 또는 np.nan
+    """
+    if len(series) < window:
+        return np.nan
+    
+    # 최신 window일간의 값만 사용
+    y = series.iloc[-window:].values
+    current_value = series.iloc[-1]
+    
+    # 안전성 검사
+    if current_value == 0 or np.isnan(current_value) or np.isnan(y).any():
+        return np.nan
+    
+    # 시간 인덱스
+    x = np.arange(window, dtype=np.float64)
+    x_mean = x.mean()
+    x_centered = x - x_mean
+    x_centered_sq_sum = np.sum(x_centered ** 2)
+    
+    if x_centered_sq_sum == 0:
+        return np.nan
+    
+    # 선형회귀 기울기 계산
+    y_mean = np.nanmean(y)
+    y_centered = y - y_mean
+    numerator = np.sum(x_centered * y_centered)
+    
+    # 절대 기울기
+    abs_slope = numerator / x_centered_sq_sum
+    
+    # 정규화: 현재 값으로 나누고 100 곱하기 (백분율)
+    normalized_slope = (abs_slope / current_value) * 100
+    
+    return normalized_slope
+
 def get_actual_trading_date(selected_analysis_date):
     """
     실제 거래일을 확인하는 함수
@@ -246,19 +294,20 @@ def _fetch_macro_data(start_date, end_date):
             if 'KOSPI' in macro_df.columns:
                 kospi_close = macro_df['KOSPI']
                 
-                # 변동성 계산 (종목 데이터와 동일한 방식)
-                # 변동성(1W) = 5일 롤링 표준편차 / 5일 롤링 평균
-                macro_df['KOSPI_변동성(1W)'] = kospi_close.rolling(5).std() / kospi_close.rolling(5).mean()
-                # 변동성(1M) = 20일 롤링 표준편차 / 20일 롤링 평균
-                macro_df['KOSPI_변동성(1M)'] = kospi_close.rolling(20).std() / kospi_close.rolling(20).mean()
-                # 변동성(3M) = 60일 롤링 표준편차 / 60일 롤링 평균
-                macro_df['KOSPI_변동성(3M)'] = kospi_close.rolling(60).std() / kospi_close.rolling(60).mean()
-                
                 # 이격도 계산 (종목 데이터와 동일한 방식)
                 # 이격도 = (현재가 / 이동평균) * 100
-                for period in [5, 20, 60, 120]:
+                for period in [60]:
                     ma = kospi_close.rolling(window=period).mean()
                     macro_df[f'KOSPI_disparity_{period}'] = (kospi_close / ma) * 100
+                
+                # KOSPI 변동성 1M 계산 (20일 기준)
+                try:
+                    kospi_std_20 = kospi_close.rolling(window=20).std()
+                    kospi_mean_20 = kospi_close.rolling(window=20).mean()
+                    macro_df['KOSPI_변동성(1M)'] = kospi_std_20 / kospi_mean_20
+                except Exception as e:
+                    log_warning(f"KOSPI 변동성(1M) 계산 실패: {e}")
+                    macro_df['KOSPI_변동성(1M)'] = np.nan
             
             # 인덱스를 date 컬럼으로 변환 (merge_asof를 위해)
             macro_df.reset_index(inplace=True)
@@ -315,67 +364,103 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
 
         latest_data['수익률(1M)'] = df_for_indicators['종가'].pct_change(20).iloc[-1]
         latest_data['수익률(3M)'] = df_for_indicators['종가'].pct_change(60).iloc[-1]
-        latest_data['변동성(1W)'] = (df_for_indicators['종가'].rolling(5).std() / df_for_indicators['종가'].rolling(5).mean()).iloc[-1]
-        latest_data['변동성(1M)'] = (df_for_indicators['종가'].rolling(20).std() / df_for_indicators['종가'].rolling(20).mean()).iloc[-1]
-        latest_data['변동성(3M)'] = (df_for_indicators['종가'].rolling(60).std() / df_for_indicators['종가'].rolling(60).mean()).iloc[-1]
-        latest_data['거래대금_MA5'] = df_for_indicators['거래대금'].rolling(5).mean().iloc[-1]
-        latest_data['거래대금_MA20'] = df_for_indicators['거래대금'].rolling(20).mean().iloc[-1]
         
         df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
+        df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=5, append=True)
+        df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=20, append=True)
+        df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=60, append=True)
+        
+        # ATRr_20 확인 및 처리 (pandas-ta가 이미 비율 형태로 생성)
+        # pandas-ta는 ATRr_20 형식으로 컬럼을 생성하며, 이미 (ATR / 종가) * 100 형태입니다
+        if 'ATRr_20' in df_for_indicators.columns:
+            latest_data['ATRr_20'] = df_for_indicators['ATRr_20'].iloc[-1]
+        else:
+            latest_data['ATRr_20'] = np.nan
+        
+        # ATR_Ratio_Short 계산 (단기 응축: ATRr_5 / ATRr_20)
+        if 'ATRr_5' in df_for_indicators.columns and 'ATRr_20' in df_for_indicators.columns:
+            latest_data['ATR_Ratio_Short'] = (df_for_indicators['ATRr_5'] / df_for_indicators['ATRr_20']).iloc[-1]
+        else:
+            latest_data['ATR_Ratio_Short'] = np.nan
+        
+        # ATR_Ratio_Trend 계산 (에너지 추세: ATRr_20 / ATRr_60)
+        if 'ATRr_20' in df_for_indicators.columns and 'ATRr_60' in df_for_indicators.columns:
+            latest_data['ATR_Ratio_Trend'] = (df_for_indicators['ATRr_20'] / df_for_indicators['ATRr_60']).iloc[-1]
+        else:
+            latest_data['ATR_Ratio_Trend'] = np.nan
+        
         df_for_indicators.ta.obv(close='종가', volume='거래량', append=True)
+        
+        # OBV_Slope 계산
+        if 'OBV' in df_for_indicators.columns:
+            obv_5d_ago = df_for_indicators['OBV'].shift(5).iloc[-1]
+            obv_current = df_for_indicators['OBV'].iloc[-1]
+            obv_abs_5d_ago = abs(obv_5d_ago) if pd.notna(obv_5d_ago) else 0
+            if obv_abs_5d_ago != 0:
+                latest_data['OBV_Slope'] = (obv_current - obv_5d_ago) / obv_abs_5d_ago
+            else:
+                latest_data['OBV_Slope'] = 0
+        else:
+            latest_data['OBV_Slope'] = np.nan
+        
         df_for_indicators.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
         
+        # RSI_14 계산
+        df_for_indicators.ta.rsi(close='종가', length=14, append=True)
+        
+        # 볼린저 밴드 계산 (BB_Position 제거됨 - 다른 용도로 사용 가능)
         bbands = df_for_indicators.ta.bbands(close='종가', length=20, std=2)
-        # pandas-ta 버전업에 따른 볼린저밴드 컬럼명 변경 대응
-        if bbands is not None and not bbands.empty:
-            # 새로운 컬럼명 형식 확인
-            if all(col in bbands.columns for col in ['BBL_20_2.0_2.0', 'BBU_20_2.0_2.0', 'BBM_20_2.0_2.0']):
-                latest_data['BBW_20_2'] = ((bbands['BBU_20_2.0_2.0'] - bbands['BBL_20_2.0_2.0']) / bbands['BBM_20_2.0_2.0']).iloc[-1]
-                # BB_Position 계산: (현재가 - 하단밴드) / (상단밴드 - 하단밴드)
-                current_price = df_for_indicators['종가'].iloc[-1]
-                bb_lower = bbands['BBL_20_2.0_2.0'].iloc[-1]
-                bb_upper = bbands['BBU_20_2.0_2.0'].iloc[-1]
-                if bb_upper != bb_lower:
-                    latest_data['BB_Position'] = (current_price - bb_lower) / (bb_upper - bb_lower)
-                else:
-                    latest_data['BB_Position'] = 0.5  # 중앙값
-            elif all(col in bbands.columns for col in ['BBL_20_2.0', 'BBU_20_2.0', 'BBM_20_2.0']):
-                latest_data['BBW_20_2'] = ((bbands['BBU_20_2.0'] - bbands['BBL_20_2.0']) / bbands['BBM_20_2.0']).iloc[-1]
-                # BB_Position 계산: (현재가 - 하단밴드) / (상단밴드 - 하단밴드)
-                current_price = df_for_indicators['종가'].iloc[-1]
-                bb_lower = bbands['BBL_20_2.0'].iloc[-1]
-                bb_upper = bbands['BBU_20_2.0'].iloc[-1]
-                if bb_upper != bb_lower:
-                    latest_data['BB_Position'] = (current_price - bb_lower) / (bb_upper - bb_lower)
-                else:
-                    latest_data['BB_Position'] = 0.5  # 중앙값
-            else:
-                latest_data['BBW_20_2'] = np.nan
-                latest_data['BB_Position'] = np.nan
-        else:
-             latest_data['BBW_20_2'] = np.nan
-             latest_data['BB_Position'] = np.nan
+        # BB_Position 피처는 제거됨
 
-        for p in [5, 10, 60, 120, 240]:
+        for p in [60, 120, 240]:
             ma = df_for_indicators['종가'].rolling(window=p).mean()
             latest_data[f'disparity_{p}'] = ((df_for_indicators['종가'] / ma) * 100).iloc[-1]
 
-        # 거래량 변동성 계수 계산 (1W, 1M, 3M)
-        volume_std_5 = df_for_indicators['거래량'].rolling(5).std()
-        volume_mean_5 = df_for_indicators['거래량'].rolling(5).mean()
-        latest_data['거래량 변동성 계수(1W)'] = (volume_std_5 / volume_mean_5).iloc[-1] if volume_mean_5.iloc[-1] != 0 else np.nan
-        
-        volume_std_20 = df_for_indicators['거래량'].rolling(20).std()
-        volume_mean_20 = df_for_indicators['거래량'].rolling(20).mean()
-        latest_data['거래량 변동성 계수(1M)'] = (volume_std_20 / volume_mean_20).iloc[-1] if volume_mean_20.iloc[-1] != 0 else np.nan
-        
-        volume_std_60 = df_for_indicators['거래량'].rolling(60).std()
-        volume_mean_60 = df_for_indicators['거래량'].rolling(60).mean()
-        latest_data['거래량 변동성 계수(3M)'] = (volume_std_60 / volume_mean_60).iloc[-1] if volume_mean_60.iloc[-1] != 0 else np.nan
+        # MA60_Slope 계산 (60일 이동평균선 기울기)
+        try:
+            ma60 = df_for_indicators['종가'].rolling(window=60).mean()
+            latest_data['MA60_Slope'] = calculate_normalized_linear_regression_slope_latest(ma60, window=5)
+        except Exception as e:
+            log_warning(f"MA60_Slope 계산 실패 ({ticker}): {e}")
+            latest_data['MA60_Slope'] = np.nan
 
         latest_data['52주_신고가_비율'] = (df_for_indicators['종가'] / df_for_indicators['종가'].rolling(250).max()).iloc[-1]
-
-        technical_features_to_add = ['ATRr_14', 'OBV', 'ADX_14']
+        
+        # RVOL 계산 (상대 거래량)
+        volume_ma20 = df_for_indicators['거래량'].rolling(20).mean().iloc[-1]
+        if pd.notna(volume_ma20) and volume_ma20 != 0:
+            latest_data['RVOL'] = df_for_indicators['거래량'].iloc[-1] / volume_ma20
+        else:
+            latest_data['RVOL'] = np.nan
+        
+        # Z_Score_20 계산 (표준화 이격)
+        mean_20 = df_for_indicators['종가'].rolling(20).mean().iloc[-1]
+        std_20 = df_for_indicators['종가'].rolling(20).std().iloc[-1]
+        if pd.notna(mean_20) and pd.notna(std_20) and std_20 != 0:
+            latest_data['Z_Score_20'] = (df_for_indicators['종가'].iloc[-1] - mean_20) / std_20
+        else:
+            latest_data['Z_Score_20'] = np.nan
+        
+        # Position_Range_60 계산 (Donchian)
+        high_60 = df_for_indicators['고가'].rolling(60).max().iloc[-1]
+        low_60 = df_for_indicators['저가'].rolling(60).min().iloc[-1]
+        if pd.notna(high_60) and pd.notna(low_60) and (high_60 - low_60) != 0:
+            latest_data['Position_Range_60'] = (df_for_indicators['종가'].iloc[-1] - low_60) / (high_60 - low_60)
+            latest_data['Position_Range_60'] = max(0, min(1, latest_data['Position_Range_60']))
+        else:
+            latest_data['Position_Range_60'] = 0.5
+        
+        # Eff_Ratio_10 계산 (효율 비율)
+        price_change = abs(df_for_indicators['종가'].diff(10).iloc[-1])
+        daily_changes = df_for_indicators['종가'].diff().abs()
+        price_range = daily_changes.rolling(10).sum().iloc[-1]
+        if pd.notna(price_range) and price_range != 0:
+            latest_data['Eff_Ratio_10'] = price_change / price_range
+        else:
+            latest_data['Eff_Ratio_10'] = 0
+        
+        # OBV는 OBV_Slope 계산에만 사용되므로 피처 리스트에서 제외
+        technical_features_to_add = ['ATRr_14', 'ADX_14', 'RSI_14']
         for feature in technical_features_to_add:
             if feature in df_for_indicators.columns:
                  latest_data[feature] = df_for_indicators[feature].iloc[-1]

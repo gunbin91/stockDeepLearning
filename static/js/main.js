@@ -591,8 +591,29 @@ $(document).ready(function() {
             stopBacktest();
         });
         
-        // 모달이 열릴 때 서버 상태 확인
+        // 모달이 열릴 때 서버 상태 확인 및 날짜 기본값 설정
         $('#backtest_modal').on('show.bs.modal', function() {
+            // 날짜 필드 기본값 설정 (시작일: 1년 전, 종료일: 오늘)
+            const today = new Date();
+            const oneYearAgo = new Date(today);
+            oneYearAgo.setFullYear(today.getFullYear() - 1);
+            
+            // 날짜를 YYYY-MM-DD 형식으로 변환
+            const formatDate = function(date) {
+                const year = date.getFullYear();
+                const month = String(date.getMonth() + 1).padStart(2, '0');
+                const day = String(date.getDate()).padStart(2, '0');
+                return `${year}-${month}-${day}`;
+            };
+            
+            // 날짜 필드가 비어있을 때만 기본값 설정
+            if (!$('#modal_start_date').val()) {
+                $('#modal_start_date').val(formatDate(oneYearAgo));
+            }
+            if (!$('#modal_end_date').val()) {
+                $('#modal_end_date').val(formatDate(today));
+            }
+            
             checkBacktestServerStatus().then(function(serverRunning) {
                 if (serverRunning) {
                     // 서버에서 백테스팅이 실행 중이면 실행 중 상태로 표시
@@ -643,6 +664,34 @@ $(document).ready(function() {
     }
     
     function executeBacktest() {
+        // 날짜 입력값 가져오기
+        const startDate = $('#modal_start_date').val();
+        const endDate = $('#modal_end_date').val();
+        
+        // 날짜 유효성 검증
+        if (!startDate || !endDate) {
+            showToast('시작일과 종료일을 모두 입력해주세요.', 'warning');
+            return;
+        }
+        
+        const startDateObj = new Date(startDate);
+        const endDateObj = new Date(endDate);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        endDateObj.setHours(0, 0, 0, 0);  // 시간 정보 제거하여 날짜만 비교
+        
+        // 종료일이 오늘보다 미래인지 확인 (오늘까지는 선택 가능)
+        if (endDateObj > today) {
+            showToast('종료일은 오늘 날짜를 초과할 수 없습니다.', 'warning');
+            return;
+        }
+        
+        // 시작일이 종료일보다 이후인지 확인
+        if (startDateObj >= endDateObj) {
+            showToast('시작일은 종료일보다 이전이어야 합니다.', 'warning');
+            return;
+        }
+        
         // 폼 데이터 수집
         const formData = {
             capital: parseInt($('#modal_capital').val()),
@@ -651,7 +700,9 @@ $(document).ready(function() {
             stop_loss: parseFloat($('#modal_stop_loss').val()),
             top_n: parseInt($('#modal_top_n').val()),
             buy_universe: parseInt($('#modal_buy_universe').val()),
-            transaction_fee: parseFloat($('#modal_transaction_fee').val())
+            transaction_fee: parseFloat($('#modal_transaction_fee').val()),
+            start_date: startDate,
+            end_date: endDate
         };
         
         // 서버 상태 확인 후 진행

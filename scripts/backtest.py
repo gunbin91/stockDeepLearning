@@ -60,8 +60,9 @@ from logger import (log_info, log_error, log_critical, log_warning, shutdown_log
 from path_manager import path_manager
 
 # --- 설정 변수 (통일된 경로 사용) ---
-TEST_START_DATE = '2024-01-01'
-TEST_END_DATE = datetime.now().strftime('%Y-%m-%d')
+# 기본값 설정 (파라미터로 제공되지 않을 경우 사용)
+DEFAULT_TEST_START_DATE = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+DEFAULT_TEST_END_DATE = datetime.now().strftime('%Y-%m-%d')
 WEIGHTS_FILE = str(path_manager.get_weights_path())
 # cuML 모델 경로 (우선 사용)
 CUML_MODEL_FILE = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
@@ -583,13 +584,31 @@ def create_json_report(results, output_path=None):
     return report_data
 
 
-def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate):
-    """최종 백테스팅 실행 - 강화된 에러 처리"""
+def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate, start_date=None, end_date=None):
+    """최종 백테스팅 실행 - 강화된 에러 처리
+    
+    Args:
+        initial_capital: 초기 자본
+        max_hold_period: 최대 보유 기간
+        take_profit_pct: 익절 비율
+        stop_loss_pct: 손절 비율
+        top_n: 매수 종목 수
+        buy_universe_rank: 매수 대상 범위
+        transaction_fee_rate: 거래 수수료율
+        start_date: 테스트 시작일 (YYYY-MM-DD 형식, None이면 기본값 사용)
+        end_date: 테스트 종료일 (YYYY-MM-DD 형식, None이면 기본값 사용)
+    """
     start_time = time.time()
+    
+    # 날짜 파라미터 기본값 설정
+    if start_date is None:
+        start_date = DEFAULT_TEST_START_DATE
+    if end_date is None:
+        end_date = DEFAULT_TEST_END_DATE
     
     try:
         # 백테스팅 시작 보고서 (중복 제거)
-        start_analysis_report(f"백테스팅 ({TEST_START_DATE} ~ {TEST_END_DATE})")
+        start_analysis_report(f"백테스팅 ({start_date} ~ {end_date})")
         
         log_info("💰 투자 설정")
         log_info(f"   └─ 초기 자본: {initial_capital:,}원")
@@ -598,6 +617,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         log_info(f"   └─ 익절 기준: +{take_profit_pct}%")
         log_info(f"   └─ 손절 기준: -{stop_loss_pct}%")
         log_info(f"   └─ 거래 수수료: {transaction_fee_rate}%")
+        log_info(f"   └─ 테스트 기간: {start_date} ~ {end_date}")
         
         log_info("1. 최종 백테스트 시작...")
         
@@ -617,19 +637,25 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             raise
         
         # 데이터 로딩 (강화된 에러 처리)
+        # Warmup 기간 400일 유지
         try:
-            backtest_start_date_with_warmup = (pd.to_datetime(TEST_START_DATE) - timedelta(days=400)).strftime('%Y-%m-%d')
+            backtest_start_date_with_warmup = (pd.to_datetime(start_date) - timedelta(days=400)).strftime('%Y-%m-%d')
             log_info("백테스팅 데이터 로딩 시작", context={
-                "start_date": backtest_start_date_with_warmup,
-                "end_date": TEST_END_DATE
+                "test_start_date": start_date,
+                "test_end_date": end_date,
+                "data_start_date": backtest_start_date_with_warmup,
+                "data_end_date": end_date,
+                "warmup_days": 400
             })
+            log_info(f"   📅 테스트 기간: {start_date} ~ {end_date}")
+            log_info(f"   📅 데이터 수집 기간: {backtest_start_date_with_warmup} ~ {end_date} (Warmup 400일 포함)")
             
-            test_data = data_processor.get_preprocessed_data(backtest_start_date_with_warmup, TEST_END_DATE)
+            test_data = data_processor.get_preprocessed_data(backtest_start_date_with_warmup, end_date)
             
             if test_data is None or test_data.empty:
                 log_critical("백테스팅 데이터가 비어있습니다", context={
                     "start_date": backtest_start_date_with_warmup,
-                    "end_date": TEST_END_DATE
+                    "end_date": end_date
                 })
                 raise ValueError("백테스팅 데이터가 비어있습니다")
             
@@ -658,7 +684,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         except Exception as e:
             log_critical("백테스팅 데이터 로딩 실패", exception=e, context={
                 "start_date": backtest_start_date_with_warmup,
-                "end_date": TEST_END_DATE
+                "end_date": end_date
             })
             raise
     
@@ -966,7 +992,9 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
     
         # 데이터 전처리 (강화된 에러 처리)
         try:
-            test_data = test_data[test_data['date'] >= pd.to_datetime(TEST_START_DATE)]
+            # 테스트 기간에 맞게 데이터 필터링
+            test_data = test_data[(test_data['date'] >= pd.to_datetime(start_date)) & 
+                                  (test_data['date'] <= pd.to_datetime(end_date))]
             
             # 로그: 백테스팅용 데이터 상태 확인
             log_info(f"🔍 백테스팅용 데이터: {len(test_data):,}개 행")
@@ -974,7 +1002,8 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             
             log_info("백테스팅 데이터 전처리 완료", context={
                 "filtered_rows": len(test_data),
-                "date_range": f"{test_data['date'].min()} ~ {test_data['date'].max()}"
+                "date_range": f"{test_data['date'].min()} ~ {test_data['date'].max()}",
+                "test_period": f"{start_date} ~ {end_date}"
             })
             
             # <<< 팩터 점수 계산 루프가 필요 없어짐 >>>
@@ -1084,6 +1113,8 @@ if __name__ == '__main__':
     parser.add_argument('--top-n', type=int, default=5, help='Number of stocks to buy')
     parser.add_argument('--buy-universe', type=int, default=20, help='Rank universe to consider for buying')
     parser.add_argument('--fee', type=float, default=0.015, help='Transaction fee rate (e.g., 0.015 for 0.015%)')
+    parser.add_argument('--start-date', type=str, default=None, help='Test start date (YYYY-MM-DD format, default: 1 year ago)')
+    parser.add_argument('--end-date', type=str, default=None, help='Test end date (YYYY-MM-DD format, default: today)')
     args = parser.parse_args()
 
     if args.capital <= 0:
@@ -1096,6 +1127,8 @@ if __name__ == '__main__':
             stop_loss_pct=args.stop_loss, 
             top_n=args.top_n, 
             buy_universe_rank=args.buy_universe,
-            transaction_fee_rate=args.fee
+            transaction_fee_rate=args.fee,
+            start_date=args.start_date,
+            end_date=args.end_date
         )
 

@@ -179,29 +179,60 @@ def run_analysis(analysis_date_str):
             
             # 모델 예측 시도
             log_info("   🤖 ML 모델 로딩 중...")
-            ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
+            try:
+                ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
+            except Exception as predict_error:
+                # 예측 함수 호출 중 발생한 예외를 상세히 로깅
+                error_type = type(predict_error).__name__
+                error_msg = str(predict_error)
+                log_error(f"   ❌ ML 모델 예측 함수 호출 실패: {error_type}: {error_msg}")
+                import traceback
+                log_error(f"   ❌ 스택 트레이스:\n{traceback.format_exc()}")
+                raise
             
             if ml_predicted_df is None:
                 error_msg = "머신러닝 모델 예측 결과가 None입니다."
-                log_error(error_msg)
+                log_error(f"   ❌ {error_msg}")
                 raise AnalysisError(error_msg, step="ml_prediction")
             
             if ml_predicted_df.empty:
                 error_msg = "머신러닝 모델 예측 결과가 비어있습니다."
-                log_error(error_msg)
+                log_error(f"   ❌ {error_msg}")
+                raise AnalysisError(error_msg, step="ml_prediction")
+            
+            # 예측 결과 검증
+            if '종목코드' not in ml_predicted_df.columns:
+                error_msg = "예측 결과에 '종목코드' 컬럼이 없습니다."
+                log_error(f"   ❌ {error_msg}")
+                raise AnalysisError(error_msg, step="ml_prediction")
+            
+            if 'ml_pred_proba' not in ml_predicted_df.columns:
+                error_msg = "예측 결과에 'ml_pred_proba' 컬럼이 없습니다."
+                log_error(f"   ❌ {error_msg}")
                 raise AnalysisError(error_msg, step="ml_prediction")
                 
             log_info(f"   ✅ ML 모델 예측 완료: {len(ml_predicted_df):,}개 종목")
             
         except ModelPredictionError as e:
-            log_error(f"머신러닝 모델 예측 실패: {e}")
+            log_error(f"   ❌ 머신러닝 모델 예측 실패: {e}")
+            import traceback
+            log_error(f"   ❌ 스택 트레이스:\n{traceback.format_exc()}")
             raise AnalysisError(f"머신러닝 모델 예측 실패: {e.message}", step="ml_prediction")
         except MemoryError as e:
-            log_error(f"메모리 부족으로 인한 ML 모델 예측 실패: {e}")
+            log_error(f"   ❌ 메모리 부족으로 인한 ML 모델 예측 실패: {e}")
+            import traceback
+            log_error(f"   ❌ 스택 트레이스:\n{traceback.format_exc()}")
             raise AnalysisError(f"메모리 부족으로 인한 ML 모델 예측 실패: {e}", step="ml_prediction")
+        except AnalysisError:
+            # AnalysisError는 그대로 재발생
+            raise
         except Exception as e:
-            log_error(f"ML 모델 예측 중 예상치 못한 오류: {e}")
-            raise AnalysisError(f"ML 모델 예측 중 예상치 못한 오류: {e}", step="ml_prediction")
+            error_type = type(e).__name__
+            error_msg = str(e)
+            log_error(f"   ❌ ML 모델 예측 중 예상치 못한 오류: {error_type}: {error_msg}")
+            import traceback
+            log_error(f"   ❌ 스택 트레이스:\n{traceback.format_exc()}")
+            raise AnalysisError(f"ML 모델 예측 중 예상치 못한 오류: {error_type}: {error_msg}", step="ml_prediction")
 
         log_info("🎯 앙상블 최종 점수 계산을 시작합니다...")
         try:

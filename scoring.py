@@ -40,12 +40,18 @@ def calculate_factor_scores(df):
     scored_df = df.copy()
 
     # 변동성 점수 계산 (낮을수록 좋음)
-    if '변동성(1M)' in df.columns:
+    # ATRr_20을 사용하여 변동성 점수 계산
+    if 'ATRr_20' in df.columns:
         # 변동성이 낮은 종목일수록 높은 점수를 받도록 순위 계산
+        scored_df['volatility_score'] = df['ATRr_20'].rank(method='min', ascending=True, pct=True, na_option='bottom') * 100
+        log_info(f"[OK] 변동성 점수 완료 (평균: {scored_df['volatility_score'].mean():.1f})")
+    elif '변동성(1M)' in df.columns:
+        # 기존 변동성(1M)이 있는 경우 사용 (하위 호환성)
         scored_df['volatility_score'] = df['변동성(1M)'].rank(method='min', ascending=True, pct=True, na_option='bottom') * 100
         log_info(f"[OK] 변동성 점수 완료 (평균: {scored_df['volatility_score'].mean():.1f})")
     else:
-        log_warning("[WARN] 변동성 데이터 부족")
+        log_warning("[WARN] 변동성 데이터 부족 - 기본값 50 설정")
+        scored_df['volatility_score'] = 50.0  # 기본값 설정
 
     # 점수 반올림 (소수점 2자리까지)
     score_cols = ['volatility_score']
