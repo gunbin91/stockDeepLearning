@@ -32,6 +32,9 @@
                 <button type="button" class="btn btn-primary me-2" id="start_analysis_btn">
                     <i class="fas fa-play me-1"></i>새로운 분석 시작
                 </button>
+                <button type="button" class="btn btn-secondary me-2" data-bs-toggle="modal" data-bs-target="#weights_modal">
+                    <i class="fas fa-balance-scale me-1"></i>가중치 설정
+                </button>
             </div>
         </div>
     </div>
@@ -115,7 +118,8 @@
                         <th>등락율(%)</th>
                         <th>기준일가(원)</th>
                         <th>최종점수(점)</th>
-                        <th>상승확률(%)</th>
+                        <th>상승확률(RF)(%)</th>
+                        <th>상승확률(LGB)(%)</th>
                         <th>변동성(점)</th>
                         <th>시가총액(억)</th>
                     </tr>
@@ -130,7 +134,8 @@
                         <td class="change-cell">{{ row['등락율(%)'] }}</td>
                         <td>{{ "{:,.0f}".format(row['기준일가(원)']) }}</td>
                         <td>{{ "{:.2f}".format(row['최종점수(점)']) }}</td>
-                        <td>{{ "{:.2f}".format(row['상승확률(%)']) }}</td>
+                        <td>{{ "{:.2f}".format(row.get('상승확률(RF)(%)', 0)) }}</td>
+                        <td>{{ "{:.2f}".format(row.get('상승확률(LGB)(%)', 0)) }}</td>
                         <td>{{ "{:.2f}".format(row['변동성(점)']) }}</td>
                         <td>{{ "{:,.0f}".format(row['시가총액(억)']) }}</td>
                     </tr>
@@ -263,6 +268,73 @@
 </div>
 {% endblock %}
 
+<!-- 가중치 설정 모달 -->
+<div class="modal fade" id="weights_modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-balance-scale text-primary me-2"></i>팩터 가중치 설정
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info" role="alert">
+                    <i class="fas fa-info-circle me-2"></i>각 팩터의 가중치를 설정하세요. 합계가 100%가 되도록 자동으로 정규화됩니다.
+                </div>
+                
+                <div class="mb-3">
+                    <label for="weight_volatility" class="form-label">
+                        변동성 점수 (volatility_score)
+                    </label>
+                    <div class="input-group">
+                        <input type="number" class="form-control" id="weight_volatility" 
+                               min="0" max="100" step="0.1" value="10.0">
+                        <span class="input-group-text">%</span>
+                    </div>
+                </div>
+                
+                <div class="mb-3">
+                    <label for="weight_ml" class="form-label">
+                        RandomForest 상승확률 (ml_pred_proba)
+                    </label>
+                    <div class="input-group">
+                        <input type="number" class="form-control" id="weight_ml" 
+                               min="0" max="100" step="0.1" value="45.0">
+                        <span class="input-group-text">%</span>
+                    </div>
+                </div>
+                
+                <div class="mb-3">
+                    <label for="weight_lgb" class="form-label">
+                        LightGBM 상승확률 (lgb_pred_proba)
+                    </label>
+                    <div class="input-group">
+                        <input type="number" class="form-control" id="weight_lgb" 
+                               min="0" max="100" step="0.1" value="45.0">
+                        <span class="input-group-text">%</span>
+                    </div>
+                </div>
+                
+                <div class="alert alert-warning" role="alert" id="weights_sum_alert" style="display: none;">
+                    <i class="fas fa-exclamation-triangle me-2"></i>
+                    <span id="weights_sum_message"></span>
+                </div>
+                
+                <div class="mb-3">
+                    <strong>합계: <span id="weights_sum">100.0</span>%</strong>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">취소</button>
+                <button type="button" class="btn btn-primary" id="save_weights_btn">
+                    <i class="fas fa-save me-1"></i>저장
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 {% block extra_scripts %}
 <script>
 $(document).ready(function() {
@@ -273,6 +345,7 @@ $(document).ready(function() {
     
     // 분석 시작 버튼 이벤트는 static/js/main.js에서 처리됨
     
+    // 가중치 모달 관련 기능은 static/js/main.js에서 처리됨
     
     // WebSocket 연결은 static/js/main.js에서 처리됨
 });

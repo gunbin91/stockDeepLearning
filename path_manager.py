@@ -80,8 +80,12 @@ class PathManager:
     
     
     def get_model_path(self) -> Path:
-        """모델 파일 경로"""
+        """RandomForest 모델 파일 경로"""
         return self.data_dir / 'stock_prediction_model_rf_upgraded.joblib'
+    
+    def get_lgb_model_path(self) -> Path:
+        """LightGBM 모델 파일 경로"""
+        return self.data_dir / 'stock_prediction_model_lgb_upgraded.joblib'
     
     def get_weights_path(self) -> Path:
         """가중치 파일 경로"""

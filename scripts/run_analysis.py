@@ -177,31 +177,54 @@ def run_analysis(analysis_date_str):
             gc.collect()
             log_info("   🧹 메모리 정리 완료")
             
-            # 모델 예측 시도
-            log_info("   🤖 ML 모델 로딩 중...")
+            # RandomForest 모델 예측 시도
+            log_info("   🤖 RandomForest ML 모델 로딩 중...")
             ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
             
             if ml_predicted_df is None:
-                error_msg = "머신러닝 모델 예측 결과가 None입니다."
+                error_msg = "RandomForest 머신러닝 모델 예측 결과가 None입니다."
                 log_error(error_msg)
                 raise AnalysisError(error_msg, step="ml_prediction")
             
             if ml_predicted_df.empty:
-                error_msg = "머신러닝 모델 예측 결과가 비어있습니다."
+                error_msg = "RandomForest 머신러닝 모델 예측 결과가 비어있습니다."
                 log_error(error_msg)
                 raise AnalysisError(error_msg, step="ml_prediction")
                 
-            log_info(f"   ✅ ML 모델 예측 완료: {len(ml_predicted_df):,}개 종목")
+            log_info(f"   ✅ RandomForest ML 모델 예측 완료: {len(ml_predicted_df):,}개 종목")
             
         except ModelPredictionError as e:
-            log_error(f"머신러닝 모델 예측 실패: {e}")
-            raise AnalysisError(f"머신러닝 모델 예측 실패: {e.message}", step="ml_prediction")
+            log_error(f"RandomForest 머신러닝 모델 예측 실패: {e}")
+            raise AnalysisError(f"RandomForest 머신러닝 모델 예측 실패: {e.message}", step="ml_prediction")
         except MemoryError as e:
-            log_error(f"메모리 부족으로 인한 ML 모델 예측 실패: {e}")
-            raise AnalysisError(f"메모리 부족으로 인한 ML 모델 예측 실패: {e}", step="ml_prediction")
+            log_error(f"메모리 부족으로 인한 RandomForest ML 모델 예측 실패: {e}")
+            raise AnalysisError(f"메모리 부족으로 인한 RandomForest ML 모델 예측 실패: {e}", step="ml_prediction")
         except Exception as e:
-            log_error(f"ML 모델 예측 중 예상치 못한 오류: {e}")
-            raise AnalysisError(f"ML 모델 예측 중 예상치 못한 오류: {e}", step="ml_prediction")
+            log_error(f"RandomForest ML 모델 예측 중 예상치 못한 오류: {e}")
+            raise AnalysisError(f"RandomForest ML 모델 예측 중 예상치 못한 오류: {e}", step="ml_prediction")
+
+        # LightGBM 모델 예측 시도 (선택적)
+        log_info("LightGBM 모델 예측 중...")
+        try:
+            # 메모리 정리
+            import gc
+            gc.collect()
+            log_info("   🧹 메모리 정리 완료")
+            
+            # LightGBM 모델 예측 시도 (모델이 없어도 계속 진행)
+            log_info("   🤖 LightGBM ML 모델 로딩 중...")
+            lgb_predicted_df = ml_model.predict_with_lgb_model(feature_df)
+            
+            if lgb_predicted_df is not None and not lgb_predicted_df.empty:
+                log_info(f"   ✅ LightGBM ML 모델 예측 완료: {len(lgb_predicted_df):,}개 종목")
+            else:
+                log_warning("   ⚠️ LightGBM 모델 예측 결과가 없습니다. LightGBM 없이 계속 진행합니다.")
+                lgb_predicted_df = None
+                
+        except Exception as e:
+            # LightGBM 예측 실패는 경고만 출력하고 계속 진행
+            log_warning(f"LightGBM 모델 예측 중 오류 발생 (계속 진행): {e}")
+            lgb_predicted_df = None
 
         log_info("🎯 앙상블 최종 점수 계산을 시작합니다...")
         try:
@@ -209,8 +232,16 @@ def run_analysis(analysis_date_str):
             import gc
             gc.collect()
             
+            # RandomForest 예측 결과 병합
             merged_df = pd.merge(scored_df, ml_predicted_df, on='종목코드', how='left')
-            log_info(f"   📊 머신러닝 예측 결과 병합 완료: {len(merged_df):,}개 종목")
+            log_info(f"   📊 RandomForest 예측 결과 병합 완료: {len(merged_df):,}개 종목")
+            
+            # LightGBM 예측 결과 병합 (있는 경우)
+            if lgb_predicted_df is not None and not lgb_predicted_df.empty:
+                merged_df = pd.merge(merged_df, lgb_predicted_df, on='종목코드', how='left')
+                log_info(f"   📊 LightGBM 예측 결과 병합 완료: {len(merged_df):,}개 종목")
+            else:
+                log_info("   ⚠️ LightGBM 예측 결과가 없어 RandomForest만 사용합니다.")
             
             if merged_df.empty:
                 error_msg = "병합된 데이터가 비어있습니다."

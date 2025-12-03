@@ -42,7 +42,8 @@ def calculate_final_score(df):
     # 기본 가중치 설정 (최적화된 가중치 파일이 없을 경우 사용)
     factor_weights = {
         'volatility_score': 0.10,    # 변동성 점수 10%
-        'ml_pred_proba': 0.90,        # ML 예측 확률 90%
+        'ml_pred_proba': 0.45,        # RandomForest 예측 확률 45%
+        'lgb_pred_proba': 0.45,       # LightGBM 예측 확률 45%
     }
 
     # 최적화된 가중치 파일이 있으면 불러오기
@@ -70,7 +71,7 @@ def calculate_final_score(df):
     log_info("   📊 정규화 값 계산 중...")
     cached_norms = {}
     for factor in active_factors.keys():
-        if factor == 'ml_pred_proba':
+        if factor in ['ml_pred_proba', 'lgb_pred_proba']:
             source_series = final_df[factor] * 100
         else:
             source_series = final_df[factor]
@@ -97,7 +98,7 @@ def calculate_final_score(df):
     # 각 팩터의 점수를 0-100점으로 정규화하여 공정한 비교가 가능하도록 함
     # 벡터화 연산을 사용하여 대용량 데이터 처리 성능 향상
     for factor in active_factors.keys():
-        if factor == 'ml_pred_proba':
+        if factor in ['ml_pred_proba', 'lgb_pred_proba']:
             # ML 예측 확률은 0-1 범위이므로 100을 곱하여 0-100 범위로 변환
             source_series = final_df[factor] * 100
         else:

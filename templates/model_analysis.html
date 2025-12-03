@@ -22,7 +22,7 @@
       먼저 <a href="/" class="alert-link">주식 추천 페이지</a>에서 모델을
       학습하세요
     </li>
-    <li><code>run/train_model.bat</code> 파일을 실행하여 모델을 학습하세요</li>
+    <li><code>run/train_model.bat</code> 또는 <code>run/train_lgb_model.bat</code> 파일을 실행하여 모델을 학습하세요</li>
     {% else %}
     <li>페이지를 새로고침해보세요</li>
     <li>문제가 지속되면 관리자에게 문의하세요</li>
@@ -31,6 +31,47 @@
 </div>
 {% else %}
 
+<!-- 모델 선택 탭 -->
+<ul class="nav nav-tabs mb-4" id="modelTabs" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button class="nav-link active" id="rf-tab" data-bs-toggle="tab" data-bs-target="#rf-model" type="button" role="tab">
+      <i class="fas fa-tree me-1"></i>RandomForest 모델
+      {% if rf_error %}
+      <span class="badge bg-danger ms-1">오류</span>
+      {% elif rf_model_info %}
+      <span class="badge bg-success ms-1">로드됨</span>
+      {% else %}
+      <span class="badge bg-warning ms-1">없음</span>
+      {% endif %}
+    </button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="lgb-tab" data-bs-toggle="tab" data-bs-target="#lgb-model" type="button" role="tab">
+      <i class="fas fa-lightbulb me-1"></i>LightGBM 모델
+      {% if lgb_error %}
+      <span class="badge bg-danger ms-1">오류</span>
+      {% elif lgb_model_info %}
+      <span class="badge bg-success ms-1">로드됨</span>
+      {% else %}
+      <span class="badge bg-warning ms-1">없음</span>
+      {% endif %}
+    </button>
+  </li>
+</ul>
+
+<!-- 탭 콘텐츠 -->
+<div class="tab-content" id="modelTabContent">
+  <!-- RandomForest 모델 탭 -->
+  <div class="tab-pane fade show active" id="rf-model" role="tabpanel">
+    {% if rf_error %}
+    <div class="alert alert-danger" role="alert">
+      <i class="fas fa-exclamation-triangle me-2"></i>{{ rf_error }}
+      <hr />
+      <p class="mb-0">RandomForest 모델을 학습하려면 <code>run/train_model.bat</code> 파일을 실행하세요.</p>
+    </div>
+    {% elif rf_model_info %}
+    {% set model_info = rf_model_info %}
+    
 <!-- 학습 설정 정보 -->
 {% if model_info.training_config %}
 <div class="card mb-4">
@@ -507,16 +548,490 @@
     </div>
   </div>
 </div>
+    {% else %}
+    <div class="alert alert-warning" role="alert">
+      <i class="fas fa-exclamation-triangle me-2"></i>RandomForest 모델 정보를 불러올 수 없습니다.
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- LightGBM 모델 탭 -->
+  <div class="tab-pane fade" id="lgb-model" role="tabpanel">
+    {% if lgb_error %}
+    <div class="alert alert-danger" role="alert">
+      <i class="fas fa-exclamation-triangle me-2"></i>{{ lgb_error }}
+      <hr />
+      <p class="mb-0">LightGBM 모델을 학습하려면 <code>run/train_lgb_model.bat</code> 파일을 실행하세요.</p>
+    </div>
+    {% elif lgb_model_info %}
+    {% set model_info = lgb_model_info %}
+    
+<!-- 학습 설정 정보 -->
+{% if model_info.training_config %}
+<div class="card mb-4">
+  <div class="card-header">
+    <h5 class="mb-0">
+      <i class="fas fa-cogs text-primary me-2"></i>학습 설정 정보
+    </h5>
+  </div>
+  <div class="card-body">
+    <div class="row">
+      <div class="col-md-4">
+        <div class="card bg-light">
+          <div class="card-body">
+            <h6 class="card-title">
+              <i class="fas fa-search text-info me-2"></i>하이퍼파라미터 튜닝
+            </h6>
+            <ul class="list-unstyled mb-0">
+              <li>
+                <strong>탐색 방법:</strong> {{
+                model_info.training_config.search_method or 'N/A' }}
+              </li>
+              <li>
+                <strong>테스트 조합 수:</strong> {{
+                model_info.training_config.n_iter or 'N/A' }}개
+              </li>
+              <li>
+                <strong>교차검증:</strong> {{
+                model_info.training_config.cv_folds or 'N/A' }}-fold
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="card bg-light">
+          <div class="card-body">
+            <h6 class="card-title">
+              <i class="fas fa-microchip text-warning me-2"></i>시스템 설정
+            </h6>
+            <ul class="list-unstyled mb-0">
+              <li>
+                <strong>CPU 코어:</strong> {{ model_info.training_config.n_jobs
+                or 'N/A' }}개
+              </li>
+              <li>
+                <strong>테스트 비율:</strong> {{
+                (model_info.training_config.test_size * 100) | round(0) if
+                model_info.training_config.test_size else 'N/A' }}%
+              </li>
+              <li>
+                <strong>평가 지표:</strong> {{
+                model_info.training_config.scoring or 'N/A' }}
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="card bg-light">
+          <div class="card-body">
+            <h6 class="card-title">
+              <i class="fas fa-sitemap text-success me-2"></i>모델 타입
+            </h6>
+            <ul class="list-unstyled mb-0">
+              <li>
+                <strong>모델:</strong> {{ model_info.training_config.model_type or 'LightGBM' }}
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- 최적화 결과 -->
+{% if model_info.optimization_results %}
+<div class="card mb-4">
+  <div class="card-header">
+    <h5 class="mb-0">
+      <i class="fas fa-trophy text-warning me-2"></i>최적화 결과
+    </h5>
+  </div>
+  <div class="card-body">
+    <div class="row">
+      <div class="col-md-6">
+        <div class="alert alert-success">
+          <h6 class="alert-heading">
+            <i class="fas fa-star me-2"></i>최고 성능
+          </h6>
+          <h3 class="mb-1">
+            {{ (model_info.optimization_results.best_score | round(4)) if
+            model_info.optimization_results.best_score else 'N/A' }}
+          </h3>
+          <small class="text-muted">ROC-AUC 점수</small>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="alert alert-info">
+          <h6 class="alert-heading">
+            <i class="fas fa-list me-2"></i>탐색 범위
+          </h6>
+          <h3 class="mb-1">
+            {{ model_info.optimization_results.total_combinations_tested or
+            'N/A' }}개
+          </h3>
+          <small class="text-muted">테스트한 조합 수</small>
+        </div>
+      </div>
+    </div>
+    {% if model_info.optimization_results.best_params %}
+    <div class="mt-3">
+      <h6><i class="fas fa-cog me-2"></i>최적 파라미터</h6>
+      <div class="row">
+        {% for param, value in
+        model_info.optimization_results.best_params.items() %}
+        <div class="col-md-4 mb-2">
+          <div class="d-flex justify-content-between align-items-center">
+            <span class="fw-bold">{{ param }}:</span>
+            <span class="badge bg-primary">{{ value }}</span>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+<!-- 모델 개요 -->
+<div class="card mb-4">
+  <div class="card-header">
+    <h5 class="mb-0">
+      <i class="fas fa-info-circle text-info me-2"></i>모델 개요
+    </h5>
+  </div>
+  <div class="card-body">
+    <div class="row">
+      <div class="col-md-6">
+        <div class="card bg-light">
+          <div class="card-body">
+            <h6 class="card-title">
+              <i class="fas fa-bullseye text-success me-2"></i>모델 목표
+            </h6>
+            <p class="card-text">15영업일 후 주가가 5% 이상 상승할 확률 예측</p>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="card bg-light">
+          <div class="card-body">
+            <h6 class="card-title">
+              <i class="fas fa-cogs text-primary me-2"></i>모델 종류
+            </h6>
+            <p class="card-text">{{ model_info.model_type }}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row mt-3">
+      <div class="col-md-6">
+        <div class="card bg-light">
+          <div class="card-body">
+            <h6 class="card-title">
+              <i class="fas fa-file-code text-warning me-2"></i>모델 파일
+            </h6>
+            <code>{{ model_info.model_path }}</code>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="card bg-light">
+          <div class="card-body">
+            <h6 class="card-title">
+              <i class="fas fa-calendar text-info me-2"></i>최종 학습일
+            </h6>
+            <p class="card-text">{{ model_info.last_modified }}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 파라미터 설명 -->
+{% if model_info.parameter_explanations %}
+<div class="card mb-4">
+  <div class="card-header">
+    <h5 class="mb-0">
+      <i class="fas fa-question-circle text-info me-2"></i>파라미터 의미 설명
+    </h5>
+  </div>
+  <div class="card-body">
+    <div class="alert alert-info" role="alert">
+      <i class="fas fa-info-circle me-2"></i>
+      각 파라미터가 모델 학습에 어떤 영향을 미치는지 설명합니다.
+    </div>
+    <div class="accordion" id="paramExplanationsLGB">
+      {% for param, explanation in model_info.parameter_explanations.items() %}
+      <div class="accordion-item">
+        <h2 class="accordion-header">
+          <button
+            class="accordion-button collapsed"
+            type="button"
+            data-bs-toggle="collapse"
+            data-bs-target="#paramLGB{{ loop.index }}"
+          >
+            <strong>{{ param }}</strong>
+            <span class="badge bg-secondary ms-2"
+              >{{ model_info.params.get(param, 'N/A') }}</span
+            >
+          </button>
+        </h2>
+        <div id="paramLGB{{ loop.index }}" class="accordion-collapse collapse">
+          <div class="accordion-body">
+            <p class="mb-0">{{ explanation }}</p>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- 피처 중요도 -->
+<div class="card mb-4">
+  <div class="card-header">
+    <h5 class="mb-0">
+      <i class="fas fa-chart-bar text-warning me-2"></i>피처 중요도 분석
+    </h5>
+  </div>
+  <div class="card-body">
+    <div class="alert alert-info" role="alert">
+      <i class="fas fa-info-circle me-2"></i>모델이 어떤 정보를 중요하게
+      생각하여 주가 상승을 예측하는지 3가지 방식으로 분석합니다.
+      <ul class="mb-0 mt-2">
+        <li><strong>기본 중요도:</strong> LightGBM 내장 피처 중요도</li>
+        <li><strong>SHAP 중요도:</strong> SHapley Additive exPlanations (게임 이론 기반, 상호작용 고려)</li>
+        <li><strong>순열 중요도:</strong> Permutation Importance (피처 제거 시 성능 변화 측정)</li>
+      </ul>
+    </div>
+
+    <!-- 중요도 방식 선택 탭 -->
+    <ul class="nav nav-tabs mb-3" id="importanceTabsLGB" role="tablist">
+      <li class="nav-item" role="presentation">
+        <button class="nav-link active" id="default-tab-lgb" data-bs-toggle="tab" data-bs-target="#default-lgb" type="button" role="tab">
+          <i class="fas fa-chart-line me-1"></i>기본 중요도
+        </button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link" id="shap-tab-lgb" data-bs-toggle="tab" data-bs-target="#shap-lgb" type="button" role="tab">
+          <i class="fas fa-project-diagram me-1"></i>SHAP 중요도
+        </button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link" id="permutation-tab-lgb" data-bs-toggle="tab" data-bs-target="#permutation-lgb" type="button" role="tab">
+          <i class="fas fa-exchange-alt me-1"></i>순열 중요도
+        </button>
+      </li>
+    </ul>
+
+    <!-- 탭 콘텐츠 -->
+    <div class="tab-content" id="importanceTabContentLGB">
+      <!-- 기본 중요도 -->
+      <div class="tab-pane fade show active" id="default-lgb" role="tabpanel">
+        <div class="mb-4">
+          <canvas id="feature_importance_chart_default_lgb" width="400" height="200"></canvas>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-striped" id="feature_table_default_lgb">
+            <thead class="table-dark">
+              <tr>
+                <th>피처 (Feature)</th>
+                <th>중요도 (Importance)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% if model_info.feature_importances.default %}
+                {% for feature, importance in model_info.feature_importances.default %}
+                <tr>
+                  <td>{{ feature }}</td>
+                  <td>{{ "{:.6f}".format(importance) }}</td>
+                </tr>
+                {% endfor %}
+              {% else %}
+                <tr>
+                  <td colspan="2" class="text-center text-muted">데이터가 없습니다.</td>
+                </tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- SHAP 중요도 -->
+      <div class="tab-pane fade" id="shap-lgb" role="tabpanel">
+        {% if model_info.feature_importances.shap %}
+        <div class="mb-4">
+          <canvas id="feature_importance_chart_shap_lgb" width="400" height="200"></canvas>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-striped" id="feature_table_shap_lgb">
+            <thead class="table-dark">
+              <tr>
+                <th>피처 (Feature)</th>
+                <th>SHAP 중요도</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for feature, importance in model_info.feature_importances.shap %}
+              <tr>
+                <td>{{ feature }}</td>
+                <td>{{ "{:.6f}".format(importance) }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="alert alert-warning">
+          <i class="fas fa-exclamation-triangle me-2"></i>SHAP 중요도 데이터가 없습니다. 모델을 다시 학습하면 SHAP 중요도가 계산됩니다.
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- 순열 중요도 -->
+      <div class="tab-pane fade" id="permutation-lgb" role="tabpanel">
+        {% if model_info.feature_importances.permutation %}
+        <div class="mb-4">
+          <canvas id="feature_importance_chart_permutation_lgb" width="400" height="200"></canvas>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-striped" id="feature_table_permutation_lgb">
+            <thead class="table-dark">
+              <tr>
+                <th>피처 (Feature)</th>
+                <th>순열 중요도</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for feature, importance in model_info.feature_importances.permutation %}
+              <tr>
+                <td>{{ feature }}</td>
+                <td>{{ "{:.6f}".format(importance) }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="alert alert-warning">
+          <i class="fas fa-exclamation-triangle me-2"></i>순열 중요도 데이터가 없습니다. 모델을 다시 학습하면 순열 중요도가 계산됩니다.
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- 상세 데이터 -->
+    <div class="accordion mt-4" id="featureAccordionLGB">
+      <div class="accordion-item">
+        <h2 class="accordion-header">
+          <button
+            class="accordion-button collapsed"
+            type="button"
+            data-bs-toggle="collapse"
+            data-bs-target="#modelParamsLGB"
+          >
+            <i class="fas fa-cogs me-2"></i>주요 학습 파라미터 보기
+          </button>
+        </h2>
+        <div
+          id="modelParamsLGB"
+          class="accordion-collapse collapse"
+          data-bs-parent="#featureAccordionLGB"
+        >
+          <div class="accordion-body">
+            <div class="row">
+              <div class="col-md-6">
+                <h6>주요 파라미터</h6>
+                <ul class="list-group">
+                  <li class="list-group-item d-flex justify-content-between">
+                    <span>num_leaves</span>
+                    <span class="badge bg-primary"
+                      >{{ model_info.params.get('num_leaves', 'N/A') }}</span
+                    >
+                  </li>
+                  <li class="list-group-item d-flex justify-content-between">
+                    <span>max_depth</span>
+                    <span class="badge bg-primary"
+                      >{{ model_info.params.get('max_depth', 'N/A') }}</span
+                    >
+                  </li>
+                  <li class="list-group-item d-flex justify-content-between">
+                    <span>learning_rate</span>
+                    <span class="badge bg-primary"
+                      >{{ model_info.params.get('learning_rate', 'N/A')
+                      }}</span
+                    >
+                  </li>
+                </ul>
+              </div>
+              <div class="col-md-6">
+                <h6>추가 파라미터</h6>
+                <ul class="list-group">
+                  <li class="list-group-item d-flex justify-content-between">
+                    <span>n_estimators</span>
+                    <span class="badge bg-secondary"
+                      >{{ model_info.params.get('n_estimators', 'N/A')
+                      }}</span
+                    >
+                  </li>
+                  <li class="list-group-item d-flex justify-content-between">
+                    <span>min_child_samples</span>
+                    <span class="badge bg-secondary"
+                      >{{ model_info.params.get('min_child_samples', 'N/A') }}</span
+                    >
+                  </li>
+                  <li class="list-group-item d-flex justify-content-between">
+                    <span>subsample</span>
+                    <span class="badge bg-secondary"
+                      >{{ model_info.params.get('subsample', 'N/A') }}</span
+                    >
+                  </li>
+                  <li class="list-group-item d-flex justify-content-between">
+                    <span>colsample_bytree</span>
+                    <span class="badge bg-secondary"
+                      >{{ model_info.params.get('colsample_bytree', 'N/A') }}</span
+                    >
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+    {% else %}
+    <div class="alert alert-warning" role="alert">
+      <i class="fas fa-exclamation-triangle me-2"></i>LightGBM 모델 정보를 불러올 수 없습니다.
+    </div>
+    {% endif %}
+  </div>
+</div>
 
 {% endif %} {% endblock %} {% block extra_scripts %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
   $(document).ready(function() {
-      // 피처 중요도 데이터 로드
-      {% if model_info and model_info.feature_importances %}
-      const featureImportances = {{ model_info.feature_importances | tojson }};
+      // RandomForest 피처 중요도 데이터 로드
+      {% if rf_model_info and rf_model_info.feature_importances %}
+      const rfFeatureImportances = {{ rf_model_info.feature_importances | tojson }};
       {% else %}
-      const featureImportances = { default: [], shap: [], permutation: [] };
+      const rfFeatureImportances = { default: [], shap: [], permutation: [] };
+      {% endif %}
+      
+      // LightGBM 피처 중요도 데이터 로드
+      {% if lgb_model_info and lgb_model_info.feature_importances %}
+      const lgbFeatureImportances = {{ lgb_model_info.feature_importances | tojson }};
+      {% else %}
+      const lgbFeatureImportances = { default: [], shap: [], permutation: [] };
       {% endif %}
 
       // 차트 생성 함수
@@ -603,27 +1118,54 @@
           }
       }
 
-      // 기본 중요도 차트 및 테이블
-      if (featureImportances.default && featureImportances.default.length > 0) {
-          createChart('feature_importance_chart_default', featureImportances.default, '기본 중요도');
+      // RandomForest 기본 중요도 차트 및 테이블
+      if (rfFeatureImportances.default && rfFeatureImportances.default.length > 0) {
+          createChart('feature_importance_chart_default', rfFeatureImportances.default, '기본 중요도');
           initDataTable('#feature_table_default');
       }
 
-      // SHAP 중요도 차트 및 테이블
-      if (featureImportances.shap && featureImportances.shap.length > 0) {
-          createChart('feature_importance_chart_shap', featureImportances.shap, 'SHAP 중요도');
+      // RandomForest SHAP 중요도 차트 및 테이블
+      if (rfFeatureImportances.shap && rfFeatureImportances.shap.length > 0) {
+          createChart('feature_importance_chart_shap', rfFeatureImportances.shap, 'SHAP 중요도');
           initDataTable('#feature_table_shap');
       }
 
-      // 순열 중요도 차트 및 테이블
-      if (featureImportances.permutation && featureImportances.permutation.length > 0) {
-          createChart('feature_importance_chart_permutation', featureImportances.permutation, '순열 중요도');
+      // RandomForest 순열 중요도 차트 및 테이블
+      if (rfFeatureImportances.permutation && rfFeatureImportances.permutation.length > 0) {
+          createChart('feature_importance_chart_permutation', rfFeatureImportances.permutation, '순열 중요도');
           initDataTable('#feature_table_permutation');
       }
 
+      // LightGBM 기본 중요도 차트 및 테이블
+      if (lgbFeatureImportances.default && lgbFeatureImportances.default.length > 0) {
+          createChart('feature_importance_chart_default_lgb', lgbFeatureImportances.default, '기본 중요도');
+          initDataTable('#feature_table_default_lgb');
+      }
+
+      // LightGBM SHAP 중요도 차트 및 테이블
+      if (lgbFeatureImportances.shap && lgbFeatureImportances.shap.length > 0) {
+          createChart('feature_importance_chart_shap_lgb', lgbFeatureImportances.shap, 'SHAP 중요도');
+          initDataTable('#feature_table_shap_lgb');
+      }
+
+      // LightGBM 순열 중요도 차트 및 테이블
+      if (lgbFeatureImportances.permutation && lgbFeatureImportances.permutation.length > 0) {
+          createChart('feature_importance_chart_permutation_lgb', lgbFeatureImportances.permutation, '순열 중요도');
+          initDataTable('#feature_table_permutation_lgb');
+      }
+
       // 탭 전환 시 차트 리사이즈 (Chart.js 이슈 대응)
-      const tabButtons = document.querySelectorAll('#importanceTabs button[data-bs-toggle="tab"]');
-      tabButtons.forEach(button => {
+      const importanceTabButtons = document.querySelectorAll('#importanceTabs button[data-bs-toggle="tab"], #importanceTabsLGB button[data-bs-toggle="tab"]');
+      importanceTabButtons.forEach(button => {
+          button.addEventListener('shown.bs.tab', function (event) {
+              // 차트가 있는 경우 리사이즈
+              window.dispatchEvent(new Event('resize'));
+          });
+      });
+      
+      // 모델 탭 전환 시 차트 리사이즈
+      const modelTabButtons = document.querySelectorAll('#modelTabs button[data-bs-toggle="tab"]');
+      modelTabButtons.forEach(button => {
           button.addEventListener('shown.bs.tab', function (event) {
               // 차트가 있는 경우 리사이즈
               window.dispatchEvent(new Event('resize'));

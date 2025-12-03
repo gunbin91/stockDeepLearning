@@ -153,6 +153,9 @@ $(document).ready(function() {
         
         // 분석 관련 이벤트
         setupAnalysisEvents();
+        
+        // 가중치 관련 이벤트
+        setupWeightsEvents();
     }
     
     function initializeModelAnalysisPage() {
@@ -171,10 +174,101 @@ $(document).ready(function() {
         // 백테스팅 관련 이벤트
         setupBacktestEvents();
         
+        // 가중치 관련 이벤트 (백테스팅 페이지용)
+        setupWeightsEventsBacktest();
+        
         // 기존 리포트 로드
         if ($('#backtest_report').length) {
             loadBacktestReport();
         }
+    }
+    
+    function setupWeightsEventsBacktest() {
+        // 가중치 모달 열 때 현재 가중치 로드
+        $('#weights_modal_backtest').on('show.bs.modal', function() {
+            loadWeightsBacktest();
+        });
+        
+        // 가중치 입력 시 합계 계산
+        $('#weight_volatility_backtest, #weight_ml_backtest, #weight_lgb_backtest').on('input', function() {
+            updateWeightsSumBacktest();
+        });
+        
+        // 가중치 저장 버튼
+        $('#save_weights_btn_backtest').on('click', function() {
+            saveWeightsBacktest();
+        });
+    }
+    
+    function loadWeightsBacktest() {
+        $.ajax({
+            url: '/api/weights',
+            method: 'GET',
+            success: function(response) {
+                if (response.success) {
+                    const weights = response.weights;
+                    // 소수점을 퍼센트로 변환 (0.10 -> 10.0)
+                    $('#weight_volatility_backtest').val((weights.volatility_score * 100).toFixed(1));
+                    $('#weight_ml_backtest').val((weights.ml_pred_proba * 100).toFixed(1));
+                    $('#weight_lgb_backtest').val((weights.lgb_pred_proba * 100).toFixed(1));
+                    updateWeightsSumBacktest();
+                } else {
+                    showToast('가중치를 불러오는 중 오류가 발생했습니다.', 'error');
+                }
+            },
+            error: function() {
+                showToast('가중치를 불러오는 중 오류가 발생했습니다.', 'error');
+            }
+        });
+    }
+    
+    function updateWeightsSumBacktest() {
+        const volatility = parseFloat($('#weight_volatility_backtest').val()) || 0;
+        const ml = parseFloat($('#weight_ml_backtest').val()) || 0;
+        const lgb = parseFloat($('#weight_lgb_backtest').val()) || 0;
+        const sum = volatility + ml + lgb;
+        
+        $('#weights_sum_backtest').text(sum.toFixed(1));
+        
+        // 합계가 100이 아니면 경고 표시
+        if (Math.abs(sum - 100) > 0.1) {
+            $('#weights_sum_alert_backtest').show();
+            $('#weights_sum_message_backtest').text(`합계가 100%가 아닙니다 (현재: ${sum.toFixed(1)}%). 저장 시 자동으로 정규화됩니다.`);
+        } else {
+            $('#weights_sum_alert_backtest').hide();
+        }
+    }
+    
+    function saveWeightsBacktest() {
+        const volatility = parseFloat($('#weight_volatility_backtest').val()) || 0;
+        const ml = parseFloat($('#weight_ml_backtest').val()) || 0;
+        const lgb = parseFloat($('#weight_lgb_backtest').val()) || 0;
+        
+        // 퍼센트를 소수점으로 변환 (10.0 -> 0.10)
+        const weights = {
+            volatility_score: volatility / 100,
+            ml_pred_proba: ml / 100,
+            lgb_pred_proba: lgb / 100
+        };
+        
+        $.ajax({
+            url: '/api/weights',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ weights: weights }),
+            success: function(response) {
+                if (response.success) {
+                    showToast('가중치가 성공적으로 저장되었습니다.', 'success');
+                    $('#weights_modal_backtest').modal('hide');
+                } else {
+                    showToast('가중치 저장 중 오류가 발생했습니다: ' + (response.error || '알 수 없는 오류'), 'error');
+                }
+            },
+            error: function(xhr) {
+                const error = xhr.responseJSON?.error || '알 수 없는 오류';
+                showToast('가중치 저장 중 오류가 발생했습니다: ' + error, 'error');
+            }
+        });
     }
     
     function initializeStockTable() {
@@ -881,6 +975,94 @@ $(document).ready(function() {
             delay: 5000
         });
         toast.show();
+    }
+    
+    function setupWeightsEvents() {
+        // 가중치 모달 열 때 현재 가중치 로드
+        $('#weights_modal').on('show.bs.modal', function() {
+            loadWeights();
+        });
+        
+        // 가중치 입력 시 합계 계산
+        $('#weight_volatility, #weight_ml, #weight_lgb').on('input', function() {
+            updateWeightsSum();
+        });
+        
+        // 가중치 저장 버튼
+        $('#save_weights_btn').on('click', function() {
+            saveWeights();
+        });
+    }
+    
+    function loadWeights() {
+        $.ajax({
+            url: '/api/weights',
+            method: 'GET',
+            success: function(response) {
+                if (response.success) {
+                    const weights = response.weights;
+                    // 소수점을 퍼센트로 변환 (0.10 -> 10.0)
+                    $('#weight_volatility').val((weights.volatility_score * 100).toFixed(1));
+                    $('#weight_ml').val((weights.ml_pred_proba * 100).toFixed(1));
+                    $('#weight_lgb').val((weights.lgb_pred_proba * 100).toFixed(1));
+                    updateWeightsSum();
+                } else {
+                    showToast('가중치를 불러오는 중 오류가 발생했습니다.', 'error');
+                }
+            },
+            error: function() {
+                showToast('가중치를 불러오는 중 오류가 발생했습니다.', 'error');
+            }
+        });
+    }
+    
+    function updateWeightsSum() {
+        const volatility = parseFloat($('#weight_volatility').val()) || 0;
+        const ml = parseFloat($('#weight_ml').val()) || 0;
+        const lgb = parseFloat($('#weight_lgb').val()) || 0;
+        const sum = volatility + ml + lgb;
+        
+        $('#weights_sum').text(sum.toFixed(1));
+        
+        // 합계가 100이 아니면 경고 표시
+        if (Math.abs(sum - 100) > 0.1) {
+            $('#weights_sum_alert').show();
+            $('#weights_sum_message').text(`합계가 100%가 아닙니다 (현재: ${sum.toFixed(1)}%). 저장 시 자동으로 정규화됩니다.`);
+        } else {
+            $('#weights_sum_alert').hide();
+        }
+    }
+    
+    function saveWeights() {
+        const volatility = parseFloat($('#weight_volatility').val()) || 0;
+        const ml = parseFloat($('#weight_ml').val()) || 0;
+        const lgb = parseFloat($('#weight_lgb').val()) || 0;
+        
+        // 퍼센트를 소수점으로 변환 (10.0 -> 0.10)
+        const weights = {
+            volatility_score: volatility / 100,
+            ml_pred_proba: ml / 100,
+            lgb_pred_proba: lgb / 100
+        };
+        
+        $.ajax({
+            url: '/api/weights',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ weights: weights }),
+            success: function(response) {
+                if (response.success) {
+                    showToast('가중치가 성공적으로 저장되었습니다.', 'success');
+                    $('#weights_modal').modal('hide');
+                } else {
+                    showToast('가중치 저장 중 오류가 발생했습니다: ' + (response.error || '알 수 없는 오류'), 'error');
+                }
+            },
+            error: function(xhr) {
+                const error = xhr.responseJSON?.error || '알 수 없는 오류';
+                showToast('가중치 저장 중 오류가 발생했습니다: ' + error, 'error');
+            }
+        });
     }
     
     // 전역 함수로 노출

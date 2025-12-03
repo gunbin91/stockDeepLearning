@@ -74,6 +74,7 @@ def moment_filter(value, format_string='YYYY-MM-DD'):
 
 # 설정 (통일된 경로 사용)
 MODEL_PATH = str(path_manager.get_model_path())
+LGB_MODEL_PATH = str(path_manager.get_lgb_model_path())
 
 # =============================================================================
 # 전역 변수 관리
@@ -195,6 +196,9 @@ def load_cached_analysis_result():
             if 'ml_pred_proba' in display_df.columns:
                 display_df['ml_pred_proba'] = display_df['ml_pred_proba'] * 100
             
+            if 'lgb_pred_proba' in display_df.columns:
+                display_df['lgb_pred_proba'] = display_df['lgb_pred_proba'] * 100
+            
             display_df['등락율'] = ((display_df['현재가'] - display_df['기준일가']) / display_df['기준일가']) * 100
             display_df['현재가(원)_formatted'] = display_df.apply(format_price_with_change, axis=1)
             
@@ -206,10 +210,22 @@ def load_cached_analysis_result():
                 # 전날종가 데이터가 없는 경우 기존 로직 사용 (분석기준일 대비)
                 display_df['등락율(%)'] = display_df['등락율'].apply(format_change_rate)
 
-            rename_map = { '현재가': '현재가(원)', '시가총액': '시가총액(억)',  'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(원)'}
+            rename_map = { 
+                '현재가': '현재가(원)', 
+                '시가총액': '시가총액(억)',  
+                'volatility_score': '변동성(점)', 
+                'ml_pred_proba': '상승확률(RF)(%)', 
+                'lgb_pred_proba': '상승확률(LGB)(%)',
+                'final_score': '최종점수(점)', 
+                '기준일가': '기준일가(원)'
+            }
             display_df.rename(columns=rename_map, inplace=True)
             
-            display_columns = [ '최종순위', '종목명', '종목코드', '현재가(원)_formatted', '등락율(%)', '기준일가(원)', '최종점수(점)', '상승확률(%)', '변동성(점)', '시가총액(억)']
+            display_columns = [ 
+                '최종순위', '종목명', '종목코드', '현재가(원)_formatted', '등락율(%)', 
+                '기준일가(원)', '최종점수(점)', '상승확률(RF)(%)', '상승확률(LGB)(%)', 
+                '변동성(점)', '시가총액(억)'
+            ]
             
             result_df = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(원)_formatted': '현재가(원)'})
             
@@ -391,12 +407,24 @@ def index():
                          analysis_date=analysis_date,
                          current_date=current_date)
 
-@app.route('/model_analysis')
-def model_analysis():
-    """학습 모델 분석 페이지"""
-    model_info = None
-    error = None
-    
+def convert_to_python_types(obj):
+    """numpy 타입을 Python 기본 타입으로 변환"""
+    import numpy as np
+    if isinstance(obj, (np.integer, np.int32, np.int64)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float32, np.float64)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: convert_to_python_types(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_to_python_types(item) for item in obj]
+    else:
+        return obj
+
+def load_model_info(model_path, model_name='RandomForest'):
+    """모델 정보 로드 함수"""
     try:
         # 메모리 사용량 확인
         import psutil
@@ -405,7 +433,7 @@ def model_analysis():
             raise MemoryError(f"메모리 사용량이 높습니다: {memory_usage.percent:.1f}%")
         
         # 모델 로드 시도
-        model_data = joblib.load(MODEL_PATH)
+        model_data = joblib.load(model_path)
         model = model_data['model']
         features = model_data['features']
         
@@ -443,33 +471,77 @@ def model_analysis():
                     'permutation': []
                 }
         
+        # numpy 타입을 Python 기본 타입으로 변환 (JSON 직렬화를 위해)
+        feature_importances_dict = convert_to_python_types(feature_importances_dict)
+        
         # 추가 정보 로드 (기존 모델과의 호환성을 위해 기본값 설정)
         training_config = model_data.get('training_config', {})
         optimization_results = model_data.get('optimization_results', {})
         parameter_explanations = model_data.get('parameter_explanations', {})
         
+        # numpy 타입을 Python 기본 타입으로 변환
+        training_config = convert_to_python_types(training_config)
+        optimization_results = convert_to_python_types(optimization_results)
+        parameter_explanations = convert_to_python_types(parameter_explanations)
+        
+        # 모델 파라미터도 변환
+        params = model.get_params()
+        params = convert_to_python_types(params)
+        
+        # oob_score 변환
+        oob_score = getattr(model, 'oob_score_', None)
+        if oob_score is not None:
+            oob_score = convert_to_python_types(oob_score)
+        
         # 모델 정보
         model_info = {
             'model_type': type(model).__name__,
-            'model_path': MODEL_PATH,
-            'last_modified': datetime.fromtimestamp(os.path.getmtime(MODEL_PATH)).strftime('%Y-%m-%d %H:%M:%S'),
-            'oob_score': getattr(model, 'oob_score_', None),
+            'model_name': model_name,
+            'model_path': model_path,
+            'last_modified': datetime.fromtimestamp(os.path.getmtime(model_path)).strftime('%Y-%m-%d %H:%M:%S'),
+            'oob_score': oob_score,
             'features': features,
             'feature_importances': feature_importances_dict,  # 3가지 중요도 dict
-            'params': model.get_params(),
+            'params': params,
             'training_config': training_config,
             'optimization_results': optimization_results,
             'parameter_explanations': parameter_explanations
         }
         
+        return model_info, None
     except FileNotFoundError:
-        error = "모델 파일을 찾을 수 없습니다. 먼저 모델을 학습해주세요."
+        return None, f"{model_name} 모델 파일을 찾을 수 없습니다. 먼저 모델을 학습해주세요."
     except MemoryError as e:
-        error = f"메모리 부족으로 모델을 로드할 수 없습니다: {str(e)}"
+        return None, f"메모리 부족으로 모델을 로드할 수 없습니다: {str(e)}"
     except Exception as e:
-        error = f"모델 로드 중 오류: {str(e)}"
+        return None, f"모델 로드 중 오류: {str(e)}"
+
+@app.route('/model_analysis')
+def model_analysis():
+    """학습 모델 분석 페이지 (RandomForest와 LightGBM 통합)"""
+    # RandomForest 모델 정보 로드
+    rf_model_info, rf_error = load_model_info(MODEL_PATH, 'RandomForest')
     
-    return render_template('model_analysis.html', model_info=model_info, error=error)
+    # LightGBM 모델 정보 로드 (파일이 없어도 계속 진행)
+    lgb_model_info, lgb_error = None, None
+    if os.path.exists(LGB_MODEL_PATH):
+        lgb_model_info, lgb_error = load_model_info(LGB_MODEL_PATH, 'LightGBM')
+    else:
+        lgb_error = "LightGBM 모델 파일을 찾을 수 없습니다. 먼저 모델을 학습해주세요."
+    
+    # 에러 처리: RF 모델이 없으면 에러 표시
+    error = None
+    if rf_error:
+        error = rf_error
+    elif not rf_model_info:
+        error = "RandomForest 모델을 로드할 수 없습니다."
+    
+    return render_template('model_analysis.html', 
+                         rf_model_info=rf_model_info, 
+                         lgb_model_info=lgb_model_info,
+                         rf_error=rf_error,
+                         lgb_error=lgb_error,
+                         error=error)
 
 @app.route('/backtest')
 def backtest():
@@ -933,6 +1005,76 @@ def get_backtest_status():
         'process_running': is_backtest_process_running(current_backtest_process) if current_backtest_process else False,
         'timestamp': datetime.now().isoformat()
     })
+
+@app.route('/api/weights', methods=['GET'])
+def get_weights():
+    """가중치 조회 API"""
+    try:
+        weights_path = path_manager.get_weights_path()
+        
+        # 기본 가중치
+        default_weights = {
+            'volatility_score': 0.10,
+            'ml_pred_proba': 0.45,
+            'lgb_pred_proba': 0.45
+        }
+        
+        if os.path.exists(weights_path):
+            with open(weights_path, 'r', encoding='utf-8') as f:
+                loaded_weights = json.load(f)
+                # 기본 가중치와 병합 (누락된 키는 기본값 사용)
+                for key in default_weights:
+                    if key not in loaded_weights:
+                        loaded_weights[key] = default_weights[key]
+                return jsonify({
+                    'success': True,
+                    'weights': loaded_weights,
+                    'source': 'file'
+                })
+        else:
+            return jsonify({
+                'success': True,
+                'weights': default_weights,
+                'source': 'default'
+            })
+    except Exception as e:
+        log_error(f"가중치 조회 중 오류: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/weights', methods=['POST'])
+def save_weights():
+    """가중치 저장 API"""
+    try:
+        data = request.get_json()
+        weights = data.get('weights', {})
+        
+        # 필수 키 확인
+        required_keys = ['volatility_score', 'ml_pred_proba', 'lgb_pred_proba']
+        for key in required_keys:
+            if key not in weights:
+                return jsonify({'success': False, 'error': f'{key} 가중치가 필요합니다.'}), 400
+        
+        # 값 검증 (0 이상이어야 함)
+        for key, value in weights.items():
+            if value < 0:
+                return jsonify({'success': False, 'error': f'{key} 가중치는 0 이상이어야 합니다.'}), 400
+        
+        # 가중치 파일 저장
+        weights_path = path_manager.get_weights_path()
+        weights_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(weights_path, 'w', encoding='utf-8') as f:
+            json.dump(weights, f, indent=2, ensure_ascii=False)
+        
+        log_info(f"가중치 저장 완료: {weights_path}")
+        return jsonify({
+            'success': True,
+            'message': '가중치가 성공적으로 저장되었습니다.',
+            'weights': weights
+        })
+    except Exception as e:
+        log_error(f"가중치 저장 중 오류: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # =============================================================================

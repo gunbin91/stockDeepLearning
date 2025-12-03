@@ -125,7 +125,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
     print(f"🔍 백테스팅 날짜 범위: {daily_dates.min()} ~ {daily_dates.max()}")
     print(f"🔍 총 백테스팅 날짜 수: {len(daily_dates)}개")
     
-    score_cols_to_log = ['final_score', 'ml_pred_proba', 'volatility_score']
+    score_cols_to_log = ['final_score', 'ml_pred_proba', 'lgb_pred_proba', 'volatility_score']
 
     take_profit_multiplier = 1 + (take_profit_pct / 100)
     stop_loss_multiplier = 1 - (stop_loss_pct / 100)
@@ -373,7 +373,9 @@ def create_html_report(results, output_path=REPORT_FILE):
 
         if 'ml_pred_proba' in sell_log.columns:
             sell_log['ml_pred_proba'] = (sell_log['ml_pred_proba'] * 100).round(2)
-        score_cols = ['final_score', 'ml_pred_proba', 'volatility_score']
+        if 'lgb_pred_proba' in sell_log.columns:
+            sell_log['lgb_pred_proba'] = (sell_log['lgb_pred_proba'] * 100).round(2)
+        score_cols = ['final_score', 'ml_pred_proba', 'lgb_pred_proba', 'volatility_score']
         for col in score_cols:
             if col in sell_log.columns:
                 sell_log[col] = sell_log[col].round(2)
@@ -387,7 +389,7 @@ def create_html_report(results, output_path=REPORT_FILE):
             '종목명': '종목명', 'buy_market_cap_str': '매수시점 시총',
             'buy_price': '매수가', 'sell_price': '매도가', 'buy_amount_str': '매수금액', 'profit_str': '실현손익',
             'return_str': '수익률', 'total_asset_str': '총자산', 'final_score': '최종점수',
-            'ml_pred_proba': '상승확률', 'volatility_score': '변동성'
+            'ml_pred_proba': '상승확률(RF)', 'lgb_pred_proba': '상승확률(LGB)', 'volatility_score': '변동성'
         }
         display_columns = list(rename_map.keys())
         sell_log = sell_log[[col for col in display_columns if col in sell_log.columns]].rename(columns=rename_map)

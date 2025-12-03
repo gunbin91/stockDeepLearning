@@ -14,8 +14,11 @@
 <!-- 백테스팅 신규 실행 버튼 -->
 <div class="card mb-4">
     <div class="card-body text-center">
-        <button type="button" class="btn btn-primary btn-lg" data-bs-toggle="modal" data-bs-target="#backtest_modal">
+        <button type="button" class="btn btn-primary btn-lg me-2" data-bs-toggle="modal" data-bs-target="#backtest_modal">
             <i class="fas fa-play me-2"></i>백테스팅 신규 실행
+        </button>
+        <button type="button" class="btn btn-secondary btn-lg" data-bs-toggle="modal" data-bs-target="#weights_modal_backtest">
+            <i class="fas fa-balance-scale me-2"></i>가중치 설정
         </button>
     </div>
 </div>
@@ -147,6 +150,73 @@
                         </button>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 가중치 설정 모달 (백테스팅 페이지용) -->
+<div class="modal fade" id="weights_modal_backtest" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-balance-scale text-primary me-2"></i>팩터 가중치 설정
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info" role="alert">
+                    <i class="fas fa-info-circle me-2"></i>각 팩터의 가중치를 설정하세요. 합계가 100%가 되도록 자동으로 정규화됩니다.
+                </div>
+                
+                <div class="mb-3">
+                    <label for="weight_volatility_backtest" class="form-label">
+                        변동성 점수 (volatility_score)
+                    </label>
+                    <div class="input-group">
+                        <input type="number" class="form-control" id="weight_volatility_backtest" 
+                               min="0" max="100" step="0.1" value="10.0">
+                        <span class="input-group-text">%</span>
+                    </div>
+                </div>
+                
+                <div class="mb-3">
+                    <label for="weight_ml_backtest" class="form-label">
+                        RandomForest 상승확률 (ml_pred_proba)
+                    </label>
+                    <div class="input-group">
+                        <input type="number" class="form-control" id="weight_ml_backtest" 
+                               min="0" max="100" step="0.1" value="45.0">
+                        <span class="input-group-text">%</span>
+                    </div>
+                </div>
+                
+                <div class="mb-3">
+                    <label for="weight_lgb_backtest" class="form-label">
+                        LightGBM 상승확률 (lgb_pred_proba)
+                    </label>
+                    <div class="input-group">
+                        <input type="number" class="form-control" id="weight_lgb_backtest" 
+                               min="0" max="100" step="0.1" value="45.0">
+                        <span class="input-group-text">%</span>
+                    </div>
+                </div>
+                
+                <div class="alert alert-warning" role="alert" id="weights_sum_alert_backtest" style="display: none;">
+                    <i class="fas fa-exclamation-triangle me-2"></i>
+                    <span id="weights_sum_message_backtest"></span>
+                </div>
+                
+                <div class="mb-3">
+                    <strong>합계: <span id="weights_sum_backtest">100.0</span>%</strong>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">취소</button>
+                <button type="button" class="btn btn-primary" id="save_weights_btn_backtest">
+                    <i class="fas fa-save me-1"></i>저장
+                </button>
             </div>
         </div>
     </div>

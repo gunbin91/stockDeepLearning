@@ -1,0 +1,547 @@
+"""
+LightGBM 모델 훈련 스크립트
+===========================
+
+이 파일은 주식 상승 예측을 위한 LightGBM 모델을 훈련합니다.
+RandomForest와 동일한 학습 데이터를 사용하여 15일 후 5% 이상 상승할 확률을 예측합니다.
+
+주요 기능:
+- 대용량 데이터 처리 및 메모리 최적화
+- 하이퍼파라미터 자동 튜닝 (Optuna)
+- 교차 검증을 통한 모델 성능 평가
+- 훈련된 모델 및 전처리기 저장
+"""
+
+import pandas as pd
+import numpy as np
+import joblib
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
+from sklearn.metrics import classification_report, roc_auc_score
+from sklearn.preprocessing import StandardScaler
+import warnings
+import argparse
+from datetime import datetime, timedelta
+import os
+import sys
+import io
+import shutil
+import gc
+import psutil
+import locale
+import platform
+import optuna
+from optuna.samplers import TPESampler
+from sklearn.utils import resample
+from sklearn.inspection import permutation_importance
+import lightgbm as lgb
+
+# Windows 환경에서 로케일 설정 (FinanceDataReader 내부 오류 방지)
+if platform.system() == 'Windows':
+    try:
+        os.environ['LC_ALL'] = 'en_US.UTF-8'
+        os.environ['LANG'] = 'en_US.UTF-8'
+        locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+    except:
+        pass
+
+# 크로스 플랫폼 인코딩 설정
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# train_model.py에서 공통 함수들 import
+from scripts.train_model import (
+    get_memory_usage,
+    log_memory_usage,
+    safe_memory_cleanup,
+    check_memory_and_cleanup,
+    calculate_shap_importance,
+    calculate_permutation_importance,
+    create_training_data
+)
+
+import data_processor
+from path_manager import path_manager
+from logger import log_info, log_warning, log_error 
+
+warnings.filterwarnings('ignore', category=FutureWarning)
+
+def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, n_jobs, n_iter, model_path=None):
+    """
+    LightGBM 모델 학습 및 저장 함수
+    
+    Args:
+        X: 학습 데이터 (피처)
+        y: 학습 타겟
+        features: 피처 이름 리스트
+        imputation_values: 결측치 대체값
+        n_jobs: 사용할 CPU 코어 수
+        n_iter: Optuna 최적화 시도 횟수
+        model_path: 모델 저장 경로 (None이면 기본 경로 사용)
+    """
+    if X is None or y is None or X.empty or y.empty:
+        log_error("학습 데이터가 없어 모델링을 건너뜁니다.")
+        return
+
+    # 통일된 경로 사용
+    if model_path is None:
+        model_path = str(path_manager.get_lgb_model_path())
+
+    log_info("🤖 LightGBM 모델 학습 및 평가를 시작합니다...")
+    log_memory_usage("모델 학습 시작")
+    
+    # 메모리 효율적인 train_test_split
+    log_info("   📊 학습/테스트 데이터 분할 중...")
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+    log_memory_usage("데이터 분할 완료")
+    check_memory_and_cleanup()
+
+    log_info("\n   📏 피처 스케일링 (StandardScaler) 적용 중...")
+    scaler = StandardScaler()
+    
+    try:
+        X_train_scaled = scaler.fit_transform(X_train)
+        # LightGBM 피처 이름 경고 방지를 위해 pandas DataFrame으로 변환
+        X_train_scaled = pd.DataFrame(X_train_scaled, columns=features)
+        log_memory_usage("훈련 데이터 스케일링 완료")
+        check_memory_and_cleanup()
+        
+        X_test_scaled = scaler.transform(X_test)
+        # LightGBM 피처 이름 경고 방지를 위해 pandas DataFrame으로 변환
+        X_test_scaled = pd.DataFrame(X_test_scaled, columns=features)
+        log_memory_usage("테스트 데이터 스케일링 완료")
+        
+        # 중간 변수 즉시 메모리 해제
+        del X_train, X_test
+        gc.collect()
+        log_info("   🧹 중간 변수 메모리 해제 완료")
+        
+    except MemoryError as e:
+        log_error(f"스케일링 중 메모리 부족: {e}")
+        log_info("   🔄 메모리 정리 후 재시도합니다...")
+        safe_memory_cleanup()
+        X_train_scaled = scaler.fit_transform(X_train)
+        # LightGBM 피처 이름 경고 방지를 위해 pandas DataFrame으로 변환
+        X_train_scaled = pd.DataFrame(X_train_scaled, columns=features)
+        X_test_scaled = scaler.transform(X_test)
+        # LightGBM 피처 이름 경고 방지를 위해 pandas DataFrame으로 변환
+        X_test_scaled = pd.DataFrame(X_test_scaled, columns=features)
+        
+        # 중간 변수 즉시 메모리 해제
+        del X_train, X_test
+        gc.collect()
+        
+        log_memory_usage("재시도 후 스케일링 완료")
+
+    log_info("\n학습 데이터 타겟 분포:\n" + str(y_train.value_counts(normalize=True)))
+
+    log_info("🔍 Optuna를 사용하여 최적 파라미터 탐색...")
+    log_info(f"   ⚙️ 탐색할 파라미터 조합: {n_iter}개")
+    log_info(f"   🔄 교차 검증: 3-fold")
+    log_info(f"   💻 사용할 CPU 코어: {n_jobs}")
+    
+    # Optuna objective 함수 정의 (클로저로 데이터 접근)
+    def objective(trial):
+        """Optuna objective 함수: 하이퍼파라미터 튜닝을 위한 목적 함수"""
+        # 주식 데이터에 최적화된 파라미터 범위 설정
+        max_depth = trial.suggest_int('max_depth', 3, 7)
+        num_leaves = trial.suggest_int('num_leaves', 15, 63)
+        
+        # LightGBM 하이퍼파라미터 제안 (주식 예측 최적화)
+        params = {
+            'objective': 'binary',
+            'metric': 'auc',
+            'boosting_type': 'gbdt',
+            'num_leaves': num_leaves,
+            'max_depth': max_depth,
+            'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),  # 주식에선 0.01 이하가 국룰
+            'n_estimators': 10000,  # 넉넉하게 설정 (Early Stopping으로 제어)
+            'min_child_samples': trial.suggest_int('min_child_samples', 50, 500),  # 노이즈 필터 강화
+            'subsample': trial.suggest_float('subsample', 0.6, 0.9),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.9),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10.0, log=True),  # L1 정규화 강화
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10.0, log=True),  # L2 정규화 강화
+            'scale_pos_weight': trial.suggest_float('scale_pos_weight', 2.0, 5.0),  # 불균형 데이터 처리
+            'random_state': 42,
+            'n_jobs': 1,  # 각 모델은 단일 코어 사용 (메모리 절약)
+            'verbose': -1  # 로그 출력 억제
+        }
+        
+        # 모델 생성
+        model = lgb.LGBMClassifier(**params)
+        
+        # 교차 검증 수행 (메모리 효율적)
+        try:
+            cv_scores = cross_val_score(
+                model, 
+                X_train_scaled, 
+                y_train, 
+                cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
+                scoring='roc_auc',
+                n_jobs=1  # 단일 코어 사용 (메모리 절약)
+            )
+            mean_score = cv_scores.mean()
+            
+            # 메모리 정리
+            del model
+            gc.collect()
+            
+            return mean_score
+        except Exception as e:
+            # 오류 발생 시 낮은 점수 반환
+            log_warning(f"   ⚠️ Trial {trial.number} 실패: {e}")
+            del model
+            gc.collect()
+            return 0.0
+
+    log_memory_usage("하이퍼파라미터 튜닝 시작")
+    
+    # Optuna study 생성
+    study = None
+    best_model = None
+    best_score = 0.0
+    best_params = None
+    
+    try:
+        # TPE 샘플러 사용 (더 효율적인 탐색)
+        sampler = TPESampler(seed=42)
+        study = optuna.create_study(
+            direction='maximize',
+            sampler=sampler,
+            study_name='lightgbm_optimization'
+        )
+        
+        # 하이퍼파라미터 최적화 실행
+        # n_jobs 처리: -1이면 None (모든 코어 사용), 0 이하면 1, 그 외는 지정된 값
+        optuna_n_jobs = None if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
+        study.optimize(
+            objective, 
+            n_trials=n_iter,
+            n_jobs=optuna_n_jobs,
+            show_progress_bar=False  # 로그와 충돌 방지
+        )
+        
+        log_memory_usage("하이퍼파라미터 튜닝 완료")
+        
+        # 최적 파라미터 추출
+        best_params = study.best_params.copy()
+        best_score = study.best_value
+        
+        # 최적 모델 생성 (전체 훈련 데이터로 학습)
+        log_info("   🔧 최적 파라미터로 최종 모델 학습 중...")
+        
+        # Early stopping을 위한 validation set 분할
+        X_train_fit, X_val, y_train_fit, y_val = train_test_split(
+            X_train_scaled, y_train, test_size=0.2, random_state=42, stratify=y_train
+        )
+        
+        # n_estimators를 충분히 크게 설정하고 early stopping 사용
+        best_model = lgb.LGBMClassifier(
+            objective='binary',
+            metric='auc',
+            boosting_type='gbdt',
+            num_leaves=best_params['num_leaves'],
+            max_depth=best_params['max_depth'],
+            learning_rate=best_params['learning_rate'],
+            n_estimators=10000,  # 넉넉하게 설정 (Early Stopping으로 제어)
+            min_child_samples=best_params['min_child_samples'],
+            subsample=best_params['subsample'],
+            colsample_bytree=best_params['colsample_bytree'],
+            reg_alpha=best_params['reg_alpha'],
+            reg_lambda=best_params['reg_lambda'],
+            scale_pos_weight=best_params.get('scale_pos_weight', 3.0),  # 불균형 데이터 처리
+            random_state=42,
+            n_jobs=1,
+            verbose=-1
+        )
+        
+        # Early stopping을 사용하여 학습
+        best_model.fit(
+            X_train_fit, y_train_fit,
+            eval_set=[(X_val, y_val)],
+            callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
+        )
+        log_memory_usage("최적 모델 학습 완료")
+        
+    except MemoryError as e:
+        log_error(f"하이퍼파라미터 튜닝 중 메모리 부족: {e}")
+        log_info("   🔄 메모리 정리 후 재시도합니다...")
+        safe_memory_cleanup()
+        
+        # 더 작은 파라미터 범위로 재시도 (메모리 부족 시)
+        def objective_small(trial):
+            # 주식 데이터에 최적화된 파라미터 범위 설정 (축소 버전)
+            max_depth = trial.suggest_int('max_depth', 3, 6)
+            num_leaves = trial.suggest_int('num_leaves', 15, 31)
+            
+            params = {
+                'objective': 'binary',
+                'metric': 'auc',
+                'boosting_type': 'gbdt',
+                'num_leaves': num_leaves,
+                'max_depth': max_depth,
+                'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.03, log=True),
+                'n_estimators': 5000,  # Early Stopping으로 제어
+                'min_child_samples': trial.suggest_int('min_child_samples', 100, 300),
+                'subsample': trial.suggest_float('subsample', 0.7, 0.9),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 0.9),
+                'reg_alpha': trial.suggest_float('reg_alpha', 0.5, 5.0, log=True),
+                'reg_lambda': trial.suggest_float('reg_lambda', 0.5, 5.0, log=True),
+                'scale_pos_weight': trial.suggest_float('scale_pos_weight', 2.0, 4.0),
+                'random_state': 42,
+                'n_jobs': 1,
+                'verbose': -1
+            }
+            model = lgb.LGBMClassifier(**params)
+            try:
+                cv_scores = cross_val_score(
+                    model, 
+                    X_train_scaled, 
+                    y_train, 
+                    cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
+                    scoring='roc_auc',
+                    n_jobs=1
+                )
+                mean_score = cv_scores.mean()
+                del model
+                gc.collect()
+                return mean_score
+            except Exception as e:
+                log_warning(f"   ⚠️ Trial {trial.number} 실패: {e}")
+                del model
+                gc.collect()
+                return 0.0
+        
+        sampler = TPESampler(seed=42)
+        study = optuna.create_study(
+            direction='maximize',
+            sampler=sampler,
+            study_name='lightgbm_optimization_small'
+        )
+        study.optimize(
+            objective_small, 
+            n_trials=max(5, n_iter//2),
+            n_jobs=1,  # 단일 코어로 제한
+            show_progress_bar=False
+        )
+        
+        best_params = study.best_params.copy()
+        best_score = study.best_value
+        
+        # Early stopping을 위한 validation set 분할
+        X_train_fit, X_val, y_train_fit, y_val = train_test_split(
+            X_train_scaled, y_train, test_size=0.2, random_state=42, stratify=y_train
+        )
+        
+        # n_estimators를 충분히 크게 설정하고 early stopping 사용
+        best_model = lgb.LGBMClassifier(
+            objective='binary',
+            metric='auc',
+            boosting_type='gbdt',
+            num_leaves=best_params['num_leaves'],
+            max_depth=best_params['max_depth'],
+            learning_rate=best_params['learning_rate'],
+            n_estimators=5000,  # Early Stopping으로 제어
+            min_child_samples=best_params['min_child_samples'],
+            subsample=best_params['subsample'],
+            colsample_bytree=best_params['colsample_bytree'],
+            reg_alpha=best_params['reg_alpha'],
+            reg_lambda=best_params['reg_lambda'],
+            scale_pos_weight=best_params.get('scale_pos_weight', 3.0),  # 불균형 데이터 처리
+            random_state=42,
+            n_jobs=1,
+            verbose=-1
+        )
+        
+        # Early stopping을 사용하여 학습
+        best_model.fit(
+            X_train_fit, y_train_fit,
+            eval_set=[(X_val, y_val)],
+            callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
+        )
+        log_memory_usage("재시도 후 하이퍼파라미터 튜닝 완료")
+    
+    except Exception as e:
+        log_error(f"하이퍼파라미터 튜닝 중 오류 발생: {e}")
+        raise
+    
+    # 최적 모델이 생성되었는지 확인
+    if best_model is None or best_params is None:
+        log_error("최적 모델 생성에 실패했습니다.")
+        raise RuntimeError("최적 모델을 생성할 수 없습니다.")
+    
+    log_info("\n--- 최적 파라미터 탐색 결과 ---")
+    log_info(f"최고 점수 (ROC-AUC): {best_score:.4f}")
+    log_info("최적 파라미터: " + str(best_params))
+
+    log_info("📊 최적 모델로 테스트 데이터 평가 중...")
+    log_memory_usage("모델 평가 시작")
+    
+    try:
+        y_pred = best_model.predict(X_test_scaled)
+        y_pred_proba = best_model.predict_proba(X_test_scaled)[:, 1]
+        log_memory_usage("모델 예측 완료")
+    except MemoryError as e:
+        log_error(f"모델 예측 중 메모리 부족: {e}")
+        log_info("   🔄 메모리 정리 후 재시도합니다...")
+        safe_memory_cleanup()
+        y_pred = best_model.predict(X_test_scaled)
+        y_pred_proba = best_model.predict_proba(X_test_scaled)[:, 1]
+        log_memory_usage("재시도 후 모델 예측 완료")
+
+    log_info("\n--- 최종 모델 평가 결과 ---")
+    log_info(f"ROC-AUC: {roc_auc_score(y_test, y_pred_proba):.4f}")
+    log_info("\n분류 보고서 (Classification Report):")
+    log_info(classification_report(y_test, y_pred, target_names=['하락(0)', '상승(1)']))
+
+    # 피처 중요도 계산 (3가지 방식)
+    log_info("\n📊 피처 중요도 계산 중...")
+    
+    # 1. 기본 피처 중요도 (모델 내장)
+    default_importance = list(zip(features, best_model.feature_importances_))
+    default_importance.sort(key=lambda x: x[1], reverse=True)
+    log_info("   ✅ 기본 피처 중요도 계산 완료")
+    
+    # 2. SHAP 중요도 계산 (1000건 계층적 샘플링)
+    shap_importance = calculate_shap_importance(
+        best_model, 
+        X_train_scaled, 
+        y_train, 
+        features, 
+        sample_size=1000
+    )
+    
+    # 3. Permutation Importance 계산 (테스트 데이터 사용)
+    perm_importance = calculate_permutation_importance(
+        best_model, 
+        X_test_scaled, 
+        y_test, 
+        features, 
+        n_repeats=5
+    )
+    
+    log_info("💾 모델 저장 중...")
+    log_memory_usage("모델 저장 시작")
+    
+    # 추가 정보 준비
+    training_config = {
+        'n_iter': n_iter,
+        'n_jobs': n_jobs,
+        'cv_folds': 3,
+        'test_size': 0.3,
+        'scoring': 'roc_auc',
+        'search_method': 'Optuna',
+        'model_type': 'LightGBM'
+    }
+    
+    optimization_results = {
+        'best_score': best_score,
+        'best_params': best_params,
+        'total_combinations_tested': len(study.trials) if study else n_iter,
+        'n_trials_completed': len(study.trials) if study else n_iter
+    }
+    
+    parameter_explanations = {
+        'num_leaves': '리프 노드의 최대 개수 (15-63, 주식 데이터는 패턴이 단순해야 통하므로 31 이하 권장)',
+        'max_depth': '트리의 최대 깊이 (3-7, 10 이상 넘어가면 과거 차트 통암기 수준)',
+        'learning_rate': '학습 속도 (0.005-0.05, 주식에선 0.01 이하가 국룰, 너무 높으면 노이즈를 외워버림)',
+        'n_estimators': '부스팅 반복 횟수 (5000 이상, Early Stopping으로 제어)',
+        'min_child_samples': '리프 노드의 최소 샘플 수 (50-500, 노이즈 필터, 숫자를 높게 잡아서 소수의 우연한 패턴 무시)',
+        'subsample': '각 트리가 사용할 샘플 비율 (0.6-0.9, 과적합 방지)',
+        'colsample_bytree': '각 트리가 사용할 피처 비율 (0.6-0.9, 피처를 골고루 보게 함)',
+        'reg_alpha': 'L1 정규화 계수 (0.1-10.0, 불필요한 피처의 영향력을 0으로 만듦, 노이즈 제거)',
+        'reg_lambda': 'L2 정규화 계수 (0.1-10.0, 특정 피처가 과도하게 영향을 미치는 것을 억제)',
+        'scale_pos_weight': '정답 가중치 (2.0-5.0, 적은 수의 급등주를 놓치지 않기 위한 가중치 설정)'
+    }
+    
+    # 피처 중요도 구조 생성 (3가지 방식)
+    feature_importances = {
+        'default': default_importance
+    }
+    
+    if shap_importance is not None:
+        feature_importances['shap'] = shap_importance
+        log_info("   ✅ SHAP 중요도 저장 준비 완료")
+    else:
+        log_warning("   ⚠️ SHAP 중요도가 없어 기본 중요도만 저장합니다.")
+    
+    if perm_importance is not None:
+        feature_importances['permutation'] = perm_importance
+        log_info("   ✅ Permutation Importance 저장 준비 완료")
+    else:
+        log_warning("   ⚠️ Permutation Importance가 없어 기본 중요도만 저장합니다.")
+    
+    try:
+        joblib.dump({
+            'model': best_model, 
+            'features': features, 
+            'scaler': scaler,
+            'imputation_values': imputation_values,
+            'training_config': training_config,
+            'optimization_results': optimization_results,
+            'parameter_explanations': parameter_explanations,
+            'feature_importances': feature_importances  # 3가지 중요도 포함
+        }, model_path, compress=3)  # 압축 저장으로 메모리 절약
+        log_info(f"\n✅ 새로운 데이터로 학습된 최적 LightGBM 모델, 스케일러, 중앙값을 '{model_path}' 경로에 저장했습니다.")
+        log_memory_usage("모델 저장 완료")
+    except MemoryError as e:
+        log_error(f"모델 저장 중 메모리 부족: {e}")
+        log_info("   🔄 메모리 정리 후 재시도합니다...")
+        safe_memory_cleanup()
+        joblib.dump({
+            'model': best_model, 
+            'features': features, 
+            'scaler': scaler,
+            'imputation_values': imputation_values,
+            'training_config': training_config,
+            'optimization_results': optimization_results,
+            'parameter_explanations': parameter_explanations,
+            'feature_importances': feature_importances  # 3가지 중요도 포함
+        }, model_path, compress=3)  # 압축 저장으로 메모리 절약
+        log_info(f"\n✅ 재시도 후 모델 저장 완료: '{model_path}'")
+        log_memory_usage("재시도 후 모델 저장 완료")
+
+def main():
+    parser = argparse.ArgumentParser(description="LightGBM 모델 학습 및 하이퍼파라미터 튜닝")
+    parser.add_argument('--n_jobs', type=int, default=-1, help='사용할 CPU 코어 수 (-1은 모든 코어 사용)')
+    parser.add_argument('--n_iter', type=int, default=10, help='Optuna 최적화 시도 횟수 (trials)')
+    parser.add_argument('--years', type=int, default=None, help='학습에 사용할 최근 N년치 데이터 (None이면 전체 데이터, 파일이 없을 때만 적용)')
+    args = parser.parse_args()
+    
+    # ==============================================================================
+    # ✨ 핵심 수정: 임시 폴더 생성 및 자동 삭제 로직 추가 ✨
+    # ==============================================================================
+    # 1. 통일된 경로로 임시 폴더 경로 설정
+    temp_folder_path = str(path_manager.get_temp_dir('joblib_temp'))
+
+    try:
+        # 2. 임시 폴더 생성 및 환경 변수 설정
+        os.makedirs(temp_folder_path, exist_ok=True)
+        os.environ['JOBLIB_TEMP_FOLDER'] = temp_folder_path
+        log_info(f"joblib 임시 폴더가 '{temp_folder_path}'로 설정되었습니다.")
+        log_memory_usage("프로그램 시작")
+
+        # 3. 메인 학습 로직 실행 (공통 create_training_data 함수 사용)
+        X, y, features, imputation_values = create_training_data(years=args.years)
+        if X is not None:
+            log_info("🎯 LightGBM 모델 학습을 시작합니다...")
+            train_evaluate_and_save_lgb_model(X, y, features, imputation_values, args.n_jobs, args.n_iter)
+            log_info("🎉 LightGBM 모델 학습이 성공적으로 완료되었습니다!")
+        else:
+            log_error("❌ 학습 데이터 생성에 실패하여 모델 학습을 중단합니다.")
+
+    finally:
+        # 4. 학습 성공/실패 여부와 관계없이 항상 임시 폴더 삭제
+        log_info(f"\n🧹 학습 완료 후 임시 폴더 삭제 중: {temp_folder_path}")
+        try:
+            path_manager.cleanup_temp_dir('joblib_temp')
+            log_info("✅ 임시 폴더가 성공적으로 삭제되었습니다.")
+        except Exception as e:
+            log_warning(f"⚠️ 임시 폴더를 삭제하는 중 오류가 발생했습니다: {e}")
+        
+        # 최종 메모리 사용량 로그
+        log_memory_usage("프로그램 종료")
+        log_info("🏁 모든 작업이 완료되었습니다.")
+    # ==============================================================================
+
+if __name__ == '__main__':
+    main()
+
