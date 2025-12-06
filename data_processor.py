@@ -162,26 +162,105 @@ def fetch_stock_list():
     Returns:
         pandas.DataFrame: 종목코드, 종목명, 시장구분이 포함된 데이터프레임
     """
-    try:
-        # KRX에서 주식 목록 가져오기
-        stock_list = fdr.StockListing('KRX')
-        if not stock_list.empty:
-            # 필요한 컬럼만 선택
-            stock_list = stock_list[['Code', 'Name', 'Market']].copy()
-            stock_list.columns = ['종목코드', '종목명', '시장구분']
+    max_retries = 3
+    retry_delay = 2  # 초
+    
+    for attempt in range(max_retries):
+        try:
+            # KRX-MARCAP에서 주식 목록 가져오기 (더 안정적)
+            # 1차 시도: KRX-MARCAP
+            try:
+                if attempt > 0:
+                    log_info(f"주식 목록 수집 재시도 중... ({attempt + 1}/{max_retries})")
+                    time.sleep(retry_delay)
+                
+                log_info("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보 수집 (KRX-MARCAP)...")
+                df_marcap = fdr.StockListing('KRX-MARCAP')
+                
+                if df_marcap is not None and not df_marcap.empty:
+                    # 스팩, 리츠 제외
+                    df_marcap = df_marcap[~df_marcap['Name'].str.contains('스팩|리츠', na=False)].copy()
+                    
+                    # KONEX 제외 (KOSPI, KOSDAQ만 포함)
+                    if 'Market' in df_marcap.columns:
+                        df_marcap = df_marcap[df_marcap['Market'].isin(['KOSPI', 'KOSDAQ'])].copy()
+                        log_info(f"KONEX 제외 후 종목 수: {len(df_marcap)}개")
+                    
+                    # 상장주식수가 있는 경우만 필터링
+                    if 'Stocks' in df_marcap.columns:
+                        df_marcap = df_marcap[df_marcap['Stocks'] > 0]
+                    
+                    # 시가총액 100억 미만 제외 (100억 = 10,000,000,000원)
+                    if 'Marcap' in df_marcap.columns:
+                        min_marcap = 10_000_000_000  # 100억원
+                        before_count = len(df_marcap)
+                        df_marcap = df_marcap[df_marcap['Marcap'] >= min_marcap].copy()
+                        excluded_count = before_count - len(df_marcap)
+                        if excluded_count > 0:
+                            log_info(f"시가총액 100억 미만 종목 {excluded_count}개 제외")
+                    
+                    # 컬럼명 정리 및 종목코드 6자리 패딩
+                    stock_list = df_marcap[['Code', 'Name']].copy()
+                    stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명'}, inplace=True)
+                    stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.zfill(6)
+                    
+                    # 시장구분 추가 (Market 컬럼이 있으면 사용, 없으면 추정)
+                    if 'Market' in df_marcap.columns:
+                        stock_list['시장구분'] = df_marcap['Market']
+                    else:
+                        # 종목코드로 시장구분 추정 (KOSPI: 000000-099999, KOSDAQ: 그 외)
+                        stock_list['시장구분'] = stock_list['종목코드'].apply(
+                            lambda x: 'KOSPI' if x.startswith('0') and len(x) >= 2 and int(x[:2]) < 10 else 'KOSDAQ'
+                        )
+                    
+                    log_info(f"주식 목록 수집 완료: {len(stock_list)}개 종목")
+                    return stock_list
+                else:
+                    log_warning("KRX-MARCAP에서 빈 데이터를 받았습니다. KRX로 재시도합니다.")
+            except Exception as e1:
+                log_warning(f"KRX-MARCAP 수집 실패, KRX로 재시도: {e1}")
             
-            # KOSPI, KOSDAQ만 필터링
-            stock_list = stock_list[stock_list['시장구분'].isin(['KOSPI', 'KOSDAQ'])]
+            # 2차 시도: KRX (기존 방식)
+            try:
+                stock_list = fdr.StockListing('KRX')
+                if stock_list is not None and not stock_list.empty:
+                    # 필요한 컬럼만 선택
+                    stock_list = stock_list[['Code', 'Name', 'Market']].copy()
+                    stock_list.columns = ['종목코드', '종목명', '시장구분']
+                    
+                    # KOSPI, KOSDAQ만 필터링
+                    stock_list = stock_list[stock_list['시장구분'].isin(['KOSPI', 'KOSDAQ'])]
+                    
+                    # 종목코드 6자리 패딩
+                    stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.zfill(6)
+                    
+                    log_info(f"주식 목록 수집 완료: {len(stock_list)}개 종목")
+                    return stock_list
+                else:
+                    log_warning("KRX에서 빈 데이터를 받았습니다.")
+            except Exception as e2:
+                log_warning(f"KRX 수집도 실패: {e2}")
             
-            log_info(f"주식 목록 수집 완료: {len(stock_list)}개 종목")
-            return stock_list
-        else:
-            log_error("주식 목록을 가져올 수 없습니다")
-            return pd.DataFrame()
-            
-    except Exception as e:
-        log_error(f"주식 목록 수집 실패: {e}")
-        return pd.DataFrame()
+            # 마지막 시도가 아니면 재시도
+            if attempt < max_retries - 1:
+                continue
+            else:
+                # 모든 시도 실패
+                log_error("주식 목록을 가져올 수 없습니다 (모든 재시도 실패)")
+                return pd.DataFrame()
+                
+        except Exception as e:
+            if attempt < max_retries - 1:
+                log_warning(f"주식 목록 수집 중 오류 발생 (재시도 예정): {e}")
+                time.sleep(retry_delay)
+                continue
+            else:
+                log_error(f"주식 목록 수집 실패 (모든 재시도 실패): {e}")
+                return pd.DataFrame()
+    
+    # 여기 도달하면 안 되지만 안전장치
+    log_error("주식 목록을 가져올 수 없습니다")
+    return pd.DataFrame()
 
 def _fetch_financial_data(start_date, end_date):
     """월초 재무데이터 수집 및 일별 분배 (삼성전자 거래일 기준)"""
@@ -448,7 +527,7 @@ def _fetch_macro_data(start_date, end_date):
                 
                 # 이격도 계산 (종목 데이터와 동일한 방식)
                 # 이격도 = (현재가 / 이동평균) * 100
-                for period in [60]:
+                for period in [20]:
                     ma = kospi_close.rolling(window=period).mean()
                     macro_df[f'KOSPI_disparity_{period}'] = (kospi_close / ma) * 100
                 
@@ -460,6 +539,14 @@ def _fetch_macro_data(start_date, end_date):
                 except Exception as e:
                     log_warning(f"KOSPI 변동성(1M) 계산 실패: {e}")
                     macro_df['KOSPI_변동성(1M)'] = np.nan
+                
+                # KOSPI_MA20_Slope 계산 (KOSPI 20일 이동평균선 기울기)
+                try:
+                    kospi_ma20 = kospi_close.rolling(window=20).mean()
+                    macro_df['KOSPI_MA20_Slope'] = calculate_normalized_linear_regression_slope(kospi_ma20, window=5)
+                except Exception as e:
+                    log_warning(f"KOSPI_MA20_Slope 계산 실패: {e}")
+                    macro_df['KOSPI_MA20_Slope'] = np.nan
             
             macro_df.reset_index(inplace=True)
             macro_df.rename(columns={'index': 'date'}, inplace=True)
@@ -538,7 +625,7 @@ def fetch_ticker_price_data(stock_info, start_date, end_date):
 
 
 
-def calculate_ticker_features(ticker, df_price):
+def calculate_ticker_features(ticker, df_price, stock_name=None):
     """
     단일 종목 피처 계산 함수 (CPU 작업)
     
@@ -612,53 +699,43 @@ def calculate_ticker_features(ticker, df_price):
             df['EPS'] = np.nan
             df['BPS'] = np.nan
         
-        # 기존 방식과 동일한 최소한의 기술적 지표만 사용 (강화된 오류 처리)
+        # ATR 계산 (5일, 20일, 60일)
+        try:
+            atr_5 = df.ta.atr(high='고가', low='저가', close='종가', length=5)
+            atr_20 = df.ta.atr(high='고가', low='저가', close='종가', length=20)
+            atr_60 = df.ta.atr(high='고가', low='저가', close='종가', length=60)
+            
+            # ATRr_20 계산 (기준 - 1M): "이 종목의 기초 체급은?"
+            if atr_20 is not None:
+                df['ATRr_20'] = (atr_20 / df['종가']) * 100
+            else:
+                df['ATRr_20'] = np.nan
+            
+            # ATR_Ratio_Short (1W / 1M): "최근 1주일이 한 달 평균보다 얼마나 조용한가?"
+            # 값이 1.0 미만이면 '응축(눌림목)', 1.0 초과면 '발산(돌파)'
+            if atr_20 is not None and atr_5 is not None:
+                df['ATR_Ratio_Short'] = atr_5 / (atr_20 + 1e-9)
+            else:
+                df['ATR_Ratio_Short'] = 1.0
+            
+            # ATR_Ratio_Trend (1M / 3M): "최근 한 달이 지난 석 달 평균보다 활발해졌는가?"
+            # 값이 1.0 초과면 변동성이 점차 커지는 국면 (에너지 증가)
+            if atr_60 is not None and atr_20 is not None:
+                df['ATR_Ratio_Trend'] = atr_20 / (atr_60 + 1e-9)
+            else:
+                df['ATR_Ratio_Trend'] = 1.0
+        except Exception as e:
+            log_warning(f"ATR 계산 실패 ({ticker}): {e}")
+            df['ATRr_20'] = np.nan
+            df['ATR_Ratio_Short'] = 1.0
+            df['ATR_Ratio_Trend'] = 1.0
+        
+        # ATRr_14는 기존 호환성을 위해 유지 (다른 곳에서 사용할 수 있음)
         try:
             df.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
         except Exception as e:
-            log_warning(f"ATR 계산 실패 ({ticker}): {e}")
+            log_warning(f"ATRr_14 계산 실패 ({ticker}): {e}")
             df['ATRr_14'] = np.nan
-        
-        # ATR 추가 계산 (5, 20, 60일)
-        # pandas-ta는 ATRr_5, ATRr_20, ATRr_60 형식으로 컬럼을 생성합니다
-        try:
-            df.ta.atr(high='고가', low='저가', close='종가', length=5, append=True)
-            df.ta.atr(high='고가', low='저가', close='종가', length=20, append=True)
-            df.ta.atr(high='고가', low='저가', close='종가', length=60, append=True)
-        except Exception as e:
-            log_warning(f"ATR 추가 계산 실패 ({ticker}): {e}")
-            # pandas-ta가 생성하는 실제 컬럼명 사용
-            if 'ATRr_5' not in df.columns:
-                df['ATRr_5'] = np.nan
-            if 'ATRr_20' not in df.columns:
-                df['ATRr_20'] = np.nan
-            if 'ATRr_60' not in df.columns:
-                df['ATRr_60'] = np.nan
-        
-        # ATRr_20 확인 및 처리 (pandas-ta가 이미 비율 형태로 생성)
-        # ATRr_20은 이미 (ATR / 종가) * 100 형태이므로 그대로 사용
-        if 'ATRr_20' not in df.columns:
-            df['ATRr_20'] = np.nan
-        
-        # ATR_Ratio_Short 계산 (단기 응축: ATRr_5 / ATRr_20)
-        try:
-            if 'ATRr_5' in df.columns and 'ATRr_20' in df.columns:
-                df['ATR_Ratio_Short'] = df['ATRr_5'] / df['ATRr_20']
-            else:
-                df['ATR_Ratio_Short'] = np.nan
-        except Exception as e:
-            log_warning(f"ATR_Ratio_Short 계산 실패 ({ticker}): {e}")
-            df['ATR_Ratio_Short'] = np.nan
-        
-        # ATR_Ratio_Trend 계산 (에너지 추세: ATRr_20 / ATRr_60)
-        try:
-            if 'ATRr_20' in df.columns and 'ATRr_60' in df.columns:
-                df['ATR_Ratio_Trend'] = df['ATRr_20'] / df['ATRr_60']
-            else:
-                df['ATR_Ratio_Trend'] = np.nan
-        except Exception as e:
-            log_warning(f"ATR_Ratio_Trend 계산 실패 ({ticker}): {e}")
-            df['ATR_Ratio_Trend'] = np.nan
         
         try:
             df.ta.obv(close='종가', volume='거래량', append=True)
@@ -666,14 +743,7 @@ def calculate_ticker_features(ticker, df_price):
             log_warning(f"OBV 계산 실패 ({ticker}): {e}")
             df['OBV'] = np.nan
         
-        # OBV_Slope 계산 (매집 강도)
-        try:
-            obv_5d_ago = df['OBV'].shift(5)
-            obv_abs_5d_ago = obv_5d_ago.abs()
-            df['OBV_Slope'] = np.where(obv_abs_5d_ago != 0, (df['OBV'] - obv_5d_ago) / obv_abs_5d_ago, 0)
-        except Exception as e:
-            log_warning(f"OBV_Slope 계산 실패 ({ticker}): {e}")
-            df['OBV_Slope'] = np.nan
+        # OBV는 계산하지만 OBV_Slope 피처는 제거됨
         
         try:
             df.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
@@ -683,25 +753,20 @@ def calculate_ticker_features(ticker, df_price):
         
         # RSI_14 계산
         try:
-            df.ta.rsi(close='종가', length=14, append=True)
+            rsi_14 = df.ta.rsi(close='종가', length=14)
+            
+            # RSI_Signal_Oscillator 계산: RSI_14 - RSI_14.rolling(9).mean()
+            # MACD 원리를 RSI에 적용한 것으로, 양수면 RSI가 평균을 뚫고 올라가는 중(골든크로스)
+            if rsi_14 is not None and len(rsi_14) >= 9:
+                rsi_14_ma9 = rsi_14.rolling(window=9).mean()
+                df['RSI_Signal_Oscillator'] = rsi_14 - rsi_14_ma9
+            else:
+                df['RSI_Signal_Oscillator'] = np.nan
         except Exception as e:
             log_warning(f"RSI 계산 실패 ({ticker}): {e}")
             df['RSI_14'] = np.nan
+            df['RSI_Signal_Oscillator'] = np.nan
         
-        # 볼린저 밴드 계산 (BB_Position 제거됨 - 다른 용도로 사용 가능)
-        try:
-            bbands = df.ta.bbands(close='종가', length=20, std=2)
-            # BB_Position 피처는 제거됨
-        except Exception as e:
-            log_warning(f"볼린저 밴드 계산 실패 ({ticker}): {e}")
-        
-        # 볼린저 밴드 데이터 메모리 해제 (안전하게)
-        try:
-            if 'bbands' in locals():
-                del bbands
-        except:
-            pass
-        gc.collect()
         # 기존 방식과 동일한 기본 지표들만 사용 (과도한 기술적 지표 제거)
         
         # 수익률 계산
@@ -711,12 +776,31 @@ def calculate_ticker_features(ticker, df_price):
         # 거래대금 계산
         df['거래대금'] = df['종가'] * df['거래량']
         
-        # RVOL 계산 (상대 거래량)
+        # RVOL (상대 거래량) 계산
         try:
-            df['RVOL'] = df['거래량'] / df['거래량'].rolling(20).mean()
+            거래량_20일_평균 = df['거래량'].rolling(window=20).mean()
+            df['RVOL'] = df['거래량'] / 거래량_20일_평균
+            # 무한대 값 처리
+            df['RVOL'] = df['RVOL'].replace([np.inf, -np.inf], np.nan)
         except Exception as e:
             log_warning(f"RVOL 계산 실패 ({ticker}): {e}")
             df['RVOL'] = np.nan
+        
+        # 시총 회전율 계산
+        try:
+            # 시총 회전율(1W): 5일 평균 거래대금 / 시가총액 * 100
+            거래대금_5일_평균 = df['거래대금'].rolling(window=5).mean()
+            df['시총 회전율(1W)'] = (거래대금_5일_평균 / df['시가총액']) * 100
+            df['시총 회전율(1W)'] = df['시총 회전율(1W)'].replace([np.inf, -np.inf], np.nan)
+            
+            # 시총 회전율(3M): 60일 평균 거래대금 / 시가총액 * 100
+            거래대금_60일_평균 = df['거래대금'].rolling(window=60).mean()
+            df['시총 회전율(3M)'] = (거래대금_60일_평균 / df['시가총액']) * 100
+            df['시총 회전율(3M)'] = df['시총 회전율(3M)'].replace([np.inf, -np.inf], np.nan)
+        except Exception as e:
+            log_warning(f"시총 회전율 계산 실패 ({ticker}): {e}")
+            df['시총 회전율(1W)'] = np.nan
+            df['시총 회전율(3M)'] = np.nan
         
         # Z_Score_20 계산 (표준화 이격)
         try:
@@ -738,12 +822,24 @@ def calculate_ticker_features(ticker, df_price):
             log_warning(f"Position_Range_60 계산 실패 ({ticker}): {e}")
             df['Position_Range_60'] = np.nan
         
-        # Eff_Ratio_10 계산 (효율 비율)
+        # 변동성 계산 (표준편차/평균 방식)
         try:
-            price_change = df['종가'].diff(10).abs()
-            daily_changes = df['종가'].diff().abs()
-            price_range = daily_changes.rolling(10).sum()
-            df['Eff_Ratio_10'] = np.where(price_range != 0, price_change / price_range, 0)
+            # 변동성(1W) 계산 (5일 기준)
+            df['변동성(1W)'] = df['종가'].rolling(window=5).std() / df['종가'].rolling(window=5).mean()
+            # 변동성(3M) 계산 (60일 기준) - 변동성(1M) 제거
+            df['변동성(3M)'] = df['종가'].rolling(window=60).std() / df['종가'].rolling(window=60).mean()
+        except Exception as e:
+            log_warning(f"변동성 계산 실패 ({ticker}): {e}")
+            df['변동성(1W)'] = np.nan
+            df['변동성(3M)'] = np.nan
+        
+        # Eff_Ratio_10 계산 (효율성 비율)
+        try:
+            change = df['종가'].diff(10).abs()
+            volatility = df['종가'].diff(1).abs().rolling(10).sum()
+            df['Eff_Ratio_10'] = change / (volatility + 1e-9)
+            # 무한대 값 처리
+            df['Eff_Ratio_10'] = df['Eff_Ratio_10'].replace([np.inf, -np.inf], np.nan)
         except Exception as e:
             log_warning(f"Eff_Ratio_10 계산 실패 ({ticker}): {e}")
             df['Eff_Ratio_10'] = np.nan
@@ -762,20 +858,41 @@ def calculate_ticker_features(ticker, df_price):
         
         # 핵심 피처 추가
         # 1. log_mktcap (시가총액 로그 변환)
-        df['log_mktcap'] = np.log(df['시가총액'])
+        # 시가총액이 0보다 큰 경우에만 로그 적용 (경고 방지)
+        df['log_mktcap'] = np.nan  # float 타입으로 초기화
+        mask = df['시가총액'] > 0
+        df.loc[mask, 'log_mktcap'] = np.log(df.loc[mask, '시가총액'])
         
-        # 2. 이격도 계산 (60일, 120일, 240일)
-        for p in [60, 120, 240]:
+        
+        # 2. PBR_log (PBR 로그 변환)
+        # PBR이 0보다 큰 경우에만 로그 적용 (경고 방지)
+        df['PBR_log'] = np.nan  # float 타입으로 초기화
+        if 'PBR' in df.columns:
+            pbr_mask = df['PBR'] > 0
+            df.loc[pbr_mask, 'PBR_log'] = np.log(df.loc[pbr_mask, 'PBR'])
+        else:
+            df['PBR_log'] = np.nan
+        
+        # 3. 이격도 계산 (120일, 240일) - disparity_20 제거
+        for p in [120, 240]:
             ma = df['종가'].rolling(window=p).mean()
             df[f'disparity_{p}'] = (df['종가'] / ma) * 100
         
-        # MA60_Slope 계산 (60일 이동평균선 기울기)
+        # MA120_Slope 계산 (120일 이동평균선 기울기)
         try:
-            ma60 = df['종가'].rolling(window=60).mean()
-            df['MA60_Slope'] = calculate_normalized_linear_regression_slope(ma60, window=5)
+            ma120 = df['종가'].rolling(window=120).mean()
+            df['MA120_Slope'] = calculate_normalized_linear_regression_slope(ma120, window=5)
         except Exception as e:
-            log_warning(f"MA60_Slope 계산 실패 ({ticker}): {e}")
-            df['MA60_Slope'] = np.nan
+            log_warning(f"MA120_Slope 계산 실패 ({ticker}): {e}")
+            df['MA120_Slope'] = np.nan
+        
+        # MA240_Slope 계산 (240일 이동평균선 기울기)
+        try:
+            ma240 = df['종가'].rolling(window=240).mean()
+            df['MA240_Slope'] = calculate_normalized_linear_regression_slope(ma240, window=5)
+        except Exception as e:
+            log_warning(f"MA240_Slope 계산 실패 ({ticker}): {e}")
+            df['MA240_Slope'] = np.nan
         
         # 3. 52주 신고가 비율
         df['52주_최고가'] = df['종가'].rolling(250).max()
@@ -790,6 +907,9 @@ def calculate_ticker_features(ticker, df_price):
         # 중간 변수 삭제 (메모리 최적화)
         del min_price_10d, max_price_10d
         df['종목코드'] = ticker
+        # 종목명 추가 (있는 경우만)
+        if stock_name is not None:
+            df['종목명'] = stock_name
         
         # 데이터 구조 설정
         # merge_asof 후 date 컬럼이 제거되므로 다시 추가
@@ -1018,7 +1138,9 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
         # 전역 변수를 사용하므로 큰 데이터를 인자로 전달하지 않아도 됨
         with concurrent.futures.ProcessPoolExecutor(max_workers=cpu_workers) as executor:
             # 전역 변수를 사용하므로 df_marcap_long, df_financial_long 인자 제거
-            future_to_ticker = {executor.submit(calculate_ticker_features, ticker, df_price): ticker 
+            # 종목명 정보도 함께 전달
+            stock_name_map = {row['종목코드']: row.get('종목명', None) for row in stock_records}
+            future_to_ticker = {executor.submit(calculate_ticker_features, ticker, df_price, stock_name_map.get(ticker)): ticker 
                                for ticker, df_price in downloaded_data.items()}
         completed_count = 0
         total_calc_count = len(downloaded_data)
@@ -1100,6 +1222,8 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     macro_df = _fetch_macro_data(start_date, end_date)
     if not macro_df.empty:
         raw_feature_df = pd.merge(raw_feature_df, macro_df, on='date', how='left')
+    
+    # Relative_Strength_20 피처는 제거됨
     
     raw_feature_df.sort_values(by=['date', '종목코드'], inplace=True)
 

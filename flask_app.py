@@ -1254,20 +1254,28 @@ def get_stock_features(ticker_code):
             'log_mktcap',
             '52주_신고가_비율',
             'ADX_14',
-            'disparity_60', 'disparity_120', 'disparity_240',
-            'KOSPI_disparity_60',
+            'disparity_120',  # 120일 이격도
+            'disparity_240',  # 240일 이격도
+            'KOSPI_disparity_20',  # KOSPI 20일 이격도
             # 추가된 피처
-            'ATRr_20',
-            'ATR_Ratio_Short',
-            'ATR_Ratio_Trend',
-            'Eff_Ratio_10',
-            'RVOL',
             'Z_Score_20',
             'Position_Range_60',
-            'RSI_14',
-            'OBV_Slope',
             'KOSPI_변동성(1M)',
-            'MA60_Slope'
+            '변동성(1W)',  # 변동성 1주 (표준편차/평균)
+            '변동성(3M)',  # 변동성 3개월 (표준편차/평균)
+            'MA120_Slope',  # 120일 이동평균선 기울기
+            'MA240_Slope',  # 240일 이동평균선 기울기
+            'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
+            'PBR_log',  # PBR 로그 변환
+            # 새로 추가된 피처
+            'RVOL',  # 상대 거래량 (Relative Volume)
+            '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
+            '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
+            'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
+            'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
+            'ATR_Ratio_Short',  # ATR 비율 단기 (1W / 1M)
+            'ATR_Ratio_Trend',  # ATR 비율 추세 (1M / 3M)
+            'Eff_Ratio_10'  # 효율성 비율 10일
         ]
         
         # 등락율 계산 등 다른 부분에 영향있는 필수 피처 (표시용)
@@ -1369,20 +1377,28 @@ def calculate_feature_correlation():
             'log_mktcap',
             '52주_신고가_비율',
             'ADX_14',
-            'disparity_60', 'disparity_120', 'disparity_240',
-            'KOSPI_disparity_60',
+            'disparity_120',  # 120일 이격도
+            'disparity_240',  # 240일 이격도
+            'KOSPI_disparity_20',  # KOSPI 20일 이격도
             # 추가된 피처
-            'ATRr_20',
-            'ATR_Ratio_Short',
-            'ATR_Ratio_Trend',
-            'Eff_Ratio_10',
-            'RVOL',
             'Z_Score_20',
             'Position_Range_60',
-            'RSI_14',
-            'OBV_Slope',
             'KOSPI_변동성(1M)',
-            'MA60_Slope'
+            '변동성(1W)',  # 변동성 1주 (표준편차/평균)
+            '변동성(3M)',  # 변동성 3개월 (표준편차/평균)
+            'MA120_Slope',  # 120일 이동평균선 기울기
+            'MA240_Slope',  # 240일 이동평균선 기울기
+            'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
+            'PBR_log',  # PBR 로그 변환
+            # 새로 추가된 피처
+            'RVOL',  # 상대 거래량 (Relative Volume)
+            '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
+            '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
+            'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
+            'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
+            'ATR_Ratio_Short',  # ATR 비율 단기 (1W / 1M)
+            'ATR_Ratio_Trend',  # ATR 비율 추세 (1M / 3M)
+            'Eff_Ratio_10'  # 효율성 비율 10일
         ]
         
         data_source = None

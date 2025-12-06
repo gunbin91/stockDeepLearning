@@ -17,6 +17,7 @@ import subprocess
 from datetime import datetime, timedelta
 import gc
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # cudf의 feather reader 관련 UserWarning은 예상된 동작이므로 숨김 처리
 warnings.filterwarnings("ignore", message="Using CPU via PyArrow to read feather dataset", category=UserWarning)
@@ -418,12 +419,26 @@ def prepare_data_and_save(data_path, start_date, end_date):
     """
 
     데이터를 전처리하고, 종목별로 분리하여 Feather 파일로 저장합니다.
+    
+    웜업 기간을 고려하여 실제 수집 시작일보다 1년 전부터 데이터를 수집합니다.
+    결측치는 저장하지 않고, 나중에 Fold별로 처리합니다.
 
     """
 
     log_info("🚀 실시간 데이터 수집 및 전처리를 시작합니다...")
 
     log_memory_usage("데이터 전처리 시작")
+
+    # 웜업 기간 설정: 가장 긴 window (250일) + 여유 (115일) = 총 365일
+    WARMUP_DAYS = 365
+    
+    # 실제 수집 시작일: 사용자 입력 시작일보다 1년 전부터 수집
+    start_date_obj = pd.to_datetime(start_date)
+    actual_start_date = (start_date_obj - timedelta(days=WARMUP_DAYS)).strftime('%Y-%m-%d')
+    
+    log_info(f"   📅 웜업 기간: {WARMUP_DAYS}일")
+    log_info(f"   📅 사용자 입력 시작일: {start_date}")
+    log_info(f"   📅 실제 데이터 수집 시작일: {actual_start_date} (웜업 기간 포함)")
 
     # 기존 CPU 버전과 동일하게, 검증된 핵심 피처 목록을 하드코딩
     # 제거된 피처: PBR, USDKRW_pct_1d, KOSPI_pct_1d, 이익수익률, 수익률(3M), 수익률(1M), ATRr_14
@@ -433,34 +448,45 @@ def prepare_data_and_save(data_path, start_date, end_date):
     # 제거된 피처: BBW_20_2, 거래량 변동성 계수, 변동성 기울기, 거래량 변동성 계수 기울기
     # 제거된 피처: 등락율, 주가_기울기(1W/1M/3M), disparity_5/10, 변동성(5M), KOSPI_변동성(3D/5M), KOSPI_disparity_5
     # 제거된 피처: 변동성(3D/3M/1M/1W), KOSPI_변동성(3M/1W), KOSPI_disparity_120/20, BPS, 거래대금_MA20/MA5, BB_Position
+    # 제거된 피처: disparity_120, disparity_240
+    # 변경된 피처: RSI_14 -> RSI_Signal_Oscillator
+    # 추가된 피처: Relative_Strength_20 (KOSPI 수익률 상대강도), 시총_회전율(1W) (5일 거래대금 기준)
     features = [
         'log_mktcap',
         '52주_신고가_비율',
         'ADX_14',
-        'disparity_60', 'disparity_120', 'disparity_240',
-        'KOSPI_disparity_60',
+        'disparity_120',  # 120일 이격도
+        'disparity_240',  # 240일 이격도
+        'KOSPI_disparity_20',  # KOSPI 20일 이격도
         # 추가된 피처
-        'ATRr_20',
-        'ATR_Ratio_Short',
-        'ATR_Ratio_Trend',
-        'Eff_Ratio_10',
-        'RVOL',
         'Z_Score_20',
         'Position_Range_60',
-        'RSI_14',
-        'OBV_Slope',
         'KOSPI_변동성(1M)',
-        'MA60_Slope'
+        '변동성(1W)',  # 변동성 1주 (표준편차/평균)
+        '변동성(3M)',  # 변동성 3개월 (표준편차/평균)
+        'MA120_Slope',  # 120일 이동평균선 기울기
+        'MA240_Slope',  # 240일 이동평균선 기울기
+        'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
+        'PBR_log',  # PBR 로그 변환
+        # 새로 추가된 피처
+        'RVOL',  # 상대 거래량 (Relative Volume)
+        '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
+        '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
+        'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
+        'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
+        'ATR_Ratio_Short',  # ATR 비율 단기 (1W / 1M)
+        'ATR_Ratio_Trend',  # ATR 비율 추세 (1M / 3M)
+        'Eff_Ratio_10'  # 효율성 비율 10일
     ]
 
     try:
 
         # data_processor를 통해 모든 피처가 계산된 거대 데이터프레임 생성
-
+        # 웜업 기간 포함하여 수집 (나중에 로드 시 필터링)
         # 이 단계에서 메모리 사용량이 일시적으로 크게 증가함
 
         # 학습용 데이터 생성 시 팩터 점수 계산 건너뛰기 (백테스팅에서만 필요)
-        full_df = data_processor.get_preprocessed_data(start_date, end_date, skip_factor_scores=True)
+        full_df = data_processor.get_preprocessed_data(actual_start_date, end_date, skip_factor_scores=True)
 
         log_memory_usage("전체 데이터 로딩 완료")
 
@@ -478,32 +504,13 @@ def prepare_data_and_save(data_path, start_date, end_date):
             log_error("target 필터링 후 데이터가 없습니다.")
             return False
 
-        # imputation_values 계산 (전체 데이터 기준)
-        log_info("   📊 결측치 대체값(중앙값) 계산 중...")
+        # 결측치 처리는 나중에 Fold별로 수행하므로 여기서는 제거하지 않음
+        # 날짜 컬럼이 있는지 확인 (나중에 날짜 필터링에 필요)
+        if 'date' not in full_df.columns:
+            log_error("❌ 심각한 오류: 'date' 컬럼이 데이터에 없습니다.")
+            raise ValueError("'date' 컬럼이 데이터에 없습니다.")
         
-        # features 리스트에 있는 피처가 데이터에 있는지 검증
-        missing_features_for_imputation = [f for f in features if f not in full_df.columns]
-        if missing_features_for_imputation:
-            error_msg = f"❌ 심각한 오류: imputation_values 계산 시 필요한 피처가 데이터에 없습니다: {missing_features_for_imputation}"
-            log_critical(error_msg)
-            log_critical(f"   사용 가능한 컬럼: {list(full_df.columns)[:30]}")
-            log_critical(f"   기대하는 features ({len(features)}개): {features}")
-            log_critical(f"   누락된 피처 ({len(missing_features_for_imputation)}개): {missing_features_for_imputation}")
-            raise ValueError(error_msg)
-        
-        numeric_features_df = full_df[features].select_dtypes(include=np.number)
-        imputation_values = numeric_features_df.median().to_dict()
-        log_info(f"   ✅ 결측치 대체값 계산 완료 ({len(features)}개 피처)")
-
-        # imputation_values 파일 저장
-        imputation_values_dir = os.path.dirname(os.path.expanduser(data_path))
-        imputation_values_path = os.path.join(imputation_values_dir, "imputation_values.joblib")
-        log_info(f"   💾 imputation_values 파일 저장 중... ({imputation_values_path})")
-        try:
-            joblib.dump(imputation_values, imputation_values_path)
-            log_info("   ✅ imputation_values 파일 저장 완료.")
-        except Exception as e:
-            log_warning(f"   ⚠️ imputation_values 파일 저장 실패: {e}. 데이터 저장은 계속 진행됩니다.")
+        log_info("   ✅ 결측치는 Fold별로 처리하므로 여기서는 저장하지 않습니다.")
 
         os.makedirs(data_path, exist_ok=True)
 
@@ -549,15 +556,28 @@ def prepare_data_and_save(data_path, start_date, end_date):
                 
                 y = ticker_df['target'].astype(np.int32)
                 
-                # imputation_values는 features에 있는 피처만 적용
-                features_in_data = [f for f in features if f in X_all.columns]
-                if features_in_data:
-                    imputation_dict = {k: v for k, v in imputation_values.items() if k in features_in_data}
-                    X_all[features_in_data] = X_all[features_in_data].fillna(imputation_dict)
-
-                # 모든 피처와 target을 하나의 DataFrame으로 합치기
+                # 결측치는 나중에 Fold별로 처리하므로 여기서는 채우지 않음
+                # date 컬럼도 함께 저장 (나중에 날짜 필터링에 필요)
+                if 'date' not in ticker_df.columns:
+                    log_warning(f"   ⚠️ 종목 {ticker}에 'date' 컬럼이 없습니다. 건너뜁니다.")
+                    failed_count += 1
+                    failed_tickers.append(ticker)
+                    del X_all, y
+                    continue
+                
+                # 모든 피처와 target, date, 종목코드, 시가총액을 하나의 DataFrame으로 합치기
                 preprocessed_df = X_all.copy()
                 preprocessed_df['target'] = y
+                preprocessed_df['date'] = pd.to_datetime(ticker_df['date'])
+                # 백테스팅에 필요한 메타데이터 추가
+                if '종목코드' in ticker_df.columns:
+                    preprocessed_df['종목코드'] = ticker_df['종목코드'].values
+                else:
+                    preprocessed_df['종목코드'] = ticker
+                if '시가총액' in ticker_df.columns:
+                    preprocessed_df['시가총액'] = ticker_df['시가총액'].values
+                if '종목명' in ticker_df.columns:
+                    preprocessed_df['종목명'] = ticker_df['종목명'].values
 
                 file_path = os.path.join(data_path, f"{ticker}.feather")
 
@@ -610,7 +630,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
 
         # 거대 데이터프레임 메모리에서 명시적으로 해제
 
-        del full_df, numeric_features_df
+        del full_df
 
         gc.collect()
 
@@ -632,170 +652,400 @@ def prepare_data_and_save(data_path, start_date, end_date):
 
 # --- 모델 훈련 및 평가 ---
 
-
-
-def load_fold_data(file_paths, features, imputation_values):
-
-
-
+def get_date_range_from_files(file_paths):
     """
-
-
-
-    주어진 파일 경로 리스트에서 전처리된 데이터를 로드하여 반환합니다.
-
-
-
-    (전처리 완료된 데이터를 로드하므로 concat만 수행, 속도 향상)
-
-
-
-    """
-
-
-
-    if not file_paths:
-
-
-
-        return None, None
-
-
-
+    모든 feather 파일에서 날짜 범위를 추출합니다.
     
+    Args:
+        file_paths: feather 파일 경로 리스트
+    
+    Returns:
+        (min_date, max_date) 튜플 (pd.Timestamp 객체)
+    """
+    min_date = None
+    max_date = None
+    
+    # 샘플 파일 몇 개만 로드하여 날짜 범위 확인 (성능 최적화)
+    sample_size = min(10, len(file_paths))
+    sample_files = file_paths[:sample_size]
+    
+    log_info(f"   📅 날짜 범위 확인 중... (샘플 {sample_size}개 파일 확인)")
+    
+    for file_path in sample_files:
+        try:
+            df = cudf.read_feather(file_path)
+            if 'date' not in df.columns:
+                log_warning(f"   ⚠️ 파일 {file_path}에 'date' 컬럼이 없습니다.")
+                del df
+                continue
+            
+            # cuDF Series를 pandas로 명시적 변환 후 날짜 처리
+            date_series_pandas = df['date'].to_pandas()
+            date_series_pandas = pd.to_datetime(date_series_pandas)
+            file_min = pd.Timestamp(date_series_pandas.min())
+            file_max = pd.Timestamp(date_series_pandas.max())
+            
+            if min_date is None or file_min < min_date:
+                min_date = file_min
+            if max_date is None or file_max > max_date:
+                max_date = file_max
+            
+            del df
+        except Exception as e:
+            log_warning(f"   ⚠️ 파일 {file_path} 날짜 범위 확인 실패: {e}")
+            continue
+    
+    if min_date is None or max_date is None:
+        raise ValueError("날짜 범위를 확인할 수 없습니다. feather 파일에 'date' 컬럼이 있는지 확인하세요.")
+    
+    log_info(f"   ✅ 날짜 범위 확인 완료: {min_date.strftime('%Y-%m-%d')} ~ {max_date.strftime('%Y-%m-%d')}")
+    
+    return min_date, max_date
 
-
-
-    try:
-
-
-
-        # 제너레이터 표현식을 사용하여 메모리 효율성 개선
-
-
-
-        df_generator = (cudf.read_feather(f) for f in file_paths)
-
-
-
-        df = cudf.concat(df_generator)
-
-
-
+def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days=365, n_folds=3):
+    """
+    Expanding Window 방식으로 Fold 범위를 계산합니다.
+    
+    Args:
+        file_paths: feather 파일 경로 리스트
+        warmup_days: 웜업 기간 (일)
+        val_period_days: 검증 기간 (일)
+        n_folds: Fold 개수
+    
+    Returns:
+        fold_ranges 리스트: 각 요소는 {'fold': int, 'train_start': Timestamp, 'train_end': Timestamp, 
+                                      'val_start': Timestamp, 'val_end': Timestamp} 딕셔너리
+    """
+    # 전체 날짜 범위 확인
+    min_date, max_date = get_date_range_from_files(file_paths)
+    
+    # 실제 학습 시작일: 웜업 기간 제외
+    actual_start_date = min_date + timedelta(days=warmup_days)
+    actual_end_date = max_date
+    
+    log_info(f"   📅 실제 학습 기간: {actual_start_date.strftime('%Y-%m-%d')} ~ {actual_end_date.strftime('%Y-%m-%d')}")
+    
+    # Expanding Window 방식으로 Fold 범위 계산
+    # 검증 기간을 고정하고, Train은 누적되는 방식
+    fold_ranges = []
+    
+    # 마지막 n_folds개 검증 기간을 역순으로 계산
+    # 예: Fold 0: 마지막 3번째 검증 기간, Fold 1: 마지막 2번째 검증 기간, Fold 2: 마지막 검증 기간
+    for fold_idx in range(n_folds):
+        # 검증 기간 계산 (역순)
+        val_end = actual_end_date - timedelta(days=val_period_days * (n_folds - 1 - fold_idx))
+        val_start = val_end - timedelta(days=val_period_days)
         
+        # Train 기간: actual_start_date ~ val_start (누적)
+        train_start = actual_start_date
+        train_end = val_start
+        
+        # 검증 기간이 실제 학습 기간을 벗어나지 않도록 조정
+        if val_start < actual_start_date:
+            log_warning(f"   ⚠️ Fold #{fold_idx+1} 검증 기간이 학습 시작일보다 이전입니다. 조정합니다.")
+            val_start = actual_start_date
+            val_end = val_start + timedelta(days=val_period_days)
+            train_end = val_start
+        
+        if train_end <= train_start:
+            log_warning(f"   ⚠️ Fold #{fold_idx+1} Train 기간이 유효하지 않습니다. 건너뜁니다.")
+            continue
+        
+        fold_ranges.append({
+            'fold': fold_idx,
+            'train_start': train_start,
+            'train_end': train_end,
+            'val_start': val_start,
+            'val_end': val_end
+        })
+        
+        log_info(f"   📊 Fold #{fold_idx+1}/{n_folds}:")
+        log_info(f"      Train: {train_start.strftime('%Y-%m-%d')} ~ {train_end.strftime('%Y-%m-%d')}")
+        log_info(f"      Val: {val_start.strftime('%Y-%m-%d')} ~ {val_end.strftime('%Y-%m-%d')}")
+    
+    return fold_ranges
 
-
-
-        # 전처리 완료된 데이터이므로 필터링 불필요
-
-
-
+def _process_single_file(file_path, features, start_date, end_date):
+    """
+    단일 파일을 처리하는 헬퍼 함수 (워커 스레드에서 실행)
+    
+    Args:
+        file_path: feather 파일 경로
+        features: 사용할 피처 리스트
+        start_date: 시작 날짜 (pd.Timestamp)
+        end_date: 종료 날짜 (pd.Timestamp)
+    
+    Returns:
+        pandas.DataFrame 또는 None (처리 실패 시)
+    """
+    try:
+        # CPU에서 pandas로 파일 읽기 (스레드 안전)
+        df = pd.read_feather(file_path)
+        
+        # 날짜 컬럼 확인
+        if 'date' not in df.columns:
+            return None
+        
+        # 날짜 변환 및 필터링 (CPU에서 처리)
+        df['date'] = pd.to_datetime(df['date'])
+        mask = (df['date'] >= start_date) & (df['date'] < end_date)
+        df = df.loc[mask]
+        
         if df.empty:
+            return None
+        
+        # target 컬럼 확인
+        if 'target' not in df.columns:
+            return None
+        
+        # Forward Fill (CPU에서 처리)
+        # features 컬럼만 ffill 적용
+        available_features = [f for f in features if f in df.columns]
+        if available_features:
+            df[available_features] = df[available_features].ffill()
+        
+        # 무한대(Inf) 값 처리 (스케일러 고장 방지)
+        # 숫자형 컬럼만 처리
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 0:
+            df[numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], np.nan)
+        
+        # 필요한 컬럼만 반환 (메모리 절약)
+        # 백테스팅에 필요한 메타데이터도 포함
+        required_cols = ['date', 'target'] + [f for f in features if f in df.columns]
+        # 백테스팅에 필요한 메타데이터 추가 (있는 경우만)
+        for meta_col in ['종목코드', '시가총액', '종목명']:
+            if meta_col in df.columns and meta_col not in required_cols:
+                required_cols.append(meta_col)
+        df = df[required_cols].copy()
+        
+        return df
+        
+    except Exception as e:
+        log_warning(f"   ⚠️ 파일 {file_path} 처리 실패: {e}")
+        return None
 
+def _process_batch(batch_files, features, start_date, end_date, max_workers=4):
+    """
+    배치 단위로 파일들을 병렬 처리하는 함수
+    
+    Args:
+        batch_files: 파일 경로 리스트 (배치)
+        features: 사용할 피처 리스트
+        start_date: 시작 날짜
+        end_date: 종료 날짜
+        max_workers: 병렬 워커 수
+    
+    Returns:
+        pandas DataFrame 리스트 (처리된 데이터)
+    """
+    batch_dfs = []
+    
+    # ThreadPoolExecutor로 병렬 처리
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 각 파일에 대해 작업 제출
+        future_to_file = {
+            executor.submit(_process_single_file, file_path, features, start_date, end_date): file_path
+            for file_path in batch_files
+        }
+        
+        # 완료된 작업 처리
+        for future in as_completed(future_to_file):
+            file_path = future_to_file[future]
+            try:
+                df = future.result()
+                if df is not None and not df.empty:
+                    batch_dfs.append(df)
+            except Exception as e:
+                log_warning(f"   ⚠️ 파일 {file_path} 처리 중 오류: {e}")
+                continue
+    
+    return batch_dfs
 
-
-            return None, None
-
-
-
-
-
-
-
-        # features와 target만 추출 (이미 전처리 완료된 데이터, 타입 변환 불필요)
-        # 피처 누락 검증
-        missing_features = [f for f in features if f not in df.columns]
+def load_data_period(file_paths, features, start_date, end_date, imputation_map=None, batch_size=50, max_workers=4):
+    """
+    날짜 기반 데이터 로드 및 결측치 처리 (하이브리드 병렬 처리)
+    
+    배치 처리 + ThreadPoolExecutor를 사용하여 파일 I/O 병렬화
+    
+    Args:
+        file_paths: feather 파일 경로 리스트
+        features: 사용할 피처 리스트
+        start_date: 시작 날짜 (pd.Timestamp 또는 datetime 객체)
+        end_date: 종료 날짜 (pd.Timestamp 또는 datetime 객체, exclusive)
+        imputation_map: Train에서 계산한 중앙값 딕셔너리 (None이면 Train 모드)
+        batch_size: 배치 크기 (기본값: 50)
+        max_workers: 병렬 워커 수 (기본값: 4)
+    
+    Returns:
+        (X, y, imputation_map) 튜플
+        - Train 모드: (X_train, y_train, calculated_map)
+        - Val 모드: (X_val, y_val, None)
+    """
+    if not file_paths:
+        return None, None, None
+    
+    # 날짜 타입 변환
+    if isinstance(start_date, str):
+        start_date = pd.to_datetime(start_date)
+    if isinstance(end_date, str):
+        end_date = pd.to_datetime(end_date)
+    
+    # 배치로 나누기
+    total_files = len(file_paths)
+    num_batches = (total_files + batch_size - 1) // batch_size
+    
+    log_info(f"   📦 데이터 로딩 시작: 총 {total_files}개 파일, {num_batches}개 배치 (배치 크기: {batch_size}, 워커: {max_workers})")
+    
+    all_dfs = []
+    processed_count = 0
+    failed_count = 0
+    
+    try:
+        # 각 배치 처리
+        for batch_idx in range(num_batches):
+            batch_start = batch_idx * batch_size
+            batch_end = min((batch_idx + 1) * batch_size, total_files)
+            batch_files = file_paths[batch_start:batch_end]
+            
+            # GPU 메모리 확인 (배치 처리 전)
+            if batch_idx > 0 and batch_idx % 10 == 0:
+                gpu_mem = get_memory_usage(gpu=True)
+                if gpu_mem > 7000:  # 8GB 중 7GB 이상 사용 시 경고
+                    log_warning(f"   ⚠️ GPU 메모리 사용량 높음: {gpu_mem:.1f}MB. 메모리 정리 중...")
+                    safe_gpu_memory_cleanup()
+                    gc.collect()
+            
+            # 배치 병렬 처리 (CPU에서 pandas로 처리)
+            batch_dfs = _process_batch(batch_files, features, start_date, end_date, max_workers)
+            
+            if not batch_dfs:
+                failed_count += len(batch_files)
+                continue
+            
+            # 배치 결과를 cuDF로 변환 (메인 스레드에서 GPU 전송)
+            try:
+                # pandas DataFrame들을 합치기
+                batch_pandas_df = pd.concat(batch_dfs, ignore_index=True)
+                del batch_dfs
+                gc.collect()
+                
+                # cuDF로 변환 (GPU 메모리로 전송)
+                batch_cudf = cudf.from_pandas(batch_pandas_df)
+                del batch_pandas_df
+                gc.collect()
+                
+                all_dfs.append(batch_cudf)
+                processed_count += len(batch_files)
+                
+                # 진행 상황 로깅
+                if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == num_batches:
+                    progress_pct = ((batch_idx + 1) / num_batches) * 100
+                    log_info(f"   📊 진행률: {batch_idx + 1}/{num_batches} 배치 완료 ({progress_pct:.1f}%) - 처리: {processed_count}개, 실패: {failed_count}개")
+                
+            except Exception as e:
+                log_warning(f"   ⚠️ 배치 {batch_idx + 1} GPU 전송 실패: {e}")
+                failed_count += len(batch_files)
+                # 메모리 정리
+                try:
+                    del batch_dfs, batch_pandas_df, batch_cudf
+                except:
+                    pass
+                safe_gpu_memory_cleanup()
+                gc.collect()
+                continue
+        
+        if not all_dfs:
+            log_warning("   ⚠️ 처리된 데이터가 없습니다.")
+            return None, None, None
+        
+        if failed_count > 0:
+            log_warning(f"   ⚠️ {failed_count}개 파일 처리 실패 (총 {total_files}개 중)")
+        
+        log_info(f"   ✅ 파일 로딩 완료: {processed_count}개 성공, {failed_count}개 실패")
+        
+        # 모든 배치 데이터 병합
+        log_info("   🔄 데이터 병합 중...")
+        final_df = cudf.concat(all_dfs, ignore_index=True)
+        del all_dfs
+        safe_gpu_memory_cleanup()
+        gc.collect()
+        
+        log_info(f"   ✅ 병합 완료: {len(final_df):,}행")
+        
+        # 무한대(Inf) 값 처리 안전장치 (스케일러 고장 방지)
+        # 숫자형 컬럼만 처리
+        numeric_cols = final_df.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 0:
+            inf_count_before = (final_df[numeric_cols] == np.inf).sum().sum() + (final_df[numeric_cols] == -np.inf).sum().sum()
+            if inf_count_before > 0:
+                log_warning(f"   ⚠️ 무한대 값 {inf_count_before:,}개 발견. NaN으로 변환합니다.")
+                final_df[numeric_cols] = final_df[numeric_cols].replace([np.inf, -np.inf], np.nan)
+        
+        # features와 target 추출
+        missing_features = [f for f in features if f not in final_df.columns]
         if missing_features:
-            error_msg = f"❌ 심각한 오류: load_fold_data에서 필요한 피처가 데이터에 없습니다: {missing_features}"
+            error_msg = f"❌ 심각한 오류: load_data_period에서 필요한 피처가 데이터에 없습니다: {missing_features}"
             log_critical(error_msg)
-            log_critical(f"   사용 가능한 컬럼: {list(df.columns)[:30]}")
+            log_critical(f"   사용 가능한 컬럼: {list(final_df.columns)[:30]}")
             log_critical(f"   기대하는 features ({len(features)}개): {features}")
             log_critical(f"   누락된 피처 ({len(missing_features)}개): {missing_features}")
             raise ValueError(error_msg)
         
-        # target 컬럼 검증
-        if 'target' not in df.columns:
-            error_msg = "❌ 심각한 오류: load_fold_data에서 'target' 컬럼이 데이터에 없습니다."
+        if 'target' not in final_df.columns:
+            error_msg = "❌ 심각한 오류: load_data_period에서 'target' 컬럼이 데이터에 없습니다."
             log_critical(error_msg)
-            log_critical(f"   사용 가능한 컬럼: {list(df.columns)[:30]}")
+            log_critical(f"   사용 가능한 컬럼: {list(final_df.columns)[:30]}")
             raise ValueError(error_msg)
         
-        X = df[features]
-        y = df['target']
-
-
-
-
-
-
-
-        # fillna 불필요 (이미 전처리 완료된 데이터)
+        X = final_df[features]
+        y = final_df['target']
         
-        # 데이터 크기 로깅 (간단하게)
-        try:
-            x_mem = 0
-            if hasattr(X, 'memory_usage'):
-                mem_usage = X.memory_usage(deep=True)
-                if hasattr(mem_usage, 'sum'):
-                    x_mem = mem_usage.sum() / 1024**2  # MB
-                elif isinstance(mem_usage, (int, float)):
-                    x_mem = mem_usage / 1024**2  # MB
+        # Train-Only Imputation
+        if imputation_map is None:
+            # [Train 모드] 중앙값 계산
+            log_info("   📊 Train 모드: 결측치 대체값 계산 중...")
+            numeric_features_df = X.select_dtypes(include=[np.number])
+            calculated_map = numeric_features_df.median().to_dict()
             
-            y_mem = 0
-            if hasattr(y, 'memory_usage'):
-                mem_usage = y.memory_usage(deep=True)
-                if hasattr(mem_usage, 'sum'):
-                    y_mem = mem_usage.sum() / 1024**2  # MB
-                elif isinstance(mem_usage, (int, float)):
-                    y_mem = mem_usage / 1024**2  # MB
-            elif hasattr(y, '__len__'):
-                # Series나 배열인 경우 대략적 계산
-                y_mem = len(y) * 4 / 1024**2  # int32 = 4 bytes
-        except Exception:
-            pass  # 로깅 실패는 무시
-
-
-
-        
-
-
-
-        # 원본 df 명시적 삭제 (메모리 관리 개선)
-
-
-
-        del df
-
-
-
-        gc.collect()
-
-
-
+            # Train 데이터에 적용
+            X = X.fillna(calculated_map)
             
-
-
-
-        return X, y
-
-
-
+            del final_df, numeric_features_df
+            safe_gpu_memory_cleanup()
+            gc.collect()
+            
+            log_info(f"   ✅ Train 데이터 처리 완료: {len(X):,}행")
+            return X, y, calculated_map
+        else:
+            # [Val 모드] 외부에서 받은 맵 적용
+            log_info("   📊 Val 모드: 결측치 대체값 적용 중...")
+            X = X.fillna(imputation_map)
+            
+            del final_df
+            safe_gpu_memory_cleanup()
+            gc.collect()
+            
+            log_info(f"   ✅ Val 데이터 처리 완료: {len(X):,}행")
+            return X, y, None
+    
     except Exception as e:
-
-
-
         log_error(f"데이터 로딩 중 오류 발생: {e}")
+        import traceback
+        log_error(f"   상세 오류:\n{traceback.format_exc()}")
+        # 메모리 정리
+        try:
+            del all_dfs, final_df
+        except:
+            pass
+        safe_gpu_memory_cleanup()
+        gc.collect()
+        return None, None, None
 
-
-
-        return None, None
-
-
-
-def objective(trial, fold_data_cache, features, imputation_values, max_depth_list, rng):
+def objective(trial, fold_data_cache, features, max_depth_list, rng):
     """
     Optuna를 위한 objective 함수 (단일 모델 학습 방식).
-    fold_data_cache: 모든 Fold의 데이터 캐시.
+    fold_data_cache: 모든 Fold의 데이터 캐시 (이미 결측치 처리 완료).
     각 fold에서 단일 모델을 학습하고 검증 점수를 계산합니다.
     """
     trial_start_time = datetime.now()
@@ -812,6 +1062,7 @@ def objective(trial, fold_data_cache, features, imputation_values, max_depth_lis
         'split_criterion': trial.suggest_categorical('split_criterion', [0, 1]),
         'random_state': 42,
         'n_streams': 1,
+        'n_bins': 256,  # 히스토그램 bin 개수 (기본값 128에서 256으로 증가)
     }
 
     log_info(f"   📋 파라미터: n_estimators={params['n_estimators']}, max_depth={params['max_depth']}, max_samples={params['max_samples']}, max_features={params['max_features']}")
@@ -835,24 +1086,83 @@ def objective(trial, fold_data_cache, features, imputation_values, max_depth_lis
             log_warning(f"   ⚠️ Fold #{fold+1} 데이터가 없습니다. 건너뜁니다.")
             continue
 
-        # 스케일러 학습 및 데이터 변환
+        # Trial 전에 이미 언더샘플링이 적용되었으므로, 여기서는 샘플링을 건너뜁니다.
+        # (중복 샘플링 방지: Trial 전 언더샘플링으로 이미 클래스 균형이 맞춰져 있음)
+        X_train_resampled = X_train_all
+        y_train_resampled = y_train_all
+        
+        # 스케일링 전 데이터 검증 및 정리
+        # NaN/Inf 값 확인 및 처리
+        numeric_cols_train = X_train_resampled.select_dtypes(include=[np.number]).columns
+        numeric_cols_val = X_val.select_dtypes(include=[np.number]).columns
+        
+        median_values = None  # Val 데이터 NaN 대체용
+        
+        if len(numeric_cols_train) > 0:
+            # 무한대 값 처리
+            inf_count_train = (X_train_resampled[numeric_cols_train] == np.inf).sum().sum() + (X_train_resampled[numeric_cols_train] == -np.inf).sum().sum()
+            if inf_count_train > 0:
+                log_warning(f"   ⚠️ Fold #{fold+1} Train 데이터에 무한대 값 {inf_count_train:,}개 발견. NaN으로 변환합니다.")
+                X_train_resampled[numeric_cols_train] = X_train_resampled[numeric_cols_train].replace([np.inf, -np.inf], np.nan)
+            
+            # NaN 개수 확인 및 중앙값 계산
+            nan_count_train = X_train_resampled[numeric_cols_train].isna().sum().sum()
+            if nan_count_train > 0:
+                log_warning(f"   ⚠️ Fold #{fold+1} Train 데이터에 NaN {nan_count_train:,}개 발견. 중앙값으로 대체합니다.")
+                # 중앙값 계산 (Val 데이터 대체용으로도 사용)
+                median_values = X_train_resampled[numeric_cols_train].median()
+                X_train_resampled[numeric_cols_train] = X_train_resampled[numeric_cols_train].fillna(median_values)
+        
+        if len(numeric_cols_val) > 0:
+            # 검증 데이터도 동일하게 처리
+            inf_count_val = (X_val[numeric_cols_val] == np.inf).sum().sum() + (X_val[numeric_cols_val] == -np.inf).sum().sum()
+            if inf_count_val > 0:
+                log_warning(f"   ⚠️ Fold #{fold+1} Val 데이터에 무한대 값 {inf_count_val:,}개 발견. NaN으로 변환합니다.")
+                X_val[numeric_cols_val] = X_val[numeric_cols_val].replace([np.inf, -np.inf], np.nan)
+            
+            # 검증 데이터는 Train의 중앙값으로 대체 (데이터 누출 방지)
+            nan_count_val = X_val[numeric_cols_val].isna().sum().sum()
+            if nan_count_val > 0:
+                if median_values is not None:
+                    log_warning(f"   ⚠️ Fold #{fold+1} Val 데이터에 NaN {nan_count_val:,}개 발견. Train 중앙값으로 대체합니다.")
+                    X_val[numeric_cols_val] = X_val[numeric_cols_val].fillna(median_values[numeric_cols_val])
+                else:
+                    log_warning(f"   ⚠️ Fold #{fold+1} Val 데이터에 NaN {nan_count_val:,}개 발견. Val 중앙값으로 대체합니다.")
+                    val_median = X_val[numeric_cols_val].median()
+                    X_val[numeric_cols_val] = X_val[numeric_cols_val].fillna(val_median)
+        
+        # 스케일러 학습 및 데이터 변환 (샘플링된 데이터로 학습)
         step_start = datetime.now()
-        scaler = cuStandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train_all)
-        X_val_scaled = scaler.transform(X_val)
+        try:
+            scaler = cuStandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train_resampled)
+            X_val_scaled = scaler.transform(X_val)
+        except Exception as scale_e:
+            log_error(f"   ❌ Fold #{fold+1} 스케일링 실패: {scale_e}")
+            import traceback
+            log_error(f"   상세 오류:\n{traceback.format_exc()}")
+            continue  # 다음 fold로 진행
+        
         preprocessing_time = (datetime.now() - step_start).total_seconds()
         
-        del X_train_all, X_val
+        del X_train_all, X_val, X_train_resampled
         enhanced_gpu_memory_cleanup(force_defrag=False)
         gc.collect()
 
         # 단일 모델 학습
         step_start = datetime.now()
         model = cuRF(**params)
-        model.fit(X_train_scaled, y_train_all)
+        try:
+            model.fit(X_train_scaled, y_train_resampled)
+        except Exception as fit_e:
+            log_error(f"   ❌ Fold #{fold+1} 모델 학습 실패: {fit_e}")
+            import traceback
+            log_error(f"   상세 오류:\n{traceback.format_exc()}")
+            continue  # 다음 fold로 진행
+        
         fit_time = (datetime.now() - step_start).total_seconds()
         
-        del X_train_scaled, y_train_all
+        del X_train_scaled, y_train_resampled
         enhanced_gpu_memory_cleanup(force_defrag=False)
         gc.collect()
         
@@ -909,8 +1219,30 @@ def objective(trial, fold_data_cache, features, imputation_values, max_depth_lis
             enhanced_gpu_memory_cleanup(force_defrag=True)
             continue # 다음 fold로 진행
 
-        # ROC-AUC 점수 계산
-        score = roc_auc_score(y_val, y_pred_proba)
+        # ROC-AUC 점수 계산 (명시적 타입 변환)
+        try:
+            # cuDF Series를 numpy 배열로 명시적 변환
+            if hasattr(y_val, 'to_numpy'):
+                y_true_np = y_val.to_numpy()
+            elif hasattr(y_val, 'to_pandas'):
+                y_true_np = y_val.to_pandas().values
+            else:
+                y_true_np = np.array(y_val)
+            
+            if hasattr(y_pred_proba, 'to_numpy'):
+                y_pred_np = y_pred_proba.to_numpy()
+            elif hasattr(y_pred_proba, 'to_pandas'):
+                y_pred_np = y_pred_proba.to_pandas().values
+            else:
+                y_pred_np = np.array(y_pred_proba)
+            
+            # cuML의 roc_auc_score 사용 (GPU 가속)
+            score = roc_auc_score(y_true_np, y_pred_np)
+            
+        except Exception as score_e:
+            log_error(f"   ❌ ROC-AUC 점수 계산 실패: {score_e}")
+            score = 0.0  # 실패 시 기본값
+        
         fold_scores.append(score)
         
         # 사용 완료된 객체 정리
@@ -950,10 +1282,11 @@ def objective(trial, fold_data_cache, features, imputation_values, max_depth_lis
 
     return mean_score
 
-def train_final_ensemble_model(fold_data_cache, features, imputation_values, best_params, rng, optimization_results=None, training_config=None, data_path=None):
+def train_final_ensemble_model(fold_data_cache, features, best_params, rng, optimization_results=None, training_config=None, data_path=None):
     """
     전체 데이터를 사용하여 최종 단일 모델을 훈련하고 저장합니다.
     (메모리 최적화 버전: 모델을 순차적으로 학습/예측하여 GPU 메모리 사용량 최소화)
+    결측치 처리는 fold_cache에서 로드한 데이터가 이미 처리된 상태입니다.
     """
     log_info("\n--- 🚂 최적 파라미터로 최종 단일 모델 훈련 시작 ---")
     
@@ -975,7 +1308,12 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
         
         # 원본 데이터 로드 (샘플링 전 데이터)
         fold_data = joblib.load(fold_cache_path)
-        X_train_original, y_train_original, X_val_original, y_val_original = fold_data
+        
+        # 저장할 때 5개를 저장했으므로, 5개를 받아야 함
+        if len(fold_data) == 5:
+            X_train_original, y_train_original, X_val_original, y_val_original, last_fold_imputer = fold_data
+        else:
+            raise ValueError(f"fold_cache 파일 형식이 맞지 않습니다. (요소 개수: {len(fold_data)}, 기대값: 5)")
         
         if X_train_original is None or X_val_original is None:
             raise ValueError("fold_cache 파일의 데이터가 유효하지 않습니다.")
@@ -1000,8 +1338,16 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
         
         log_info(f"   ✅ 데이터 피처 선택 완료: {len(features)}개 피처 사용")
         
+        # [중요] 최종 모델을 위한 Imputation Value 재계산
+        # 이유: X_all(전체 데이터) 기준으로 최신 중앙값을 다시 계산해서 저장해야,
+        # 나중에 내일 주가를 예측할 때 그 기준으로 결측치를 채울 수 있음.
+        log_info("   📊 최종 모델용 결측치 대체값(중앙값) 계산 중...")
+        numeric_features_df = X_all.select_dtypes(include=[np.number])
+        final_imputation_values = numeric_features_df.median().to_dict()
+        log_info(f"   ✅ 최종 모델용 결측치 대체값 계산 완료 ({len(final_imputation_values)}개 피처)")
+        
         # 원본 데이터 메모리 해제
-        del X_train_original, y_train_original, X_val_original, y_val_original, fold_data
+        del X_train_original, y_train_original, X_val_original, y_val_original, fold_data, last_fold_imputer, numeric_features_df
         enhanced_gpu_memory_cleanup(force_defrag=False)
         gc.collect()
         
@@ -1022,59 +1368,31 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
         
         del y_all_pandas
 
-        # 2. 전체 데이터 언더샘플링 적용 (클래스 불균형 해결)
-        log_info("   [SAMPLING] 전체 데이터 언더샘플링 진행 중...")
+        # 2. 전체 데이터 하이브리드 샘플링 적용 (클래스 불균형 해결)
+        log_info("   ⚖️ 최종 학습 전 하이브리드 샘플링 적용...")
         sampling_start = datetime.now()
         
-        if n_majority_original > n_minority_original:
-            # cuDF에서 직접 boolean 인덱싱으로 위치 인덱스 추출
-            majority_mask = (y_all == majority_class_label).to_pandas().values
-            minority_mask = (y_all == minority_class_label).to_pandas().values
-            
-            # 위치 인덱스 생성 (0부터 시작)
-            all_indices = np.arange(len(y_all))
-            majority_indices = all_indices[majority_mask]
-            minority_indices = all_indices[minority_mask]
-            
-            # 소수 클래스 개수만큼 랜덤 샘플링
-            rng_final = np.random.RandomState(42)  # 최종 학습용 고정 시드
-            sampled_majority_indices = rng_final.choice(majority_indices, size=n_minority_original, replace=False)
-            
-            # 언더샘플링된 인덱스 결합
-            balanced_indices = np.concatenate([minority_indices, sampled_majority_indices])
-            
-            # 셔플 (numpy 배열에서 직접)
-            rng_final.shuffle(balanced_indices)
-            
-            # cuPy 배열로 변환하여 cuDF iloc에 사용
-            balanced_indices_cupy = cp.asarray(balanced_indices)
-            
-            # 언더샘플링된 데이터 생성
-            X_all_resampled = X_all.iloc[balanced_indices_cupy].reset_index(drop=True)
-            y_all_resampled = y_all.iloc[balanced_indices_cupy].reset_index(drop=True)
-            
-            # 결과 확인
-            y_all_resampled_pandas = y_all_resampled.to_pandas()
-            value_counts_resampled = y_all_resampled_pandas.value_counts()
-            n_minority_resampled = value_counts_resampled[minority_class_label]
-            n_majority_resampled = value_counts_resampled[majority_class_label]
-            del y_all_resampled_pandas, majority_mask, minority_mask, all_indices, majority_indices, minority_indices, balanced_indices, balanced_indices_cupy
-            
-            # 원본 데이터 삭제
-            del X_all, y_all
-            enhanced_gpu_memory_cleanup(force_defrag=True)
-            gc.collect()
-            
-            # 샘플링된 데이터로 교체
-            X_all = X_all_resampled
-            y_all = y_all_resampled
-            del X_all_resampled, y_all_resampled
-            
-            log_info(f"   [OK] 언더샘플링 완료: 소수 클래스 {n_minority_original:,}개 → {n_minority_resampled:,}개, 다수 클래스 {n_majority_original:,}개 → {n_majority_resampled:,}개")
-            log_info(f"   [DATA] 샘플링 후 데이터: {len(X_all):,}행 ({(datetime.now() - sampling_start).total_seconds():.1f}초)")
-        else:
-            log_info(f"   ℹ️ 클래스 불균형이 없어 샘플링을 건너뜁니다.")
-            log_info(f"   [DATA] 최종 학습 데이터: {len(X_all):,}행")
+        X_all_resampled, y_all_resampled = apply_hybrid_sampling(X_all, y_all, random_state=42)
+        
+        # 샘플링 결과 확인
+        y_all_resampled_pandas = y_all_resampled.to_pandas()
+        value_counts_resampled = y_all_resampled_pandas.value_counts()
+        n_minority_resampled = value_counts_resampled[minority_class_label]
+        n_majority_resampled = value_counts_resampled[majority_class_label]
+        del y_all_resampled_pandas
+        
+        # 원본 데이터 삭제
+        del X_all, y_all
+        enhanced_gpu_memory_cleanup(force_defrag=True)
+        gc.collect()
+        
+        # 샘플링된 데이터로 교체
+        X_all = X_all_resampled
+        y_all = y_all_resampled
+        del X_all_resampled, y_all_resampled
+        
+        log_info(f"   [OK] 하이브리드 샘플링 완료: 소수 클래스 {n_minority_original:,}개 → {n_minority_resampled:,}개, 다수 클래스 {n_majority_original:,}개 → {n_majority_resampled:,}개")
+        log_info(f"   [DATA] 샘플링 후 데이터: {len(X_all):,}행 ({(datetime.now() - sampling_start).total_seconds():.1f}초)")
 
         # 3. 전체 데이터 전처리
         step_start = datetime.now()
@@ -1375,11 +1693,12 @@ def train_final_ensemble_model(fold_data_cache, features, imputation_values, bes
             final_training_config = {**(training_config or {}), 'n_final_models': 1}
             
             # 모델 파일 저장
+            # final_imputation_values: 전체 데이터(X_all) 기준으로 계산된 중앙값 (실전 추론 시 사용)
             joblib.dump({
                 'model': final_model,
                 'features': features,
                 'scaler': final_scaler,
-                'imputation_values': imputation_values,
+                'imputation_values': final_imputation_values,  # 전체 데이터 기준 중앙값 (실전 추론용)
                 'best_params': best_params,
                 'model_type': 'single_model',
                 'optimization_results': optimization_results or {},
@@ -1479,19 +1798,30 @@ def main():
 
     if run_preparation:
         start_date = (datetime.now() - timedelta(days=years*365)).strftime('%Y-%m-%d')
-        # 학습 데이터는 오늘에서 2개월 전까지만 수집 (백테스팅에는 영향 없음)
-        end_date = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
-        log_info(f"   데이터 수집 기간: {start_date} ~ {end_date} ({years}년, 최근 2개월 제외)")
+        # 학습 데이터는 오늘에서 3개월 전까지만 수집 (백테스팅에는 영향 없음)
+        end_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+        log_info(f"   데이터 수집 기간: {start_date} ~ {end_date} ({years}년, 최근 3개월 제외)")
         
-        # 데이터 재생성 시 기존 imputation_values 파일 삭제
+        # 데이터 재생성 시 기존 캐시 파일 모두 삭제 (날짜 기반 분할로 변경되므로)
         imputation_values_dir = os.path.dirname(os.path.expanduser(data_path))
         imputation_values_path = os.path.join(imputation_values_dir, "imputation_values.joblib")
+        fold_cache_dir = os.path.join(imputation_values_dir, "fold_cache")
+        
+        # imputation_values 파일 삭제
         if os.path.exists(imputation_values_path):
             try:
                 os.remove(imputation_values_path)
                 log_info(f"   🗑️ 기존 imputation_values 파일 삭제 완료 (데이터 재생성으로 인해)")
             except Exception as e:
                 log_warning(f"   ⚠️ 기존 imputation_values 파일 삭제 실패: {e}")
+        
+        # fold_cache 디렉토리 전체 삭제 (날짜 기반 분할로 변경되므로)
+        if os.path.exists(fold_cache_dir):
+            try:
+                shutil.rmtree(fold_cache_dir)
+                log_info(f"   🗑️ 기존 fold_cache 디렉토리 삭제 완료 (날짜 기반 분할로 재생성)")
+            except Exception as e:
+                log_warning(f"   ⚠️ 기존 fold_cache 디렉토리 삭제 실패: {e}")
         
         if not prepare_data_and_save(data_path, start_date, end_date):
             log_critical("데이터 준비에 실패하여 프로그램을 종료합니다.")
@@ -1517,87 +1847,39 @@ def main():
     # 제거된 피처: BBW_20_2, 거래량 변동성 계수, 변동성 기울기, 거래량 변동성 계수 기울기
     # 제거된 피처: 등락율, 주가_기울기(1W/1M/3M), disparity_5/10, 변동성(5M), KOSPI_변동성(3D/5M), KOSPI_disparity_5
     # 제거된 피처: 변동성(3D/3M/1M/1W), KOSPI_변동성(3M/1W), KOSPI_disparity_120/20, BPS, 거래대금_MA20/MA5, BB_Position
+    # 제거된 피처: disparity_120, disparity_240
     features = [
         'log_mktcap',
         '52주_신고가_비율',
         'ADX_14',
-        'disparity_60', 'disparity_120', 'disparity_240',
-        'KOSPI_disparity_60',
+        'disparity_120',  # 120일 이격도
+        'disparity_240',  # 240일 이격도
+        'KOSPI_disparity_20',  # KOSPI 20일 이격도
         # 추가된 피처
-        'ATRr_20',
-        'ATR_Ratio_Short',
-        'ATR_Ratio_Trend',
-        'Eff_Ratio_10',
-        'RVOL',
         'Z_Score_20',
         'Position_Range_60',
-        'RSI_14',
-        'OBV_Slope',
         'KOSPI_변동성(1M)',
-        'MA60_Slope'
+        '변동성(1W)',  # 변동성 1주 (표준편차/평균)
+        '변동성(3M)',  # 변동성 3개월 (표준편차/평균)
+        'MA120_Slope',  # 120일 이동평균선 기울기
+        'MA240_Slope',  # 240일 이동평균선 기울기
+        'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
+        'PBR_log',  # PBR 로그 변환
+        # 새로 추가된 피처
+        'RVOL',  # 상대 거래량 (Relative Volume)
+        '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
+        '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
+        'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
+        'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
+        'ATR_Ratio_Short',  # ATR 비율 단기 (1W / 1M)
+        'ATR_Ratio_Trend',  # ATR 비율 추세 (1M / 3M)
+        'Eff_Ratio_10'  # 효율성 비율 10일
     ]
     
-    # imputation_values 파일 경로 설정 (data_path와 같은 레벨)
-    imputation_values_dir = os.path.dirname(os.path.expanduser(data_path))
-    imputation_values_path = os.path.join(imputation_values_dir, "imputation_values.joblib")
-    
-    # imputation_values 파일 존재 확인 및 로드/계산
-    if os.path.exists(imputation_values_path):
-        log_info("   ✅ imputation_values 파일을 찾았습니다. 로드 중...")
-        try:
-            imputation_values = joblib.load(imputation_values_path)
-            log_info("   ✅ imputation_values 파일 로드 완료.")
-        except Exception as e:
-            log_warning(f"   ⚠️ imputation_values 파일 로드 실패: {e}. 재계산을 진행합니다.")
-            # 파일 로드 실패 시 재계산
-            imputation_values = None
-    else:
-        imputation_values = None
-    
-    # 파일이 없거나 로드 실패한 경우 계산
-    if imputation_values is None:
-        log_info("   전체 데이터로 중앙값 계산 중...")
-        all_dfs = []
-        batch_size = 20  # 메모리 효율을 위해 배치로 로드
-        for i in range(0, len(file_paths), batch_size):
-            batch_files = file_paths[i:i+batch_size]
-            batch_df = pd.concat([pd.read_feather(f) for f in batch_files])
-            all_dfs.append(batch_df)
-            del batch_df
-            gc.collect()
-            if (i + batch_size) % 500 == 0:
-                log_info(f"      ... {min(i + batch_size, len(file_paths))}/{len(file_paths)} 파일 처리 중...")
-        
-        log_info(f"   전체 {len(file_paths)}개 파일 로딩 완료. 중앙값 계산 중...")
-        all_df = pd.concat(all_dfs)
-        del all_dfs
-        gc.collect()
-        
-        # features 리스트에 있는 피처가 데이터에 있는지 검증
-        missing_features_for_imputation = [f for f in features if f not in all_df.columns]
-        if missing_features_for_imputation:
-            error_msg = f"❌ 심각한 오류: imputation_values 계산 시 필요한 피처가 데이터에 없습니다: {missing_features_for_imputation}"
-            log_critical(error_msg)
-            log_critical(f"   사용 가능한 컬럼: {list(all_df.columns)[:30]}")
-            log_critical(f"   기대하는 features ({len(features)}개): {features}")
-            log_critical(f"   누락된 피처 ({len(missing_features_for_imputation)}개): {missing_features_for_imputation}")
-            raise ValueError(error_msg)
-        
-        numeric_features_df = all_df[features].select_dtypes(include=np.number)
-        imputation_values = numeric_features_df.median().to_dict()
-        
-        log_info(f"   사용될 피처 개수: {len(features)}개 (기존 CPU 버전과 동일)")
-        log_info("   ✅ 결측치 대체값(중앙값) 계산 완료 (전체 데이터 기준).")
-        del all_df, numeric_features_df
-        gc.collect()
-        
-        # 계산된 imputation_values 파일로 저장
-        log_info(f"   💾 imputation_values 파일 저장 중... ({imputation_values_path})")
-        try:
-            joblib.dump(imputation_values, imputation_values_path)
-            log_info("   ✅ imputation_values 파일 저장 완료.")
-        except Exception as e:
-            log_warning(f"   ⚠️ imputation_values 파일 저장 실패: {e}. 학습은 계속 진행됩니다.")
+    # 전체 데이터 중앙값 계산 제거 (Fold별로 Train 데이터만으로 계산)
+    # imputation_values는 더 이상 사용하지 않음 (호환성을 위해 None으로 설정)
+    imputation_values = None
+    log_info("   ℹ️ 결측치 처리는 Fold별로 Train 데이터만으로 계산합니다.")
 
     # 재현성을 위한 RandomState 객체 생성
     rng = np.random.RandomState(42)
@@ -1617,82 +1899,109 @@ def main():
         pruner=pruner
     )
 
-    # --- 모든 Fold의 데이터를 미리 로드하여 캐싱 (중복 로드 방지) ---
-    log_info(f"\n--- 📁 Fold 데이터 로딩 및 구성 중 ---")
+    # --- 모든 Fold의 데이터를 미리 로드하여 캐싱 (날짜 기반 Expanding Window) ---
+    log_info(f"\n--- 📁 Fold 데이터 로딩 및 구성 중 (날짜 기반 Expanding Window) ---")
     
     # fold_cache 디렉토리 경로 설정
     fold_cache_dir = os.path.join(os.path.dirname(os.path.expanduser(data_path)), "fold_cache")
     os.makedirs(fold_cache_dir, exist_ok=True)
     
-    kf = KFold(n_splits=3, shuffle=True, random_state=42)
-    file_indices = np.arange(len(file_paths))
+    # 날짜 기반 Expanding Window Fold 범위 계산
+    fold_ranges = calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days=365, n_folds=3)
+    
+    if not fold_ranges:
+        log_critical("Fold 범위 계산에 실패했습니다. 프로그램을 종료합니다.")
+        sys.exit(1)
+    
     fold_data_cache = {}  # {fold_idx: (X_train, y_train, X_val, y_val)}
     
-    for fold, (train_idx, val_idx) in enumerate(kf.split(file_indices)):
-        fold_cache_path = os.path.join(fold_cache_dir, f"fold_{fold}_data.joblib")
+    for fold_info in fold_ranges:
+        fold_idx = fold_info['fold']
+        fold_cache_path = os.path.join(fold_cache_dir, f"fold_{fold_idx}_data.joblib")
         
         # fold 데이터 파일 존재 확인
         if os.path.exists(fold_cache_path):
-            log_info(f"   ✅ Fold #{fold+1}/3 캐시 파일을 찾았습니다. 로드 중...")
+            log_info(f"   ✅ Fold #{fold_idx+1}/3 캐시 파일을 찾았습니다. 로드 중...")
             load_start = datetime.now()
             try:
                 fold_data = joblib.load(fold_cache_path)
-                X_train, y_train, X_val, y_val = fold_data
+                # 캐시 형식 확인 (날짜 기반이므로 imputation_map도 포함될 수 있음)
+                if len(fold_data) == 4:
+                    X_train, y_train, X_val, y_val = fold_data
+                elif len(fold_data) == 5:
+                    X_train, y_train, X_val, y_val, _ = fold_data  # imputation_map 무시
+                else:
+                    raise ValueError("캐시 형식이 맞지 않습니다.")
+                
                 load_time = (datetime.now() - load_start).total_seconds()
                 
                 if X_train is None or X_val is None:
-                    log_warning(f"   ⚠️ Fold #{fold+1} 캐시 파일 데이터가 유효하지 않습니다. 재로딩합니다.")
+                    log_warning(f"   ⚠️ Fold #{fold_idx+1} 캐시 파일 데이터가 유효하지 않습니다. 재로딩합니다.")
                     raise ValueError("Invalid cache data")
                 
-                # features 리스트에 있는 피처가 모두 있는지 확인 (feather 파일에는 모든 피처가 저장되어 있음)
+                # features 리스트에 있는 피처가 모두 있는지 확인
                 missing_features = [f for f in features if f not in X_train.columns]
                 if missing_features:
-                    log_warning(f"   ⚠️ Fold #{fold+1} 캐시 파일에 필요한 피처가 없습니다: {missing_features}. 재로딩합니다.")
+                    log_warning(f"   ⚠️ Fold #{fold_idx+1} 캐시 파일에 필요한 피처가 없습니다: {missing_features}. 재로딩합니다.")
                     raise ValueError(f"Missing features in cache: {missing_features}")
                 
                 # features 리스트에 있는 피처만 선택
                 X_train = X_train[features]
                 X_val = X_val[features]
                 
-                fold_data_cache[fold] = (X_train, y_train, X_val, y_val)
-                log_info(f"   ✅ Fold #{fold+1}/3 캐시 로드 완료: 훈련 {len(X_train):,}행, 검증 {len(X_val):,}행 ({load_time:.1f}초)")
+                fold_data_cache[fold_idx] = (X_train, y_train, X_val, y_val)
+                log_info(f"   ✅ Fold #{fold_idx+1}/3 캐시 로드 완료: 훈련 {len(X_train):,}행, 검증 {len(X_val):,}행 ({load_time:.1f}초)")
             except Exception as e:
-                log_warning(f"   ⚠️ Fold #{fold+1} 캐시 파일 로드 실패: {e}. 재로딩합니다.")
+                log_warning(f"   ⚠️ Fold #{fold_idx+1} 캐시 파일 로드 실패: {e}. 재로딩합니다.")
                 # 캐시 파일이 손상되었거나 피처가 불일치하는 경우 삭제 후 재로딩
                 try:
                     os.remove(fold_cache_path)
-                    log_info(f"   🗑️ Fold #{fold+1} 캐시 파일 삭제 완료 (재생성을 위해)")
+                    log_info(f"   🗑️ Fold #{fold_idx+1} 캐시 파일 삭제 완료 (재생성을 위해)")
                 except:
                     pass
                 fold_data = None
         else:
             fold_data = None
         
-        # 캐시 파일이 없거나 로드 실패한 경우 기존 방식으로 로드
+        # 캐시 파일이 없거나 로드 실패한 경우 날짜 기반으로 로드
         if fold_data is None:
-            val_files = [file_paths[i] for i in val_idx]
-            train_files = [file_paths[i] for i in train_idx]
+            log_info(f"   Fold #{fold_idx+1}/3 데이터 로딩 중...")
+            log_info(f"      Train: {fold_info['train_start'].strftime('%Y-%m-%d')} ~ {fold_info['train_end'].strftime('%Y-%m-%d')}")
+            log_info(f"      Val: {fold_info['val_start'].strftime('%Y-%m-%d')} ~ {fold_info['val_end'].strftime('%Y-%m-%d')}")
             
-            log_info(f"   Fold #{fold+1}/3 데이터 로딩 중...")
             load_start = datetime.now()
-            X_train, y_train = load_fold_data(train_files, features, imputation_values)
-            X_val, y_val = load_fold_data(val_files, features, imputation_values)
-            load_time = (datetime.now() - load_start).total_seconds()
+            
+            # Train 로드 (맵 생성)
+            X_train, y_train, train_imputation_map = load_data_period(
+                file_paths, features,
+                fold_info['train_start'], fold_info['train_end'],
+                imputation_map=None  # Train 모드
+            )
+            
+            # Val 로드 (Train에서 만든 맵 적용)
+            X_val, y_val, _ = load_data_period(
+                file_paths, features,
+                fold_info['val_start'], fold_info['val_end'],
+                imputation_map=train_imputation_map  # Val 모드
+            )
             
             if X_train is None or X_val is None:
-                log_warning(f"   ⚠️ Fold #{fold+1} 데이터 로딩 실패. 건너뜁니다.")
+                log_warning(f"   ⚠️ Fold #{fold_idx+1} 데이터 로딩 실패. 건너뜁니다.")
                 continue
             
-            fold_data_cache[fold] = (X_train, y_train, X_val, y_val)
-            log_info(f"   ✅ Fold #{fold+1}/3 로딩 완료: 훈련 {len(X_train):,}행, 검증 {len(X_val):,}행 ({load_time:.1f}초)")
+            load_time = (datetime.now() - load_start).total_seconds()
             
-            # fold 데이터 파일로 저장
-            log_info(f"   💾 Fold #{fold+1}/3 데이터 파일 저장 중...")
+            fold_data_cache[fold_idx] = (X_train, y_train, X_val, y_val)
+            
+            log_info(f"   ✅ Fold #{fold_idx+1}/3 로딩 완료: 훈련 {len(X_train):,}행, 검증 {len(X_val):,}행 ({load_time:.1f}초)")
+            
+            # fold 데이터 파일로 저장 (imputation_map도 함께 저장)
+            log_info(f"   💾 Fold #{fold_idx+1}/3 데이터 파일 저장 중...")
             try:
-                joblib.dump((X_train, y_train, X_val, y_val), fold_cache_path)
-                log_info(f"   ✅ Fold #{fold+1}/3 데이터 파일 저장 완료.")
+                joblib.dump((X_train, y_train, X_val, y_val, train_imputation_map), fold_cache_path)
+                log_info(f"   ✅ Fold #{fold_idx+1}/3 데이터 파일 저장 완료.")
             except Exception as e:
-                log_warning(f"   ⚠️ Fold #{fold+1} 데이터 파일 저장 실패: {e}. 학습은 계속 진행됩니다.")
+                log_warning(f"   ⚠️ Fold #{fold_idx+1} 데이터 파일 저장 실패: {e}. 학습은 계속 진행됩니다.")
     
     log_info(f"   ✅ Fold 데이터 로딩 완료 (총 {len(fold_data_cache)}개 Fold)")
     
@@ -1750,12 +2059,10 @@ def main():
             # 셔플 (numpy 배열에서 직접)
             rng.shuffle(balanced_indices)
             
-            # cuPy 배열로 변환하여 cuDF iloc에 사용
-            balanced_indices_cupy = cp.asarray(balanced_indices)
-            
+            # cuDF iloc는 numpy 배열이나 리스트를 받을 수 있음 (cupy 배열 대신 numpy 배열 사용)
             # 언더샘플링된 데이터 생성
-            X_train_resampled = X_train.iloc[balanced_indices_cupy].reset_index(drop=True)
-            y_train_resampled = y_train.iloc[balanced_indices_cupy].reset_index(drop=True)
+            X_train_resampled = X_train.iloc[balanced_indices].reset_index(drop=True)
+            y_train_resampled = y_train.iloc[balanced_indices].reset_index(drop=True)
             
             # 결과 확인 (삭제 전에 확인)
             y_train_resampled_pandas = y_train_resampled.to_pandas()
@@ -1768,7 +2075,7 @@ def main():
             fold_data_cache[fold] = (X_train_resampled, y_train_resampled, X_val, y_val)
             
             # 원본 데이터 삭제
-            del X_train, y_train, balanced_indices, balanced_indices_cupy
+            del X_train, y_train, balanced_indices
             enhanced_gpu_memory_cleanup(force_defrag=False)
             gc.collect()
             
@@ -1785,7 +2092,7 @@ def main():
 
     try:
         study.optimize(
-            lambda trial: objective(trial, fold_data_cache, features, imputation_values, args.max_depth, rng),
+            lambda trial: objective(trial, fold_data_cache, features, args.max_depth, rng),
             n_trials=args.n_iter
         )
     finally:
@@ -1822,7 +2129,8 @@ def main():
         best_params = study.best_params
         best_params['random_state'] = 42
         best_params['n_streams'] = 1  # GPU 병렬 처리 개선 (속도 향상)
-        train_final_ensemble_model(fold_data_cache, features, imputation_values, best_params, rng, optimization_results, training_config, data_path)
+        best_params['n_bins'] = 256  # 히스토그램 bin 개수 (기본값 128에서 256으로 증가)
+        train_final_ensemble_model(fold_data_cache, features, best_params, rng, optimization_results, training_config, data_path)
     except Exception as e:
         log_critical("최종 모델 훈련 또는 저장 중 오류 발생", exception=e)
     finally:
