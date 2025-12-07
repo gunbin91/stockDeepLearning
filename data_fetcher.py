@@ -431,25 +431,23 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         atr_20 = df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=20)
         atr_60 = df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=60)
         
+        # ATRr_5 계산 (기준 - 1W): "최근 1주일 변동성 수준"
+        if atr_5 is not None:
+            latest_data['ATRr_5'] = (atr_5.iloc[-1] / df_for_indicators['종가'].iloc[-1]) * 100
+        else:
+            latest_data['ATRr_5'] = np.nan
+        
         # ATRr_20 계산 (기준 - 1M): "이 종목의 기초 체급은?"
         if atr_20 is not None:
             latest_data['ATRr_20'] = (atr_20.iloc[-1] / df_for_indicators['종가'].iloc[-1]) * 100
         else:
             latest_data['ATRr_20'] = np.nan
         
-        # ATR_Ratio_Short (1W / 1M): "최근 1주일이 한 달 평균보다 얼마나 조용한가?"
-        # 값이 1.0 미만이면 '응축(눌림목)', 1.0 초과면 '발산(돌파)'
-        if atr_20 is not None and atr_5 is not None:
-            latest_data['ATR_Ratio_Short'] = atr_5.iloc[-1] / (atr_20.iloc[-1] + 1e-9)
+        # ATRr_60 계산 (기준 - 3M): "3개월 기준 변동성 수준"
+        if atr_60 is not None:
+            latest_data['ATRr_60'] = (atr_60.iloc[-1] / df_for_indicators['종가'].iloc[-1]) * 100
         else:
-            latest_data['ATR_Ratio_Short'] = 1.0
-        
-        # ATR_Ratio_Trend (1M / 3M): "최근 한 달이 지난 석 달 평균보다 활발해졌는가?"
-        # 값이 1.0 초과면 변동성이 점차 커지는 국면 (에너지 증가)
-        if atr_60 is not None and atr_20 is not None:
-            latest_data['ATR_Ratio_Trend'] = atr_20.iloc[-1] / (atr_60.iloc[-1] + 1e-9)
-        else:
-            latest_data['ATR_Ratio_Trend'] = 1.0
+            latest_data['ATRr_60'] = np.nan
         
         # ATRr_14는 기존 호환성을 위해 유지 (다른 곳에서 사용할 수 있음)
         df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
@@ -516,27 +514,7 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         else:
             latest_data['Position_Range_60'] = 0.5
         
-        # 변동성 계산 (표준편차/평균 방식)
-        try:
-            # 변동성(1W) 계산 (5일 기준)
-            std_5 = df_for_indicators['종가'].rolling(window=5).std().iloc[-1]
-            mean_5 = df_for_indicators['종가'].rolling(window=5).mean().iloc[-1]
-            if pd.notna(std_5) and pd.notna(mean_5) and mean_5 != 0:
-                latest_data['변동성(1W)'] = std_5 / mean_5
-            else:
-                latest_data['변동성(1W)'] = np.nan
-            
-            # 변동성(3M) 계산 (60일 기준) - 변동성(1M) 제거
-            std_60 = df_for_indicators['종가'].rolling(window=60).std().iloc[-1]
-            mean_60 = df_for_indicators['종가'].rolling(window=60).mean().iloc[-1]
-            if pd.notna(std_60) and pd.notna(mean_60) and mean_60 != 0:
-                latest_data['변동성(3M)'] = std_60 / mean_60
-            else:
-                latest_data['변동성(3M)'] = np.nan
-        except Exception as e:
-            log_warning(f"변동성 계산 실패 ({ticker}): {e}")
-            latest_data['변동성(1W)'] = np.nan
-            latest_data['변동성(3M)'] = np.nan
+        # 변동성(1W), 변동성(3M) 피처 제거됨 (2024년 12월)
         
         # Eff_Ratio_10 계산 (효율성 비율)
         try:

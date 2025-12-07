@@ -20,9 +20,9 @@ which python
 echo "📦 requirements.txt를 사용하여 패키지 설치를 시작합니다..."
 
 # 프로젝트 루트로 이동
-# 이 스크립트는 run/wsl/sh/ 에 있으므로, 프로젝트 루트는 세 단계 위
+# 이 스크립트는 run/sh/ 에 있으므로, 프로젝트 루트는 두 단계 위
 SCRIPT_DIR=$(dirname $(realpath "$0"))
-PROJECT_ROOT=$(realpath "$SCRIPT_DIR/../../..")
+PROJECT_ROOT=$(realpath "$SCRIPT_DIR/../..")
 cd $PROJECT_ROOT
 
 # pip를 사용하여 requirements.txt 파일에 명시된 모든 패키지를 설치
@@ -30,4 +30,5 @@ pip install --upgrade --no-cache-dir -r requirements.txt
 
 echo "✅ 모든 패키지 설치가 완료되었습니다."
 echo "   'rapids-25.10' 환경이 requirements.txt와 동기화되었습니다."
+
 

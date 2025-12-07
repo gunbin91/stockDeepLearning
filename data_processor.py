@@ -705,30 +705,28 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             atr_20 = df.ta.atr(high='고가', low='저가', close='종가', length=20)
             atr_60 = df.ta.atr(high='고가', low='저가', close='종가', length=60)
             
+            # ATRr_5 계산 (기준 - 1W): "최근 1주일 변동성 수준"
+            if atr_5 is not None:
+                df['ATRr_5'] = (atr_5 / df['종가']) * 100
+            else:
+                df['ATRr_5'] = np.nan
+            
             # ATRr_20 계산 (기준 - 1M): "이 종목의 기초 체급은?"
             if atr_20 is not None:
                 df['ATRr_20'] = (atr_20 / df['종가']) * 100
             else:
                 df['ATRr_20'] = np.nan
             
-            # ATR_Ratio_Short (1W / 1M): "최근 1주일이 한 달 평균보다 얼마나 조용한가?"
-            # 값이 1.0 미만이면 '응축(눌림목)', 1.0 초과면 '발산(돌파)'
-            if atr_20 is not None and atr_5 is not None:
-                df['ATR_Ratio_Short'] = atr_5 / (atr_20 + 1e-9)
+            # ATRr_60 계산 (기준 - 3M): "3개월 기준 변동성 수준"
+            if atr_60 is not None:
+                df['ATRr_60'] = (atr_60 / df['종가']) * 100
             else:
-                df['ATR_Ratio_Short'] = 1.0
-            
-            # ATR_Ratio_Trend (1M / 3M): "최근 한 달이 지난 석 달 평균보다 활발해졌는가?"
-            # 값이 1.0 초과면 변동성이 점차 커지는 국면 (에너지 증가)
-            if atr_60 is not None and atr_20 is not None:
-                df['ATR_Ratio_Trend'] = atr_20 / (atr_60 + 1e-9)
-            else:
-                df['ATR_Ratio_Trend'] = 1.0
+                df['ATRr_60'] = np.nan
         except Exception as e:
             log_warning(f"ATR 계산 실패 ({ticker}): {e}")
+            df['ATRr_5'] = np.nan
             df['ATRr_20'] = np.nan
-            df['ATR_Ratio_Short'] = 1.0
-            df['ATR_Ratio_Trend'] = 1.0
+            df['ATRr_60'] = np.nan
         
         # ATRr_14는 기존 호환성을 위해 유지 (다른 곳에서 사용할 수 있음)
         try:
@@ -822,16 +820,7 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             log_warning(f"Position_Range_60 계산 실패 ({ticker}): {e}")
             df['Position_Range_60'] = np.nan
         
-        # 변동성 계산 (표준편차/평균 방식)
-        try:
-            # 변동성(1W) 계산 (5일 기준)
-            df['변동성(1W)'] = df['종가'].rolling(window=5).std() / df['종가'].rolling(window=5).mean()
-            # 변동성(3M) 계산 (60일 기준) - 변동성(1M) 제거
-            df['변동성(3M)'] = df['종가'].rolling(window=60).std() / df['종가'].rolling(window=60).mean()
-        except Exception as e:
-            log_warning(f"변동성 계산 실패 ({ticker}): {e}")
-            df['변동성(1W)'] = np.nan
-            df['변동성(3M)'] = np.nan
+        # 변동성(1W), 변동성(3M) 피처 제거됨 (2024년 12월)
         
         # Eff_Ratio_10 계산 (효율성 비율)
         try:

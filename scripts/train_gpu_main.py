@@ -451,6 +451,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
     # 제거된 피처: disparity_120, disparity_240
     # 변경된 피처: RSI_14 -> RSI_Signal_Oscillator
     # 추가된 피처: Relative_Strength_20 (KOSPI 수익률 상대강도), 시총_회전율(1W) (5일 거래대금 기준)
+    # 제거된 피처: 변동성(1W), 변동성(3M) (2024년 12월)
     features = [
         'log_mktcap',
         '52주_신고가_비율',
@@ -462,8 +463,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
         'Z_Score_20',
         'Position_Range_60',
         'KOSPI_변동성(1M)',
-        '변동성(1W)',  # 변동성 1주 (표준편차/평균)
-        '변동성(3M)',  # 변동성 3개월 (표준편차/평균)
+        # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
         'MA120_Slope',  # 120일 이동평균선 기울기
         'MA240_Slope',  # 240일 이동평균선 기울기
         'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
@@ -473,9 +473,10 @@ def prepare_data_and_save(data_path, start_date, end_date):
         '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
         '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
         'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
+        'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
         'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
-        'ATR_Ratio_Short',  # ATR 비율 단기 (1W / 1M)
-        'ATR_Ratio_Trend',  # ATR 비율 추세 (1M / 3M)
+        'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
+        # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
         'Eff_Ratio_10'  # 효율성 비율 10일
     ]
 
@@ -1848,6 +1849,7 @@ def main():
     # 제거된 피처: 등락율, 주가_기울기(1W/1M/3M), disparity_5/10, 변동성(5M), KOSPI_변동성(3D/5M), KOSPI_disparity_5
     # 제거된 피처: 변동성(3D/3M/1M/1W), KOSPI_변동성(3M/1W), KOSPI_disparity_120/20, BPS, 거래대금_MA20/MA5, BB_Position
     # 제거된 피처: disparity_120, disparity_240
+    # 제거된 피처: 변동성(1W), 변동성(3M) (2024년 12월)
     features = [
         'log_mktcap',
         '52주_신고가_비율',
@@ -1859,8 +1861,7 @@ def main():
         'Z_Score_20',
         'Position_Range_60',
         'KOSPI_변동성(1M)',
-        '변동성(1W)',  # 변동성 1주 (표준편차/평균)
-        '변동성(3M)',  # 변동성 3개월 (표준편차/평균)
+        # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
         'MA120_Slope',  # 120일 이동평균선 기울기
         'MA240_Slope',  # 240일 이동평균선 기울기
         'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
@@ -1870,9 +1871,10 @@ def main():
         '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
         '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
         'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
+        'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
         'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
-        'ATR_Ratio_Short',  # ATR 비율 단기 (1W / 1M)
-        'ATR_Ratio_Trend',  # ATR 비율 추세 (1M / 3M)
+        'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
+        # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
         'Eff_Ratio_10'  # 효율성 비율 10일
     ]
     

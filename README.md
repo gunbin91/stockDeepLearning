@@ -34,11 +34,11 @@ stockDeepLearning/
 ├── 🚀 실행 스크립트
 │   ├── scripts/
 │   │   ├── build_db_pykrx.py     # 재무 데이터베이스 구축
-│   │   ├── train_model.py         # 머신러닝 모델 학습
+│   │   ├── train_gpu_main.py     # GPU 머신러닝 모델 학습
 │   │   ├── weight_optimizer.py    # 가중치 최적화
 │   │   ├── backtest.py            # 백테스팅 실행
 │   │   └── run_analysis.py        # 분석 실행
-│   └── run/                       # Flask 실행 스크립트 (Windows/macOS)
+│   └── run/                       # 실행 스크립트 (WSL 환경)
 │
 ├── 💾 데이터 저장소
 │   ├── data/
@@ -187,11 +187,10 @@ pip install -r requirements.txt
 
 ### 3️⃣ **모델 학습**
 ```bash
-# 머신러닝 모델 학습
-python scripts/train_model.py
-# 또는
-run/train_model.command  # macOS
-run/train_model.bat      # Windows
+# GPU 머신러닝 모델 학습 (WSL 환경)
+run/run_train_gpu.bat      # Windows (WSL 실행)
+# 또는 WSL에서 직접 실행
+bash run/sh/train_gpu.sh --n_iter 100 --max_depth 10 20 30 40
 ```
 
 ### 4️⃣ **가중치 최적화**

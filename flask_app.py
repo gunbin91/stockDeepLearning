@@ -1261,8 +1261,7 @@ def get_stock_features(ticker_code):
             'Z_Score_20',
             'Position_Range_60',
             'KOSPI_변동성(1M)',
-            '변동성(1W)',  # 변동성 1주 (표준편차/평균)
-            '변동성(3M)',  # 변동성 3개월 (표준편차/평균)
+            # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
             'MA120_Slope',  # 120일 이동평균선 기울기
             'MA240_Slope',  # 240일 이동평균선 기울기
             'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
@@ -1272,9 +1271,10 @@ def get_stock_features(ticker_code):
             '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
             '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
             'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
+            'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
             'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
-            'ATR_Ratio_Short',  # ATR 비율 단기 (1W / 1M)
-            'ATR_Ratio_Trend',  # ATR 비율 추세 (1M / 3M)
+            'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
+            # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
             'Eff_Ratio_10'  # 효율성 비율 10일
         ]
         
@@ -1384,8 +1384,7 @@ def calculate_feature_correlation():
             'Z_Score_20',
             'Position_Range_60',
             'KOSPI_변동성(1M)',
-            '변동성(1W)',  # 변동성 1주 (표준편차/평균)
-            '변동성(3M)',  # 변동성 3개월 (표준편차/평균)
+            # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
             'MA120_Slope',  # 120일 이동평균선 기울기
             'MA240_Slope',  # 240일 이동평균선 기울기
             'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
@@ -1395,9 +1394,10 @@ def calculate_feature_correlation():
             '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
             '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
             'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
+            'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
             'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
-            'ATR_Ratio_Short',  # ATR 비율 단기 (1W / 1M)
-            'ATR_Ratio_Trend',  # ATR 비율 추세 (1M / 3M)
+            'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
+            # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
             'Eff_Ratio_10'  # 효율성 비율 10일
         ]
         

@@ -13,9 +13,9 @@ echo "🐍 Python 인터프리터 정보:"
 which python
 
 echo "🌐 Flask 웹 애플리케이션을 시작합니다..."
-# 이 스크립트는 run/wsl/sh/ 에 있으므로, 프로젝트 루트는 세 단계 위
+# 이 스크립트는 run/sh/ 에 있으므로, 프로젝트 루트는 두 단계 위
 SCRIPT_DIR=$(dirname $(realpath "$0"))
-PROJECT_ROOT=$(realpath "$SCRIPT_DIR/../../..")
+PROJECT_ROOT=$(realpath "$SCRIPT_DIR/../..")
 cd $PROJECT_ROOT
 
 # flask_app.py 실행
@@ -23,3 +23,4 @@ cd $PROJECT_ROOT
 python flask_app.py "$@"
 
 echo "✅ Flask 앱이 종료되었습니다."
+

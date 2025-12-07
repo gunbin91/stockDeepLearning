@@ -1,68 +1,27 @@
 @echo off
 chcp 65001 > nul
-SET "ROOT_DIR=%~dp0.."
+REM ============================================================================
+REM Batch Script for Running Flask App (WSL Execution)
+REM ============================================================================
+REM This script uses WSL (Windows Subsystem for Linux) to run the
+REM Flask web application in the correct Conda environment to load
+REM the GPU-trained model.
 
-REM 가상 환경 확인
-IF NOT EXIST "%ROOT_DIR%\venv" (
-    echo "가상 환경을 생성합니다..."
-    python -m venv "%ROOT_DIR%\venv"
-    IF %ERRORLEVEL% NEQ 0 (
-        echo "가상 환경 생성에 실패했습니다. Python이 설치되어 있고 PATH에 등록되었는지 확인하세요."
-        pause
-        exit /b
-    )
-)
-
-REM 가상 환경 활성화
-echo "가상 환경을 활성화합니다..."
-CALL "%ROOT_DIR%\venv\Scripts\activate.bat"
-
-REM ==========================================================
-REM 수정된 부분: pip 및 빌드 도구 업그레이드
-REM ==========================================================
-echo "pip, setuptools, wheel을 최신 버전으로 업그레이드합니다..."
-python -m pip install --upgrade pip setuptools wheel
-REM ==========================================================
-
-REM 패키지 설치
-echo "requirements.txt 파일의 패키지를 설치합니다..."
-pip install -r "%ROOT_DIR%\requirements.txt"
-
-REM ==========================================================
-REM pandas_ta posix module import fix for Windows
-REM ==========================================================
-echo "Fixing pandas_ta posix import issue..."
-SET "VENV_SITE_PACKAGES=%ROOT_DIR%\venv\Lib\site-packages"
-SET "ALLIGATOR_FILE=%VENV_SITE_PACKAGES%\pandas_ta\overlap\alligator.py"
-IF EXIST "%ALLIGATOR_FILE%" (
-    powershell -Command "(Get-Content \"%ALLIGATOR_FILE%\") | Where-Object {$_ -notmatch \"from posix import pread\"} | Set-Content \"%ALLIGATOR_FILE%\""
-    IF %ERRORLEVEL% NEQ 0 (
-        echo "Failed to fix pandas_ta posix import issue."
-    ) ELSE (
-        echo "pandas_ta posix import issue fixed."
-    )
-) ELSE (
-    echo "alligator.py not found at %ALLIGATOR_FILE%. Skipping fix."
-)
-REM ==========================================================
-
-REM Flask 앱 실행
-echo "Flask 애플리케이션을 시작합니다..."
-echo "사용 가능한 포트를 자동으로 찾아서 실행합니다..."
 echo.
-echo "디버그 모드를 사용하시겠습니까? (개발 시 유용)"
-echo "y: 디버그 모드 ON (코드 변경 시 자동 재시작, 상세 오류 정보)"
-echo "n: 일반 모드 (안정적이고 빠름)"
+echo Starting Flask web app in WSL environment...
+echo (App logs will be displayed in this window. Press Ctrl+C to exit)
 echo.
-set /p debug_choice="디버그 모드를 사용하시겠습니까? (y/n): "
 
-if /i "%debug_choice%"=="y" (
-    echo 🔧 디버그 모드로 실행합니다...
-    python "%ROOT_DIR%\flask_app.py" --debug
-) else (
-    echo 🚀 일반 모드로 실행합니다...
-    python "%ROOT_DIR%\flask_app.py"
-)
+REM Set the path to the shell script inside WSL
+set "SCRIPT_PATH=%~dp0sh\start_flask.sh"
 
-echo "애플리케이션이 종료되었습니다."
+REM Execute the shell script using wsl.exe
+REM Any arguments passed to this batch file (%*) will be forwarded to the shell script.
+REM e.g., start_flask_app.bat --port 5001
+wsl.exe --cd ~ -u root -- bash -c "source /root/miniconda3/etc/profile.d/conda.sh && conda activate rapids-25.10 && bash $(wslpath -u '%SCRIPT_PATH%') %*"
+
+echo.
+echo Flask app has been terminated.
+echo.
 pause
+

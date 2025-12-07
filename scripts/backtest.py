@@ -762,7 +762,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                     })
             
         except FileNotFoundError as e:
-            error_msg = f"모델 파일을 찾을 수 없습니다. train_model.py 또는 train_gpu_main.py를 먼저 실행해주세요."
+            error_msg = f"모델 파일을 찾을 수 없습니다. train_gpu_main.py를 먼저 실행해주세요."
             log_critical("ML 모델 파일 없음", exception=e, context={"model_file": model_file_path if 'model_file_path' in locals() else "Unknown"})
             raise FileNotFoundError(error_msg)
         except Exception as e:

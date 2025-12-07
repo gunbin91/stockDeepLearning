@@ -18,9 +18,9 @@ which python
 
 echo "🧠 GPU 학습 스크립트를 실행합니다..."
 # 스크립트의 실제 위치를 기준으로 경로 설정
-# 이 스크립트는 run/wsl/sh/ 에 있으므로, 프로젝트 루트는 세 단계 위
+# 이 스크립트는 run/sh/ 에 있으므로, 프로젝트 루트는 두 단계 위
 SCRIPT_DIR=$(dirname $(realpath "$0"))
-PROJECT_ROOT=$(realpath "$SCRIPT_DIR/../../..")
+PROJECT_ROOT=$(realpath "$SCRIPT_DIR/../..")
 cd $PROJECT_ROOT
 
 # python <스크립트 경로> <인자값>
@@ -28,3 +28,4 @@ cd $PROJECT_ROOT
 python scripts/train_gpu_main.py "$@"
 
 echo "✅ 모든 작업이 완료되었습니다."
+
