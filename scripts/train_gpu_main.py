@@ -510,9 +510,10 @@ def prepare_data_and_save(data_path, start_date, end_date):
         'ADX_14',
         'disparity_120',  # 120일 이격도
         'disparity_240',  # 240일 이격도
+        'disparity_20',   # 20일 이격도
         'KOSPI_disparity_20',  # KOSPI 20일 이격도
         # 추가된 피처
-        'Z_Score_20',
+        'Trend_Pullback_Score',  # 추세+눌림 점수
         'Position_Range_60',
         # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
         # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
@@ -536,7 +537,8 @@ def prepare_data_and_save(data_path, start_date, end_date):
         'Log_Return_20',     # 로그 수익률 1개월 (20일)
         'HV_Volatility_20',  # HV 변동성 1개월 (일별 로그 수익률의 20일 표준편차)
         'HV_Volatility_60',  # HV 변동성 3개월 (일별 로그 수익률의 60일 표준편차)
-        'VWAP_Disparity_20',  # VWAP 괴리율 1개월 (20일 기준)
+        'HV_Volatility_5',   # HV 변동성 1주 (일별 로그 수익률의 5일 표준편차)
+        'VWAP_Disparity_5',  # VWAP 괴리율 1주 (5일 기준)
         # Gap 피처 제거
     ]
 
@@ -2059,9 +2061,10 @@ def main():
         'ADX_14',
         'disparity_120',  # 120일 이격도
         'disparity_240',  # 240일 이격도
+        'disparity_20',   # 20일 이격도
         'KOSPI_disparity_20',  # KOSPI 20일 이격도
         # 추가된 피처
-        'Z_Score_20',
+        'Trend_Pullback_Score',
         'Position_Range_60',
         # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
         # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
@@ -2071,20 +2074,20 @@ def main():
         # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
         # 새로 추가된 피처
         'RVOL',  # 상대 거래량 (Relative Volume)
-        'RVOL(1W)',  # 5일/20일 상대 거래량
         '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
         '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
         'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
         'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
         'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
+        'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
         # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
         # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
         
         # 2024년 12월 신규 추가 피처 (3종)
-        'Log_Return_20',     # 로그 수익률 1개월 (20일)
+        'HV_Volatility_5',   # HV 변동성 1주 (일별 로그 수익률의 5일 표준편차)
         'HV_Volatility_20',  # HV 변동성 1개월 (일별 로그 수익률의 20일 표준편차)
         'HV_Volatility_60',  # HV 변동성 3개월 (일별 로그 수익률의 60일 표준편차)
-        'VWAP_Disparity_20',  # VWAP 괴리율 1개월 (20일 기준)
+        'VWAP_Disparity_5',  # VWAP 괴리율 1주 (5일 기준)
         # Gap 피처 제거
     ]
     

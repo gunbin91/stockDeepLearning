@@ -711,17 +711,22 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             else:
                 df['ATRr_5'] = np.nan
             
-            # ATRr_20 계산 (기준 - 1M): "이 종목의 기초 체급은?"
+            # ATRr_20 계산 (기준 - 1M)
             if atr_20 is not None:
                 df['ATRr_20'] = (atr_20 / df['종가']) * 100
             else:
                 df['ATRr_20'] = np.nan
             
-        # ATRr_60 피처 제거
+            # ATRr_60 계산 (기준 - 3M)
+            if atr_60 is not None:
+                df['ATRr_60'] = (atr_60 / df['종가']) * 100
+            else:
+                df['ATRr_60'] = np.nan
         except Exception as e:
             log_warning(f"ATR 계산 실패 ({ticker}): {e}")
             df['ATRr_5'] = np.nan
             df['ATRr_20'] = np.nan
+            df['ATRr_60'] = np.nan
         
         # ATRr_14는 기존 호환성을 위해 유지 (다른 곳에서 사용할 수 있음)
         try:
@@ -779,16 +784,6 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             log_warning(f"RVOL 계산 실패 ({ticker}): {e}")
             df['RVOL'] = np.nan
         
-        # RVOL(1W): 5일 평균 거래량 / 20일 평균 거래량
-        try:
-            거래량_5일_평균 = df['거래량'].rolling(window=5).mean()
-            거래량_20일_평균 = df['거래량'].rolling(window=20).mean()
-            df['RVOL(1W)'] = 거래량_5일_평균 / 거래량_20일_평균
-            df['RVOL(1W)'] = df['RVOL(1W)'].replace([np.inf, -np.inf], np.nan)
-        except Exception as e:
-            log_warning(f"RVOL(1W) 계산 실패 ({ticker}): {e}")
-            df['RVOL(1W)'] = np.nan
-        
         # 시총 회전율 계산
         try:
             # 시총 회전율(1W): 5일 평균 거래대금 / 시가총액 * 100
@@ -805,14 +800,23 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             df['시총 회전율(1W)'] = np.nan
             df['시총 회전율(3M)'] = np.nan
         
-        # Z_Score_20 계산 (표준화 이격)
+        # Z_Score_20 계산 (내부용) 및 Trend_Pullback_Score 생성
         try:
             mean_20 = df['종가'].rolling(20).mean()
             std_20 = df['종가'].rolling(20).std()
-            df['Z_Score_20'] = (df['종가'] - mean_20) / std_20
+            z_score_20 = (df['종가'] - mean_20) / std_20
+            # MA20_Slope 내부 계산용
+            ma20 = df['종가'].rolling(window=20).mean()
+            ma20_slope = calculate_normalized_linear_regression_slope(ma20, window=5)
+            # Trend_Pullback_Score: 상승 추세이면서 눌림(-Z)인 경우만 점수
+            df['Trend_Pullback_Score'] = np.where(
+                (ma20_slope > 0) & (z_score_20 < 0),
+                np.abs(z_score_20) * ma20_slope,
+                0
+            )
         except Exception as e:
-            log_warning(f"Z_Score_20 계산 실패 ({ticker}): {e}")
-            df['Z_Score_20'] = np.nan
+            log_warning(f"Trend_Pullback_Score 계산 실패 ({ticker}): {e}")
+            df['Trend_Pullback_Score'] = np.nan
         
         # Position_Range_60 계산 (Donchian)
         try:
@@ -867,14 +871,6 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         # else:
         #     df['PBR_log'] = np.nan
         
-        # 2-1. [신규 추가] 로그 수익률(1M) (Log Return 1M)
-        # 1개월(20거래일) 간의 로그 수익률 누적
-        try:
-            df['Log_Return_20'] = np.log(df['종가'] / df['종가'].shift(20))
-        except Exception as e:
-            log_warning(f"Log_Return_20 계산 실패 ({ticker}): {e}")
-            df['Log_Return_20'] = np.nan
-            
         # 2-2. [신규 추가] HV변동성(1M) (Historical Volatility 1M)
         # 일별 로그 수익률의 20일 이동 표준편차
         try:
@@ -883,6 +879,15 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         except Exception as e:
             log_warning(f"HV_Volatility_20 계산 실패 ({ticker}): {e}")
             df['HV_Volatility_20'] = np.nan
+        
+        # 2-2-0. [신규 추가] HV변동성(1W) (Historical Volatility 1W)
+        try:
+            if 'log_ret_1d' not in locals():
+                log_ret_1d = np.log(df['종가'] / df['종가'].shift(1))
+            df['HV_Volatility_5'] = log_ret_1d.rolling(window=5).std()
+        except Exception as e:
+            log_warning(f"HV_Volatility_5 계산 실패 ({ticker}): {e}")
+            df['HV_Volatility_5'] = np.nan
         
         # 2-4. [신규 추가] HV변동성(3M) (Historical Volatility 3M)
         # 일별 로그 수익률의 60일 이동 표준편차
@@ -894,29 +899,21 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             log_warning(f"HV_Volatility_60 계산 실패 ({ticker}): {e}")
             df['HV_Volatility_60'] = np.nan
             
-        # 2-3. [신규 추가] VWAP Disparity(1M) (VWAP 괴리율 1개월)
-        # 최근 20일 거래대금 가중 평균 가격 대비 현재가 비율
+        # 2-3. [신규 추가] VWAP Disparity(1W) (VWAP 괴리율 1주)
+        # 최근 5일 거래대금 가중 평균 가격 대비 현재가 비율
         try:
             tp = (df['고가'] + df['저가'] + df['종가']) / 3
             money = tp * df['거래량']
             
-            sum_money_20 = money.rolling(window=20).sum()
-            sum_vol_20 = df['거래량'].rolling(window=20).sum()
+            sum_money_5 = money.rolling(window=5).sum()
+            sum_vol_5 = df['거래량'].rolling(window=5).sum()
             
-            vwap_20 = sum_money_20 / (sum_vol_20 + 1e-9)
-            df['VWAP_Disparity_20'] = (df['종가'] / vwap_20 - 1) * 100
+            vwap_5 = sum_money_5 / (sum_vol_5 + 1e-9)
+            df['VWAP_Disparity_5'] = (df['종가'] / vwap_5 - 1) * 100
         except Exception as e:
-            log_warning(f"VWAP_Disparity_20 계산 실패 ({ticker}): {e}")
-            df['VWAP_Disparity_20'] = np.nan
+            log_warning(f"VWAP_Disparity_5 계산 실패 ({ticker}): {e}")
+            df['VWAP_Disparity_5'] = np.nan
         
-        # 2-1. [신규 추가] 로그 수익률(1M) (Log Return 1M)
-        # 1개월(20거래일) 간의 로그 수익률 누적
-        try:
-            df['Log_Return_20'] = np.log(df['종가'] / df['종가'].shift(20))
-        except Exception as e:
-            log_warning(f"Log_Return_20 계산 실패 ({ticker}): {e}")
-            df['Log_Return_20'] = np.nan
-            
         # 2-2. [신규 추가] HV변동성(1M) (Historical Volatility 1M)
         # 일별 로그 수익률의 20일 이동 표준편차
         try:
@@ -925,26 +922,42 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         except Exception as e:
             log_warning(f"HV_Volatility_20 계산 실패 ({ticker}): {e}")
             df['HV_Volatility_20'] = np.nan
+        
+        # 2-2-0. [신규 추가] HV변동성(1W) (Historical Volatility 1W)
+        try:
+            if 'log_ret_1d' not in locals():
+                log_ret_1d = np.log(df['종가'] / df['종가'].shift(1))
+            df['HV_Volatility_5'] = log_ret_1d.rolling(window=5).std()
+        except Exception as e:
+            log_warning(f"HV_Volatility_5 계산 실패 ({ticker}): {e}")
+            df['HV_Volatility_5'] = np.nan
             
-        # 2-3. [신규 추가] VWAP Disparity(1M) (VWAP 괴리율 1개월)
-        # 최근 20일 거래대금 가중 평균 가격 대비 현재가 비율
+        # 2-3. [신규 추가] VWAP Disparity(1W) (VWAP 괴리율 1주)
+        # 최근 5일 거래대금 가중 평균 가격 대비 현재가 비율
         try:
             tp = (df['고가'] + df['저가'] + df['종가']) / 3
             money = tp * df['거래량']
             
-            sum_money_20 = money.rolling(window=20).sum()
-            sum_vol_20 = df['거래량'].rolling(window=20).sum()
+            sum_money_5 = money.rolling(window=5).sum()
+            sum_vol_5 = df['거래량'].rolling(window=5).sum()
             
-            vwap_20 = sum_money_20 / (sum_vol_20 + 1e-9)
-            df['VWAP_Disparity_20'] = (df['종가'] / vwap_20 - 1) * 100
+            vwap_5 = sum_money_5 / (sum_vol_5 + 1e-9)
+            df['VWAP_Disparity_5'] = (df['종가'] / vwap_5 - 1) * 100
         except Exception as e:
-            log_warning(f"VWAP_Disparity_20 계산 실패 ({ticker}): {e}")
-            df['VWAP_Disparity_20'] = np.nan
+            log_warning(f"VWAP_Disparity_5 계산 실패 ({ticker}): {e}")
+            df['VWAP_Disparity_5'] = np.nan
         
         # 3. 이격도 계산 (120일, 240일) - disparity_20 제거
         for p in [120, 240]:
             ma = df['종가'].rolling(window=p).mean()
             df[f'disparity_{p}'] = (df['종가'] / ma) * 100
+        # disparity_20 추가
+        try:
+            ma20 = df['종가'].rolling(window=20).mean()
+            df['disparity_20'] = (df['종가'] / ma20) * 100
+        except Exception as e:
+            log_warning(f"disparity_20 계산 실패 ({ticker}): {e}")
+            df['disparity_20'] = np.nan
         
         # MA120_Slope 계산 (120일 이동평균선 기울기)
         try:

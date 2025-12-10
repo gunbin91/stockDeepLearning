@@ -455,7 +455,11 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         else:
             latest_data['ATRr_20'] = np.nan
         
-        # ATRr_60 피처 제거
+        # ATRr_60 계산 (기준 - 3M): "중기 추세적 변동성"
+        if atr_60 is not None:
+            latest_data['ATRr_60'] = (atr_60.iloc[-1] / df_for_indicators['종가'].iloc[-1]) * 100
+        else:
+            latest_data['ATRr_60'] = np.nan
         
         # ATRr_14는 기존 호환성을 위해 유지 (다른 곳에서 사용할 수 있음)
         df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
@@ -562,48 +566,61 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             log_warning(f"Log_Return_20 계산 실패 ({ticker}): {e}")
             latest_data['Log_Return_20'] = np.nan
             
-        # [신규 추가] HV변동성(1M) (Historical Volatility 1M)
+        # HV 변동성 (5일, 20일, 60일)
         try:
             log_ret_1d = np.log(df_for_indicators['종가'] / df_for_indicators['종가'].shift(1))
-            if len(log_ret_1d) >= 20:
-                latest_data['HV_Volatility_20'] = log_ret_1d.rolling(window=20).std().iloc[-1]
-            else:
-                latest_data['HV_Volatility_20'] = np.nan
+            latest_data['HV_Volatility_5'] = log_ret_1d.rolling(window=5).std().iloc[-1] if len(log_ret_1d) >= 5 else np.nan
+            latest_data['HV_Volatility_20'] = log_ret_1d.rolling(window=20).std().iloc[-1] if len(log_ret_1d) >= 20 else np.nan
+            latest_data['HV_Volatility_60'] = log_ret_1d.rolling(window=60).std().iloc[-1] if len(log_ret_1d) >= 60 else np.nan
         except Exception as e:
-            log_warning(f"HV_Volatility_20 계산 실패 ({ticker}): {e}")
+            log_warning(f"HV 변동성 계산 실패 ({ticker}): {e}")
+            latest_data['HV_Volatility_5'] = np.nan
             latest_data['HV_Volatility_20'] = np.nan
-        
-        # [신규 추가] HV변동성(3M) (Historical Volatility 3M)
-        try:
-            if 'log_ret_1d' not in locals():
-                log_ret_1d = np.log(df_for_indicators['종가'] / df_for_indicators['종가'].shift(1))
-            if len(log_ret_1d) >= 60:
-                latest_data['HV_Volatility_60'] = log_ret_1d.rolling(window=60).std().iloc[-1]
-            else:
-                latest_data['HV_Volatility_60'] = np.nan
-        except Exception as e:
-            log_warning(f"HV_Volatility_60 계산 실패 ({ticker}): {e}")
             latest_data['HV_Volatility_60'] = np.nan
             
-        # [신규 추가] VWAP Disparity(1M) (VWAP 괴리율 1개월)
+        # disparity_20 추가
         try:
-            if len(df_for_indicators) >= 20:
+            ma20 = df_for_indicators['종가'].rolling(window=20).mean()
+            latest_data['disparity_20'] = (df_for_indicators['종가'] / ma20 * 100).iloc[-1]
+        except Exception as e:
+            log_warning(f"disparity_20 계산 실패 ({ticker}): {e}")
+            latest_data['disparity_20'] = np.nan
+        
+        # VWAP Disparity(1W) (VWAP 괴리율 1주)
+        try:
+            if len(df_for_indicators) >= 5:
                 tp = (df_for_indicators['고가'] + df_for_indicators['저가'] + df_for_indicators['종가']) / 3
                 money = tp * df_for_indicators['거래량']
                 
-                sum_money_20 = money.rolling(window=20).sum().iloc[-1]
-                sum_vol_20 = df_for_indicators['거래량'].rolling(window=20).sum().iloc[-1]
+                sum_money_5 = money.rolling(window=5).sum().iloc[-1]
+                sum_vol_5 = df_for_indicators['거래량'].rolling(window=5).sum().iloc[-1]
                 
-                if sum_vol_20 > 0:
-                    vwap_20 = sum_money_20 / sum_vol_20
-                    latest_data['VWAP_Disparity_20'] = (df_for_indicators['종가'].iloc[-1] / vwap_20 - 1) * 100
+                if sum_vol_5 > 0:
+                    vwap_5 = sum_money_5 / sum_vol_5
+                    latest_data['VWAP_Disparity_5'] = (df_for_indicators['종가'].iloc[-1] / vwap_5 - 1) * 100
                 else:
-                    latest_data['VWAP_Disparity_20'] = np.nan
+                    latest_data['VWAP_Disparity_5'] = np.nan
             else:
-                latest_data['VWAP_Disparity_20'] = np.nan
+                latest_data['VWAP_Disparity_5'] = np.nan
         except Exception as e:
-            log_warning(f"VWAP_Disparity_20 계산 실패 ({ticker}): {e}")
-            latest_data['VWAP_Disparity_20'] = np.nan
+            log_warning(f"VWAP_Disparity_5 계산 실패 ({ticker}): {e}")
+            latest_data['VWAP_Disparity_5'] = np.nan
+
+        # Trend_Pullback_Score (내부 MA20_Slope 활용)
+        try:
+            ma20 = df_for_indicators['종가'].rolling(window=20).mean()
+            ma20_slope = calculate_normalized_linear_regression_slope_latest(ma20, window=5)
+            mean_20 = df_for_indicators['종가'].rolling(20).mean()
+            std_20 = df_for_indicators['종가'].rolling(20).std()
+            z_score_20 = (df_for_indicators['종가'] - mean_20) / std_20
+            if len(z_score_20) > 0:
+                latest_score = np.abs(z_score_20.iloc[-1]) * ma20_slope if (ma20_slope > 0 and z_score_20.iloc[-1] < 0) else 0
+                latest_data['Trend_Pullback_Score'] = latest_score
+            else:
+                latest_data['Trend_Pullback_Score'] = np.nan
+        except Exception as e:
+            log_warning(f"Trend_Pullback_Score 계산 실패 ({ticker}): {e}")
+            latest_data['Trend_Pullback_Score'] = np.nan
             
         # MA120_Slope 계산 (회귀 윈도우 20)
         try:
