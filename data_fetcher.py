@@ -314,20 +314,20 @@ def _fetch_macro_data(start_date, end_date):
                     ma = kospi_close.rolling(window=period).mean()
                     macro_df[f'KOSPI_disparity_{period}'] = (kospi_close / ma) * 100
                 
-                # KOSPI 변동성 1M 계산 (20일 기준)
-                try:
-                    kospi_std_20 = kospi_close.rolling(window=20).std()
-                    kospi_mean_20 = kospi_close.rolling(window=20).mean()
-                    macro_df['KOSPI_변동성(1M)'] = kospi_std_20 / kospi_mean_20
-                except Exception as e:
-                    log_warning(f"KOSPI 변동성(1M) 계산 실패: {e}")
-                    macro_df['KOSPI_변동성(1M)'] = np.nan
+                # KOSPI 변동성 1M 계산 (20일 기준) - 2024년 12월 제거
+                # try:
+                #     kospi_std_20 = kospi_close.rolling(window=20).std()
+                #     kospi_mean_20 = kospi_close.rolling(window=20).mean()
+                #     macro_df['KOSPI_변동성(1M)'] = kospi_std_20 / kospi_mean_20
+                # except Exception as e:
+                #     log_warning(f"KOSPI 변동성(1M) 계산 실패: {e}")
+                #     macro_df['KOSPI_변동성(1M)'] = np.nan
                 
                 # KOSPI_MA20_Slope 계산 (KOSPI 20일 이동평균선 기울기)
                 try:
                     from data_processor import calculate_normalized_linear_regression_slope
                     kospi_ma20 = kospi_close.rolling(window=20).mean()
-                    macro_df['KOSPI_MA20_Slope'] = calculate_normalized_linear_regression_slope(kospi_ma20, window=5)
+                    macro_df['KOSPI_MA20_Slope'] = calculate_normalized_linear_regression_slope(kospi_ma20, window=20)
                 except Exception as e:
                     log_warning(f"KOSPI_MA20_Slope 계산 실패: {e}")
                     macro_df['KOSPI_MA20_Slope'] = np.nan
@@ -395,6 +395,18 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             log_warning(f"RVOL 계산 실패 ({ticker}): {e}")
             latest_data['RVOL'] = np.nan
         
+        # RVOL(1W): 5일 평균 거래량 / 20일 평균 거래량
+        try:
+            거래량_5일_평균 = df_for_indicators['거래량'].rolling(window=5).mean().iloc[-1]
+            거래량_20일_평균 = df_for_indicators['거래량'].rolling(window=20).mean().iloc[-1]
+            if pd.notna(거래량_5일_평균) and pd.notna(거래량_20일_평균) and 거래량_20일_평균 > 0:
+                latest_data['RVOL(1W)'] = 거래량_5일_평균 / 거래량_20일_평균
+            else:
+                latest_data['RVOL(1W)'] = np.nan
+        except Exception as e:
+            log_warning(f"RVOL(1W) 계산 실패 ({ticker}): {e}")
+            latest_data['RVOL(1W)'] = np.nan
+        
         # 시총 회전율 계산
         try:
             시가총액 = reference_date_price * shares
@@ -443,11 +455,7 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         else:
             latest_data['ATRr_20'] = np.nan
         
-        # ATRr_60 계산 (기준 - 3M): "3개월 기준 변동성 수준"
-        if atr_60 is not None:
-            latest_data['ATRr_60'] = (atr_60.iloc[-1] / df_for_indicators['종가'].iloc[-1]) * 100
-        else:
-            latest_data['ATRr_60'] = np.nan
+        # ATRr_60 피처 제거
         
         # ATRr_14는 기존 호환성을 위해 유지 (다른 곳에서 사용할 수 있음)
         df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
@@ -516,17 +524,17 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         
         # 변동성(1W), 변동성(3M) 피처 제거됨 (2024년 12월)
         
-        # Eff_Ratio_10 계산 (효율성 비율)
-        try:
-            change = df_for_indicators['종가'].diff(10).abs()
-            volatility = df_for_indicators['종가'].diff(1).abs().rolling(10).sum()
-            if pd.notna(change.iloc[-1]) and pd.notna(volatility.iloc[-1]):
-                latest_data['Eff_Ratio_10'] = change.iloc[-1] / (volatility.iloc[-1] + 1e-9)
-            else:
-                latest_data['Eff_Ratio_10'] = np.nan
-        except Exception as e:
-            log_warning(f"Eff_Ratio_10 계산 실패 ({ticker}): {e}")
-            latest_data['Eff_Ratio_10'] = np.nan
+        # Eff_Ratio_10 계산 (효율성 비율) - 2024년 12월 제거
+        # try:
+        #     change = df_for_indicators['종가'].diff(10).abs()
+        #     volatility = df_for_indicators['종가'].diff(1).abs().rolling(10).sum()
+        #     if pd.notna(change.iloc[-1]) and pd.notna(volatility.iloc[-1]):
+        #         latest_data['Eff_Ratio_10'] = change.iloc[-1] / (volatility.iloc[-1] + 1e-9)
+        #     else:
+        #         latest_data['Eff_Ratio_10'] = np.nan
+        # except Exception as e:
+        #     log_warning(f"Eff_Ratio_10 계산 실패 ({ticker}): {e}")
+        #     latest_data['Eff_Ratio_10'] = np.nan
         
         # OBV는 OBV_Slope 계산에만 사용되므로 피처 리스트에서 제외
         # RSI_14는 RSI_Signal_Oscillator 계산에만 사용되므로 피처 리스트에서 제외
@@ -537,11 +545,87 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
 
         latest_data.update(fs_data.iloc[0].to_dict())
         
-        # PBR_log 계산 (PBR 로그 변환)
-        if 'PBR' in latest_data and pd.notna(latest_data['PBR']) and latest_data['PBR'] > 0:
-            latest_data['PBR_log'] = np.log(latest_data['PBR'])
-        else:
-            latest_data['PBR_log'] = np.nan
+        # PBR_log 계산 (PBR 로그 변환) - 2024년 12월 제거
+        # if 'PBR' in latest_data and pd.notna(latest_data['PBR']) and latest_data['PBR'] > 0:
+        #     latest_data['PBR_log'] = np.log(latest_data['PBR'])
+        # else:
+        #     latest_data['PBR_log'] = np.nan
+            
+        # [신규 추가] 로그 수익률(1M) (Log Return 1M)
+        try:
+            # 최근 20일 전 데이터가 있어야 계산 가능
+            if len(df_for_indicators) >= 21:
+                latest_data['Log_Return_20'] = np.log(df_for_indicators['종가'].iloc[-1] / df_for_indicators['종가'].shift(20).iloc[-1])
+            else:
+                latest_data['Log_Return_20'] = np.nan
+        except Exception as e:
+            log_warning(f"Log_Return_20 계산 실패 ({ticker}): {e}")
+            latest_data['Log_Return_20'] = np.nan
+            
+        # [신규 추가] HV변동성(1M) (Historical Volatility 1M)
+        try:
+            log_ret_1d = np.log(df_for_indicators['종가'] / df_for_indicators['종가'].shift(1))
+            if len(log_ret_1d) >= 20:
+                latest_data['HV_Volatility_20'] = log_ret_1d.rolling(window=20).std().iloc[-1]
+            else:
+                latest_data['HV_Volatility_20'] = np.nan
+        except Exception as e:
+            log_warning(f"HV_Volatility_20 계산 실패 ({ticker}): {e}")
+            latest_data['HV_Volatility_20'] = np.nan
+        
+        # [신규 추가] HV변동성(3M) (Historical Volatility 3M)
+        try:
+            if 'log_ret_1d' not in locals():
+                log_ret_1d = np.log(df_for_indicators['종가'] / df_for_indicators['종가'].shift(1))
+            if len(log_ret_1d) >= 60:
+                latest_data['HV_Volatility_60'] = log_ret_1d.rolling(window=60).std().iloc[-1]
+            else:
+                latest_data['HV_Volatility_60'] = np.nan
+        except Exception as e:
+            log_warning(f"HV_Volatility_60 계산 실패 ({ticker}): {e}")
+            latest_data['HV_Volatility_60'] = np.nan
+            
+        # [신규 추가] VWAP Disparity(1M) (VWAP 괴리율 1개월)
+        try:
+            if len(df_for_indicators) >= 20:
+                tp = (df_for_indicators['고가'] + df_for_indicators['저가'] + df_for_indicators['종가']) / 3
+                money = tp * df_for_indicators['거래량']
+                
+                sum_money_20 = money.rolling(window=20).sum().iloc[-1]
+                sum_vol_20 = df_for_indicators['거래량'].rolling(window=20).sum().iloc[-1]
+                
+                if sum_vol_20 > 0:
+                    vwap_20 = sum_money_20 / sum_vol_20
+                    latest_data['VWAP_Disparity_20'] = (df_for_indicators['종가'].iloc[-1] / vwap_20 - 1) * 100
+                else:
+                    latest_data['VWAP_Disparity_20'] = np.nan
+            else:
+                latest_data['VWAP_Disparity_20'] = np.nan
+        except Exception as e:
+            log_warning(f"VWAP_Disparity_20 계산 실패 ({ticker}): {e}")
+            latest_data['VWAP_Disparity_20'] = np.nan
+            
+        # MA120_Slope 계산 (회귀 윈도우 20)
+        try:
+            if len(df_for_indicators) >= 120:
+                ma120_series = df_for_indicators['종가'].rolling(window=120).mean()
+                latest_data['MA120_Slope'] = calculate_normalized_linear_regression_slope_latest(ma120_series, window=5)
+            else:
+                latest_data['MA120_Slope'] = np.nan
+        except Exception as e:
+            log_warning(f"MA120_Slope 계산 실패 ({ticker}): {e}")
+            latest_data['MA120_Slope'] = np.nan
+        
+        # MA240_Slope 계산 (회귀 윈도우 20)
+        try:
+            if len(df_for_indicators) >= 240:
+                ma240_series = df_for_indicators['종가'].rolling(window=240).mean()
+                latest_data['MA240_Slope'] = calculate_normalized_linear_regression_slope_latest(ma240_series, window=5)
+            else:
+                latest_data['MA240_Slope'] = np.nan
+        except Exception as e:
+            log_warning(f"MA240_Slope 계산 실패 ({ticker}): {e}")
+            latest_data['MA240_Slope'] = np.nan
         
         latest_data['종목명'] = stock_info['종목명']
         latest_data['현재가'] = latest_current_price

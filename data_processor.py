@@ -531,14 +531,14 @@ def _fetch_macro_data(start_date, end_date):
                     ma = kospi_close.rolling(window=period).mean()
                     macro_df[f'KOSPI_disparity_{period}'] = (kospi_close / ma) * 100
                 
-                # KOSPI 변동성 1M 계산 (20일 기준)
-                try:
-                    kospi_std_20 = kospi_close.rolling(window=20).std()
-                    kospi_mean_20 = kospi_close.rolling(window=20).mean()
-                    macro_df['KOSPI_변동성(1M)'] = kospi_std_20 / kospi_mean_20
-                except Exception as e:
-                    log_warning(f"KOSPI 변동성(1M) 계산 실패: {e}")
-                    macro_df['KOSPI_변동성(1M)'] = np.nan
+                # KOSPI 변동성 1M 계산 (20일 기준) - 2024년 12월 제거
+                # try:
+                #     kospi_std_20 = kospi_close.rolling(window=20).std()
+                #     kospi_mean_20 = kospi_close.rolling(window=20).mean()
+                #     macro_df['KOSPI_변동성(1M)'] = kospi_std_20 / kospi_mean_20
+                # except Exception as e:
+                #     log_warning(f"KOSPI 변동성(1M) 계산 실패: {e}")
+                #     macro_df['KOSPI_변동성(1M)'] = np.nan
                 
                 # KOSPI_MA20_Slope 계산 (KOSPI 20일 이동평균선 기울기)
                 try:
@@ -717,16 +717,11 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             else:
                 df['ATRr_20'] = np.nan
             
-            # ATRr_60 계산 (기준 - 3M): "3개월 기준 변동성 수준"
-            if atr_60 is not None:
-                df['ATRr_60'] = (atr_60 / df['종가']) * 100
-            else:
-                df['ATRr_60'] = np.nan
+        # ATRr_60 피처 제거
         except Exception as e:
             log_warning(f"ATR 계산 실패 ({ticker}): {e}")
             df['ATRr_5'] = np.nan
             df['ATRr_20'] = np.nan
-            df['ATRr_60'] = np.nan
         
         # ATRr_14는 기존 호환성을 위해 유지 (다른 곳에서 사용할 수 있음)
         try:
@@ -784,6 +779,16 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             log_warning(f"RVOL 계산 실패 ({ticker}): {e}")
             df['RVOL'] = np.nan
         
+        # RVOL(1W): 5일 평균 거래량 / 20일 평균 거래량
+        try:
+            거래량_5일_평균 = df['거래량'].rolling(window=5).mean()
+            거래량_20일_평균 = df['거래량'].rolling(window=20).mean()
+            df['RVOL(1W)'] = 거래량_5일_평균 / 거래량_20일_평균
+            df['RVOL(1W)'] = df['RVOL(1W)'].replace([np.inf, -np.inf], np.nan)
+        except Exception as e:
+            log_warning(f"RVOL(1W) 계산 실패 ({ticker}): {e}")
+            df['RVOL(1W)'] = np.nan
+        
         # 시총 회전율 계산
         try:
             # 시총 회전율(1W): 5일 평균 거래대금 / 시가총액 * 100
@@ -822,16 +827,16 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         
         # 변동성(1W), 변동성(3M) 피처 제거됨 (2024년 12월)
         
-        # Eff_Ratio_10 계산 (효율성 비율)
-        try:
-            change = df['종가'].diff(10).abs()
-            volatility = df['종가'].diff(1).abs().rolling(10).sum()
-            df['Eff_Ratio_10'] = change / (volatility + 1e-9)
-            # 무한대 값 처리
-            df['Eff_Ratio_10'] = df['Eff_Ratio_10'].replace([np.inf, -np.inf], np.nan)
-        except Exception as e:
-            log_warning(f"Eff_Ratio_10 계산 실패 ({ticker}): {e}")
-            df['Eff_Ratio_10'] = np.nan
+        # Eff_Ratio_10 계산 (효율성 비율) - 2024년 12월 제거
+        # try:
+        #     change = df['종가'].diff(10).abs()
+        #     volatility = df['종가'].diff(1).abs().rolling(10).sum()
+        #     df['Eff_Ratio_10'] = change / (volatility + 1e-9)
+        #     # 무한대 값 처리
+        #     df['Eff_Ratio_10'] = df['Eff_Ratio_10'].replace([np.inf, -np.inf], np.nan)
+        # except Exception as e:
+        #     log_warning(f"Eff_Ratio_10 계산 실패 ({ticker}): {e}")
+        #     df['Eff_Ratio_10'] = np.nan
         
         # 재무데이터 관련 지표 (백업 프로젝트와 동일)
         if 'PER' in df.columns and not df['PER'].isnull().all():
@@ -853,14 +858,88 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         df.loc[mask, 'log_mktcap'] = np.log(df.loc[mask, '시가총액'])
         
         
-        # 2. PBR_log (PBR 로그 변환)
+        # 2. PBR_log (PBR 로그 변환) - 2024년 12월 제거
         # PBR이 0보다 큰 경우에만 로그 적용 (경고 방지)
-        df['PBR_log'] = np.nan  # float 타입으로 초기화
-        if 'PBR' in df.columns:
-            pbr_mask = df['PBR'] > 0
-            df.loc[pbr_mask, 'PBR_log'] = np.log(df.loc[pbr_mask, 'PBR'])
-        else:
-            df['PBR_log'] = np.nan
+        # df['PBR_log'] = np.nan  # float 타입으로 초기화
+        # if 'PBR' in df.columns:
+        #     pbr_mask = df['PBR'] > 0
+        #     df.loc[pbr_mask, 'PBR_log'] = np.log(df.loc[pbr_mask, 'PBR'])
+        # else:
+        #     df['PBR_log'] = np.nan
+        
+        # 2-1. [신규 추가] 로그 수익률(1M) (Log Return 1M)
+        # 1개월(20거래일) 간의 로그 수익률 누적
+        try:
+            df['Log_Return_20'] = np.log(df['종가'] / df['종가'].shift(20))
+        except Exception as e:
+            log_warning(f"Log_Return_20 계산 실패 ({ticker}): {e}")
+            df['Log_Return_20'] = np.nan
+            
+        # 2-2. [신규 추가] HV변동성(1M) (Historical Volatility 1M)
+        # 일별 로그 수익률의 20일 이동 표준편차
+        try:
+            log_ret_1d = np.log(df['종가'] / df['종가'].shift(1))
+            df['HV_Volatility_20'] = log_ret_1d.rolling(window=20).std()
+        except Exception as e:
+            log_warning(f"HV_Volatility_20 계산 실패 ({ticker}): {e}")
+            df['HV_Volatility_20'] = np.nan
+        
+        # 2-4. [신규 추가] HV변동성(3M) (Historical Volatility 3M)
+        # 일별 로그 수익률의 60일 이동 표준편차
+        try:
+            if 'log_ret_1d' not in locals():
+                log_ret_1d = np.log(df['종가'] / df['종가'].shift(1))
+            df['HV_Volatility_60'] = log_ret_1d.rolling(window=60).std()
+        except Exception as e:
+            log_warning(f"HV_Volatility_60 계산 실패 ({ticker}): {e}")
+            df['HV_Volatility_60'] = np.nan
+            
+        # 2-3. [신규 추가] VWAP Disparity(1M) (VWAP 괴리율 1개월)
+        # 최근 20일 거래대금 가중 평균 가격 대비 현재가 비율
+        try:
+            tp = (df['고가'] + df['저가'] + df['종가']) / 3
+            money = tp * df['거래량']
+            
+            sum_money_20 = money.rolling(window=20).sum()
+            sum_vol_20 = df['거래량'].rolling(window=20).sum()
+            
+            vwap_20 = sum_money_20 / (sum_vol_20 + 1e-9)
+            df['VWAP_Disparity_20'] = (df['종가'] / vwap_20 - 1) * 100
+        except Exception as e:
+            log_warning(f"VWAP_Disparity_20 계산 실패 ({ticker}): {e}")
+            df['VWAP_Disparity_20'] = np.nan
+        
+        # 2-1. [신규 추가] 로그 수익률(1M) (Log Return 1M)
+        # 1개월(20거래일) 간의 로그 수익률 누적
+        try:
+            df['Log_Return_20'] = np.log(df['종가'] / df['종가'].shift(20))
+        except Exception as e:
+            log_warning(f"Log_Return_20 계산 실패 ({ticker}): {e}")
+            df['Log_Return_20'] = np.nan
+            
+        # 2-2. [신규 추가] HV변동성(1M) (Historical Volatility 1M)
+        # 일별 로그 수익률의 20일 이동 표준편차
+        try:
+            log_ret_1d = np.log(df['종가'] / df['종가'].shift(1))
+            df['HV_Volatility_20'] = log_ret_1d.rolling(window=20).std()
+        except Exception as e:
+            log_warning(f"HV_Volatility_20 계산 실패 ({ticker}): {e}")
+            df['HV_Volatility_20'] = np.nan
+            
+        # 2-3. [신규 추가] VWAP Disparity(1M) (VWAP 괴리율 1개월)
+        # 최근 20일 거래대금 가중 평균 가격 대비 현재가 비율
+        try:
+            tp = (df['고가'] + df['저가'] + df['종가']) / 3
+            money = tp * df['거래량']
+            
+            sum_money_20 = money.rolling(window=20).sum()
+            sum_vol_20 = df['거래량'].rolling(window=20).sum()
+            
+            vwap_20 = sum_money_20 / (sum_vol_20 + 1e-9)
+            df['VWAP_Disparity_20'] = (df['종가'] / vwap_20 - 1) * 100
+        except Exception as e:
+            log_warning(f"VWAP_Disparity_20 계산 실패 ({ticker}): {e}")
+            df['VWAP_Disparity_20'] = np.nan
         
         # 3. 이격도 계산 (120일, 240일) - disparity_20 제거
         for p in [120, 240]:
@@ -887,12 +966,13 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         df['52주_최고가'] = df['종가'].rolling(250).max()
         df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
         
-        # target 변수 생성 (10일 내 5% 이하로 떨어지지 않고 8% 이상 상승)
+        # target 변수 생성 (10일 내 5% 이하로 떨어지지 않고 7% 이상 상승)
         # 10일 후부터 역방향으로 10일 윈도우의 최소값과 최대값 계산
         min_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).min()
         max_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).max()
-        # 조건: 최소값 >= 현재가격 * 0.95 (5% 이하로 떨어지지 않음) AND 최대값 >= 현재가격 * 1.08 (8% 이상 상승)
-        df['target'] = ((min_price_10d / df['종가'] >= 0.95) & (max_price_10d / df['종가'] > 1.08)).astype(int)
+        # 조건: 최소값 >= 현재가격 * 0.95 (5% 이하로 떨어지지 않음) AND 최대값 >= 현재가격 * 1.07 (7% 이상 상승)
+        df['target'] = ((min_price_10d / df['종가'] >= 0.95) & (max_price_10d / df['종가'] > 1.07)).astype(int)
+        
         # 중간 변수 삭제 (메모리 최적화)
         del min_price_10d, max_price_10d
         df['종목코드'] = ticker

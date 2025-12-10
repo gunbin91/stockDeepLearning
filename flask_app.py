@@ -1254,28 +1254,29 @@ def get_stock_features(ticker_code):
             'log_mktcap',
             '52주_신고가_비율',
             'ADX_14',
-            'disparity_120',  # 120일 이격도
-            'disparity_240',  # 240일 이격도
+            'disparity_120',     # 120일 이격도
+            'disparity_240',     # 240일 이격도
             'KOSPI_disparity_20',  # KOSPI 20일 이격도
             # 추가된 피처
             'Z_Score_20',
             'Position_Range_60',
-            'KOSPI_변동성(1M)',
+            # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
             # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
-            'MA120_Slope',  # 120일 이동평균선 기울기
-            'MA240_Slope',  # 240일 이동평균선 기울기
+            'MA120_Slope',   # 120일 이동평균선 기울기
+            'MA240_Slope',   # 240일 이동평균선 기울기
             'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
-            'PBR_log',  # PBR 로그 변환
+            # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
             # 새로 추가된 피처
             'RVOL',  # 상대 거래량 (Relative Volume)
+            'RVOL(1W)',  # 5일/20일 상대 거래량
             '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
             '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
             'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
             'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
             'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
-            'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
+            # 'ATRr_60',  # ATR 비율 60일 (제거)
             # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
-            'Eff_Ratio_10'  # 효율성 비율 10일
+            # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
         ]
         
         # 등락율 계산 등 다른 부분에 영향있는 필수 피처 (표시용)
@@ -1383,12 +1384,12 @@ def calculate_feature_correlation():
             # 추가된 피처
             'Z_Score_20',
             'Position_Range_60',
-            'KOSPI_변동성(1M)',
+            # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
             # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
             'MA120_Slope',  # 120일 이동평균선 기울기
             'MA240_Slope',  # 240일 이동평균선 기울기
             'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
-            'PBR_log',  # PBR 로그 변환
+            # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
             # 새로 추가된 피처
             'RVOL',  # 상대 거래량 (Relative Volume)
             '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
@@ -1398,7 +1399,7 @@ def calculate_feature_correlation():
             'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
             'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
             # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
-            'Eff_Ratio_10'  # 효율성 비율 10일
+            # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
         ]
         
         data_source = None

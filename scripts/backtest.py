@@ -652,10 +652,12 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             
             test_data = data_processor.get_preprocessed_data(backtest_start_date_with_warmup, end_date)
             
+            # 즉시 빈 데이터 검증 (초기 수집/병합 실패 조기 발견)
             if test_data is None or test_data.empty:
                 log_critical("백테스팅 데이터가 비어있습니다", context={
                     "start_date": backtest_start_date_with_warmup,
-                    "end_date": end_date
+                    "end_date": end_date,
+                    "hint": "가격/재무 수집 실패 또는 날짜 구간에 데이터 부재"
                 })
                 raise ValueError("백테스팅 데이터가 비어있습니다")
             

@@ -266,6 +266,58 @@ def check_gpu_memory_fragmentation():
         return False, {}
 
 
+def calculate_dynamic_batch_size(model_params, val_size):
+    """
+    모델 복잡도에 따른 동적 배치 크기 계산 (VRAM 8GB 기준)
+    
+    max_samples·max_features·min_samples_leaf을 반영해
+    트리 수/깊이가 크고 샘플을 많이 쓰는 모델일수록 더 작은 배치로 조정.
+    
+    Returns:
+        batch_size: 배치 크기 (None이면 배치 처리 불필요)
+    """
+    n_est = model_params.get('n_estimators', 300)
+    max_d = model_params.get('max_depth', 20)
+    max_samples = model_params.get('max_samples', 1.0) or 1.0
+    max_features = model_params.get('max_features', 1.0) or 1.0
+    min_leaf = model_params.get('min_samples_leaf', 32) or 32
+    
+    # 복잡도 점수: 트리 규모 * 입력 크기
+    # - max_samples, max_features가 클수록, leaf가 작을수록 점수 ↑
+    # - leaf가 0/None이면 32로 보호
+    min_leaf = max(1, min_leaf)
+    complexity_score = (
+        n_est * max_d * max_samples * max_features * (32.0 / min_leaf) * val_size
+    )
+    
+    # 기본 분기 (8GB 기준)
+    if complexity_score < 2_000_000_000:          # 20억 미만
+        batch_size = None                          # 배치 불필요
+    elif complexity_score < 5_000_000_000:        # 50억 미만
+        batch_size = 250_000
+    elif complexity_score < 10_000_000_000:       # 100억 미만
+        batch_size = 150_000
+    else:                                         # 100억 이상
+        batch_size = 100_000
+    
+    # 위험 플래그: 두 개 이상이면 한 단계 추가 축소
+    risk_flags = 0
+    if max_samples >= 0.9:
+        risk_flags += 1
+    if min_leaf < 32:
+        risk_flags += 1
+    if (n_est * max_d) > 7_000:
+        risk_flags += 1
+    
+    if risk_flags >= 2 and batch_size is not None:
+        if batch_size > 180_000:
+            batch_size = 150_000
+        elif batch_size > 120_000:
+            batch_size = 100_000
+    
+    return batch_size
+
+
 def enhanced_gpu_memory_cleanup(force_defrag=False):
     """
     향상된 GPU 메모리 정리 함수 (파편화 모니터링 포함)
@@ -462,22 +514,30 @@ def prepare_data_and_save(data_path, start_date, end_date):
         # 추가된 피처
         'Z_Score_20',
         'Position_Range_60',
-        'KOSPI_변동성(1M)',
+        # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
         # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
         'MA120_Slope',  # 120일 이동평균선 기울기
         'MA240_Slope',  # 240일 이동평균선 기울기
         'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
-        'PBR_log',  # PBR 로그 변환
+        # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
         # 새로 추가된 피처
         'RVOL',  # 상대 거래량 (Relative Volume)
+        'RVOL(1W)',  # 5일/20일 상대 거래량
         '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
         '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
         'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
         'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
         'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
-        'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
+        # 'ATRr_60',  # ATR 비율 60일 (제거)
         # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
-        'Eff_Ratio_10'  # 효율성 비율 10일
+        # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
+        
+        # 2024년 12월 신규 추가 피처 (3종)
+        'Log_Return_20',     # 로그 수익률 1개월 (20일)
+        'HV_Volatility_20',  # HV 변동성 1개월 (일별 로그 수익률의 20일 표준편차)
+        'HV_Volatility_60',  # HV 변동성 3개월 (일별 로그 수익률의 60일 표준편차)
+        'VWAP_Disparity_20',  # VWAP 괴리율 1개월 (20일 기준)
+        # Gap 피처 제거
     ]
 
     try:
@@ -766,7 +826,7 @@ def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days
     
     return fold_ranges
 
-def _process_single_file(file_path, features, start_date, end_date):
+def _process_single_file(file_path, features, start_date, end_date, include_crash_pattern=False):
     """
     단일 파일을 처리하는 헬퍼 함수 (워커 스레드에서 실행)
     
@@ -775,6 +835,7 @@ def _process_single_file(file_path, features, start_date, end_date):
         features: 사용할 피처 리스트
         start_date: 시작 날짜 (pd.Timestamp)
         end_date: 종료 날짜 (pd.Timestamp)
+        include_crash_pattern: True이면 급락 패턴 정보도 계산 (샘플링용)
     
     Returns:
         pandas.DataFrame 또는 None (처리 실패 시)
@@ -798,6 +859,22 @@ def _process_single_file(file_path, features, start_date, end_date):
         # target 컬럼 확인
         if 'target' not in df.columns:
             return None
+        
+        # 급락 패턴 계산 (샘플링용)
+        # 원본 데이터를 다시 읽어서 종가 정보로 계산
+        if include_crash_pattern:
+            try:
+                # 종목코드 추출
+                ticker = os.path.basename(file_path).replace('.feather', '')
+                
+                # 원본 데이터에서 종가 정보 읽기 (data_processor를 통해)
+                # 간단하게: 원본 feather 파일에는 종가가 없으므로
+                # data_processor.get_preprocessed_data를 다시 호출하는 것은 비효율적
+                # 대신 샘플링 시점에 별도로 처리
+                # 여기서는 일단 계산하지 않음
+                pass
+            except Exception:
+                pass
         
         # Forward Fill (CPU에서 처리)
         # features 컬럼만 ffill 적용
@@ -825,6 +902,58 @@ def _process_single_file(file_path, features, start_date, end_date):
     except Exception as e:
         log_warning(f"   ⚠️ 파일 {file_path} 처리 실패: {e}")
         return None
+
+def _load_crash_pattern_data(file_paths, start_date, end_date, max_workers=4):
+    """
+    급락 패턴 식별을 위해 원본 데이터에서 종가 정보를 로드하는 함수
+    
+    Args:
+        file_paths: feather 파일 경로 리스트
+        start_date: 시작 날짜
+        end_date: 종료 날짜
+        max_workers: 병렬 워커 수
+    
+    Returns:
+        dict: {인덱스: bool} - 급락 패턴 여부 (10일 내 -20% 이하로 떨어진 경우 True)
+    """
+    crash_pattern_map = {}
+    
+    def _load_single_crash_pattern(file_path):
+        """단일 파일에서 급락 패턴 계산"""
+        try:
+            df = pd.read_feather(file_path)
+            if 'date' not in df.columns:
+                return {}
+            
+            df['date'] = pd.to_datetime(df['date'])
+            mask = (df['date'] >= start_date) & (df['date'] < end_date)
+            df = df.loc[mask]
+            
+            if df.empty:
+                return {}
+            
+            # 종가 정보가 있는지 확인 (feather 파일에는 없을 수 있음)
+            # 원본 데이터를 다시 읽어야 함
+            # 일단 target만 사용하고, 나중에 개선
+            return {}
+        except Exception:
+            return {}
+    
+    # 병렬 처리로 급락 패턴 계산
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_file = {
+            executor.submit(_load_single_crash_pattern, file_path): file_path
+            for file_path in file_paths
+        }
+        
+        for future in as_completed(future_to_file):
+            try:
+                result = future.result()
+                crash_pattern_map.update(result)
+            except Exception:
+                continue
+    
+    return crash_pattern_map
 
 def _process_batch(batch_files, features, start_date, end_date, max_workers=4):
     """
@@ -879,12 +1008,13 @@ def load_data_period(file_paths, features, start_date, end_date, imputation_map=
         max_workers: 병렬 워커 수 (기본값: 4)
     
     Returns:
-        (X, y, imputation_map) 튜플
-        - Train 모드: (X_train, y_train, calculated_map)
-        - Val 모드: (X_val, y_val, None)
+        (X, y, imputation_map, meta_data) 튜플
+        - Train 모드: (X_train, y_train, calculated_map, meta_data)
+        - Val 모드: (X_val, y_val, None, meta_data)
+        - meta_data: pandas DataFrame with 'date' and '종목코드' columns (None if not available)
     """
     if not file_paths:
-        return None, None, None
+        return None, None, None, None
     
     # 날짜 타입 변환
     if isinstance(start_date, str):
@@ -958,7 +1088,7 @@ def load_data_period(file_paths, features, start_date, end_date, imputation_map=
         
         if not all_dfs:
             log_warning("   ⚠️ 처리된 데이터가 없습니다.")
-            return None, None, None
+            return None, None, None, None
         
         if failed_count > 0:
             log_warning(f"   ⚠️ {failed_count}개 파일 처리 실패 (총 {total_files}개 중)")
@@ -1063,7 +1193,6 @@ def objective(trial, fold_data_cache, features, max_depth_list, rng):
         'split_criterion': trial.suggest_categorical('split_criterion', [0, 1]),
         'random_state': 42,
         'n_streams': 1,
-        'n_bins': 256,  # 히스토그램 bin 개수 (기본값 128에서 256으로 증가)
     }
 
     log_info(f"   📋 파라미터: n_estimators={params['n_estimators']}, max_depth={params['max_depth']}, max_samples={params['max_samples']}, max_features={params['max_features']}")
@@ -1081,7 +1210,12 @@ def objective(trial, fold_data_cache, features, max_depth_list, rng):
             enhanced_gpu_memory_cleanup(force_defrag=True)
             gc.collect()
 
-        X_train_all, y_train_all, X_val, y_val = fold_data_cache[fold]
+        fold_data = fold_data_cache[fold]
+        if len(fold_data) >= 4:
+            X_train_all, y_train_all, X_val, y_val = fold_data[:4]
+        else:
+            log_warning(f"   ⚠️ Fold #{fold+1} 데이터 형식이 올바르지 않습니다. 건너뜁니다.")
+            continue
         
         if X_train_all is None or X_val is None:
             log_warning(f"   ⚠️ Fold #{fold+1} 데이터가 없습니다. 건너뜁니다.")
@@ -1091,6 +1225,13 @@ def objective(trial, fold_data_cache, features, max_depth_list, rng):
         # (중복 샘플링 방지: Trial 전 언더샘플링으로 이미 클래스 균형이 맞춰져 있음)
         X_train_resampled = X_train_all
         y_train_resampled = y_train_all
+        
+        # [중요] is_crash 컬럼이 X_train에 포함되어 있으면 제거 (정답 누설 방지)
+        if 'is_crash' in X_train_resampled.columns:
+            X_train_resampled = X_train_resampled.drop(columns=['is_crash'])
+            log_info(f"   ✅ is_crash 컬럼 제거 완료 (정답 누설 방지)")
+        if 'is_crash' in X_val.columns:
+            X_val = X_val.drop(columns=['is_crash'])
         
         # 스케일링 전 데이터 검증 및 정리
         # NaN/Inf 값 확인 및 처리
@@ -1169,6 +1310,7 @@ def objective(trial, fold_data_cache, features, max_depth_list, rng):
         
         # 예측 (VRAM 파편화 방지를 위한 배치 처리)
         step_start = datetime.now()
+        batch_info_str = ""  # 배치 정보 문자열 초기화
         try:
             # 예측 전 파편화 확인 및 정리
             is_fragmented, frag_info = check_gpu_memory_fragmentation()
@@ -1176,12 +1318,14 @@ def objective(trial, fold_data_cache, features, max_depth_list, rng):
                 log_warning(f"   ⚠️ Fold #{fold+1} 예측 전 파편화 감지: {frag_info.get('reason', '알 수 없음')}")
                 enhanced_gpu_memory_cleanup(force_defrag=True)
             
-            # 검증 데이터 크기에 따라 배치 처리 여부 결정
+            # 모델 복잡도 기반 동적 배치 크기 결정
             val_size = len(X_val_scaled)
-            # 큰 데이터셋(100만 행 이상)이면 배치 처리
-            if val_size > 1000000:
-                batch_size = 500000  # 배치 크기
+            batch_size = calculate_dynamic_batch_size(params, val_size)
+            
+            if batch_size is not None:
+                # 배치 처리 실행
                 num_batches = (val_size + batch_size - 1) // batch_size
+                batch_info_str = f" (배치: {num_batches}개, 크기: {batch_size:,})"
                 
                 pred_proba_list = []
                 for batch_idx in range(num_batches):
@@ -1208,7 +1352,7 @@ def objective(trial, fold_data_cache, features, max_depth_list, rng):
                 y_pred_proba = cudf.concat(pred_proba_list, ignore_index=True)
                 del pred_proba_list
             else:
-                # 작은 데이터셋은 한 번에 처리
+                # 배치 처리 불필요 (한 번에 처리)
                 pred_proba_cudf = model.predict_proba(X_val_scaled)
                 y_pred_proba = pred_proba_cudf.iloc[:, 1]
                 del pred_proba_cudf
@@ -1259,7 +1403,7 @@ def objective(trial, fold_data_cache, features, max_depth_list, rng):
 
         fold_duration = (datetime.now() - fold_start_time).total_seconds()
         log_info(f"   ✅ Fold #{fold+1}/3 | Score: {score:.4f} | 총: {fold_duration:.1f}초 "
-                 f"(전처리: {preprocessing_time:.1f}초, 학습: {fit_time:.1f}초, 예측: {pred_time:.1f}초)")
+                 f"(전처리: {preprocessing_time:.1f}초, 학습: {fit_time:.1f}초, 예측: {pred_time:.1f}초){batch_info_str}")
 
         # Pruning 체크
         trial.report(score, step=fold)
@@ -1310,11 +1454,15 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
         # 원본 데이터 로드 (샘플링 전 데이터)
         fold_data = joblib.load(fold_cache_path)
         
-        # 저장할 때 5개를 저장했으므로, 5개를 받아야 함
-        if len(fold_data) == 5:
+        # 저장할 때 6개를 저장했으므로 (imputation_map, meta_data 포함), 6개를 받아야 함
+        if len(fold_data) == 6:
+            X_train_original, y_train_original, X_val_original, y_val_original, last_fold_imputer, train_meta_data_final = fold_data
+        elif len(fold_data) == 5:
+            # 이전 버전 호환성
             X_train_original, y_train_original, X_val_original, y_val_original, last_fold_imputer = fold_data
+            train_meta_data_final = None
         else:
-            raise ValueError(f"fold_cache 파일 형식이 맞지 않습니다. (요소 개수: {len(fold_data)}, 기대값: 5)")
+            raise ValueError(f"fold_cache 파일 형식이 맞지 않습니다. (요소 개수: {len(fold_data)}, 기대값: 5 또는 6)")
         
         if X_train_original is None or X_val_original is None:
             raise ValueError("fold_cache 파일의 데이터가 유효하지 않습니다.")
@@ -1359,8 +1507,8 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
         majority_class_label = value_counts_original.idxmax()
         n_minority_original = value_counts_original[minority_class_label]
         n_majority_original = value_counts_original[majority_class_label]
-        minority_class_name = "상승" if minority_class_label == 1 else "하락"
-        majority_class_name = "상승" if majority_class_label == 1 else "하락"
+        minority_class_name = "상승" if minority_class_label == 1 else "급락"
+        majority_class_name = "상승" if majority_class_label == 1 else "급락"
         
         log_info(f"   [OK] 전체 데이터 구성 완료: {len(X_all):,}행 ({(datetime.now() - compose_start).total_seconds():.1f}초)")
         log_info(f"   [DATA] 원본 데이터 클래스 분포:")
@@ -1369,34 +1517,89 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
         
         del y_all_pandas
 
-        # 2. 전체 데이터 하이브리드 샘플링 적용 (클래스 불균형 해결)
-        log_info("   ⚖️ 최종 학습 전 하이브리드 샘플링 적용...")
+        # 2. 전체 데이터 언더샘플링 적용 (1:1 비율, Trial 전 언더샘플링과 동일한 로직)
+        log_info("   ⚖️ 최종 학습 전 언더샘플링 적용 (1:1 비율, 급락 패턴 우선 선택)...")
         sampling_start = datetime.now()
         
-        X_all_resampled, y_all_resampled = apply_hybrid_sampling(X_all, y_all, random_state=42)
+        # 클래스 분포 확인
+        y_all_pandas = y_all.to_pandas()
+        value_counts = y_all_pandas.value_counts()
         
-        # 샘플링 결과 확인
-        y_all_resampled_pandas = y_all_resampled.to_pandas()
-        value_counts_resampled = y_all_resampled_pandas.value_counts()
-        n_minority_resampled = value_counts_resampled[minority_class_label]
-        n_majority_resampled = value_counts_resampled[majority_class_label]
-        del y_all_resampled_pandas
+        if len(value_counts) >= 2:
+            # 소수 클래스와 다수 클래스 식별
+            minority_class_label_check = value_counts.idxmin()
+            majority_class_label_check = value_counts.idxmax()
+            n_minority_check = value_counts[minority_class_label_check]
+            n_majority_check = value_counts[majority_class_label_check]
+            
+            # 언더샘플링: 다수 클래스를 소수 클래스 크기만큼 랜덤 선택 (1:1 비율)
+            # [중요] 소수 클래스는 전체 사용 (소실 방지)
+            if n_majority_check > n_minority_check:
+                # 위치 인덱스 생성 (0부터 시작)
+                all_indices = np.arange(len(y_all))
+                y_all_values = y_all_pandas.values
+                
+                # 소수 클래스 인덱스 (전체 사용)
+                minority_indices = all_indices[y_all_values == minority_class_label_check]
+                
+                # 다수 클래스 인덱스 (샘플링 대상)
+                majority_indices = all_indices[y_all_values == majority_class_label_check]
+                
+                log_info(f"      🔀 다수 클래스 랜덤 셔플 및 샘플링 중 (다양성 확보)...")
+                
+                # [다양성 확보] 다수 클래스 셔플
+                majority_indices_shuffled = majority_indices.copy()
+                rng.shuffle(majority_indices_shuffled)
+                
+                # 1:1 비율로 샘플링
+                target_majority_size = n_minority_check * 1
+                selected_majority_indices = majority_indices_shuffled[:target_majority_size]
+                
+                # 인덱스 결합
+                balanced_indices = np.concatenate([minority_indices, selected_majority_indices])
+                
+                # [시계열 정합성] 시간 순서 유지 (과거 -> 미래)
+                balanced_indices.sort()
+                
+                # 언더샘플링된 데이터 생성
+                X_all_resampled = X_all.iloc[balanced_indices].reset_index(drop=True)
+                y_all_resampled = y_all.iloc[balanced_indices].reset_index(drop=True)
+                
+                # 샘플링 결과 확인
+                y_all_resampled_pandas = y_all_resampled.to_pandas()
+                value_counts_resampled = y_all_resampled_pandas.value_counts()
+                n_minority_resampled = value_counts_resampled[minority_class_label]
+                n_majority_resampled = value_counts_resampled[majority_class_label]
+                del y_all_resampled_pandas
+                
+                # 원본 데이터 삭제
+                del X_all, y_all, balanced_indices
+                enhanced_gpu_memory_cleanup(force_defrag=True)
+                gc.collect()
+                
+                # 샘플링된 데이터로 교체
+                X_all = X_all_resampled
+                y_all = y_all_resampled
+                del X_all_resampled, y_all_resampled
+                
+                log_info(f"   [OK] 언더샘플링 완료 (1:1 비율):")
+                log_info(f"      - 소수 클래스 ({minority_class_label_check}): {n_minority_original:,}개 → {n_minority_resampled:,}개 (100% 사용)")
+                log_info(f"      - 다수 클래스 ({majority_class_label_check}): {n_majority_original:,}개 → {n_majority_resampled:,}개")
+                log_info(f"   [DATA] 샘플링 후 데이터: {len(X_all):,}행 ({(datetime.now() - sampling_start).total_seconds():.1f}초)")
+            else:
+                log_info(f"   ℹ️ 클래스 불균형이 없어 샘플링을 건너뜁니다.")
+                del y_all_pandas
+        else:
+            log_warning(f"   ⚠️ 클래스가 1개만 있어 샘플링을 건너뜁니다.")
+            del y_all_pandas
         
-        # 원본 데이터 삭제
-        del X_all, y_all
-        enhanced_gpu_memory_cleanup(force_defrag=True)
-        gc.collect()
-        
-        # 샘플링된 데이터로 교체
-        X_all = X_all_resampled
-        y_all = y_all_resampled
-        del X_all_resampled, y_all_resampled
-        
-        log_info(f"   [OK] 하이브리드 샘플링 완료: 소수 클래스 {n_minority_original:,}개 → {n_minority_resampled:,}개, 다수 클래스 {n_majority_original:,}개 → {n_majority_resampled:,}개")
-        log_info(f"   [DATA] 샘플링 후 데이터: {len(X_all):,}행 ({(datetime.now() - sampling_start).total_seconds():.1f}초)")
-
         # 3. 전체 데이터 전처리
         step_start = datetime.now()
+        
+        # [삭제] is_crash 컬럼 제거 (이제 더 이상 사용하지 않음)
+        # if 'is_crash' in X_all.columns:
+        #    X_all = X_all.drop(columns=['is_crash'])
+        
         log_info("   [PREPROC] 데이터 스케일링 중...")
         final_scaler = cuStandardScaler()
         final_scaler.fit(X_all)
@@ -1860,22 +2063,29 @@ def main():
         # 추가된 피처
         'Z_Score_20',
         'Position_Range_60',
-        'KOSPI_변동성(1M)',
+        # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
         # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
         'MA120_Slope',  # 120일 이동평균선 기울기
         'MA240_Slope',  # 240일 이동평균선 기울기
         'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
-        'PBR_log',  # PBR 로그 변환
+        # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
         # 새로 추가된 피처
         'RVOL',  # 상대 거래량 (Relative Volume)
+        'RVOL(1W)',  # 5일/20일 상대 거래량
         '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
         '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
         'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
         'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
         'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
-        'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
         # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
-        'Eff_Ratio_10'  # 효율성 비율 10일
+        # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
+        
+        # 2024년 12월 신규 추가 피처 (3종)
+        'Log_Return_20',     # 로그 수익률 1개월 (20일)
+        'HV_Volatility_20',  # HV 변동성 1개월 (일별 로그 수익률의 20일 표준편차)
+        'HV_Volatility_60',  # HV 변동성 3개월 (일별 로그 수익률의 60일 표준편차)
+        'VWAP_Disparity_20',  # VWAP 괴리율 1개월 (20일 기준)
+        # Gap 피처 제거
     ]
     
     # 전체 데이터 중앙값 계산 제거 (Fold별로 Train 데이터만으로 계산)
@@ -1927,11 +2137,15 @@ def main():
             load_start = datetime.now()
             try:
                 fold_data = joblib.load(fold_cache_path)
-                # 캐시 형식 확인 (날짜 기반이므로 imputation_map도 포함될 수 있음)
+                # 캐시 형식 확인 (날짜 기반이므로 imputation_map, meta_data도 포함될 수 있음)
                 if len(fold_data) == 4:
                     X_train, y_train, X_val, y_val = fold_data
+                    train_meta_data = None
                 elif len(fold_data) == 5:
                     X_train, y_train, X_val, y_val, _ = fold_data  # imputation_map 무시
+                    train_meta_data = None
+                elif len(fold_data) == 6:
+                    X_train, y_train, X_val, y_val, _, train_meta_data = fold_data  # imputation_map, meta_data
                 else:
                     raise ValueError("캐시 형식이 맞지 않습니다.")
                 
@@ -1951,7 +2165,7 @@ def main():
                 X_train = X_train[features]
                 X_val = X_val[features]
                 
-                fold_data_cache[fold_idx] = (X_train, y_train, X_val, y_val)
+                fold_data_cache[fold_idx] = (X_train, y_train, X_val, y_val, train_meta_data)
                 log_info(f"   ✅ Fold #{fold_idx+1}/3 캐시 로드 완료: 훈련 {len(X_train):,}행, 검증 {len(X_val):,}행 ({load_time:.1f}초)")
             except Exception as e:
                 log_warning(f"   ⚠️ Fold #{fold_idx+1} 캐시 파일 로드 실패: {e}. 재로딩합니다.")
@@ -2012,11 +2226,19 @@ def main():
         sys.exit(1)
 
     # --- Trial 전 언더샘플링 적용 (모든 fold의 train 데이터에 적용) ---
-    log_info(f"\n--- 🔄 Trial 전 언더샘플링 적용 중 ---")
+    log_info(f"\n--- 🔄 Trial 전 언더샘플링 적용 중 (급락 패턴 우선 선택) ---")
     step_start = datetime.now()
     
     for fold in range(len(fold_data_cache)):
-        X_train, y_train, X_val, y_val = fold_data_cache[fold]
+        fold_data = fold_data_cache[fold]
+        if len(fold_data) == 4:
+            X_train, y_train, X_val, y_val = fold_data
+            train_meta_data = None
+        elif len(fold_data) == 5:
+            X_train, y_train, X_val, y_val, train_meta_data = fold_data
+        else:
+            X_train, y_train, X_val, y_val = fold_data[:4]
+            train_meta_data = None
         
         # 클래스 분포 확인
         y_train_pandas = y_train.to_pandas()
@@ -2032,48 +2254,58 @@ def main():
         n_majority = value_counts[majority_class_label]
         
         # 클래스 레이블을 의미있는 문자열로 변환
-        minority_class_name = "상승" if minority_class_label == 1 else "하락"
-        majority_class_name = "상승" if majority_class_label == 1 else "하락"
+        # target = 1: 상승, target = 0: 급락
+        minority_class_name = "상승" if minority_class_label == 1 else "급락"
+        majority_class_name = "상승" if majority_class_label == 1 else "급락"
         
         log_info(f"   Fold #{fold+1}/3 클래스 분포:")
         log_info(f"      - 소수 클래스 ({minority_class_label}, {minority_class_name}) 샘플 수: {n_minority:,}개")
         log_info(f"      - 다수 클래스 ({majority_class_label}, {majority_class_name}) 샘플 수: {n_majority:,}개")
         
-        # 언더샘플링: 다수 클래스를 소수 클래스 개수만큼만 남김
+        # 언더샘플링: 다수 클래스를 소수 클래스 크기만큼 랜덤 선택 (1:1 비율)
+        # [중요] 소수 클래스는 전체 사용 (소실 방지)
         if n_majority > n_minority:
-            # cuDF에서 직접 boolean 인덱싱으로 위치 인덱스 추출
-            # cuDF Series는 위치 기반 인덱싱을 사용하므로, boolean mask로 필터링 후 인덱스 추출
-            majority_mask = (y_train == majority_class_label).to_pandas().values
-            minority_mask = (y_train == minority_class_label).to_pandas().values
-            
             # 위치 인덱스 생성 (0부터 시작)
             all_indices = np.arange(len(y_train))
-            majority_indices = all_indices[majority_mask]
-            minority_indices = all_indices[minority_mask]
+            y_train_pandas = y_train.to_pandas().values
             
-            # 소수 클래스 개수만큼 랜덤 샘플링
-            rng = np.random.RandomState(42 + fold)  # fold별로 다른 시드 사용
-            sampled_majority_indices = rng.choice(majority_indices, size=n_minority, replace=False)
+            # 소수 클래스 인덱스 (전체 사용)
+            minority_indices = all_indices[y_train_pandas == minority_class_label]
             
-            # 언더샘플링된 인덱스 결합
-            balanced_indices = np.concatenate([minority_indices, sampled_majority_indices])
+            # 다수 클래스 인덱스 (샘플링 대상)
+            majority_indices = all_indices[y_train_pandas == majority_class_label]
             
-            # 셔플 (numpy 배열에서 직접)
-            rng.shuffle(balanced_indices)
+            # Fold별 다양성을 위한 시드 (Fold마다 다른 난수 사용)
+            rng = np.random.RandomState(42 + fold * 1000)
             
-            # cuDF iloc는 numpy 배열이나 리스트를 받을 수 있음 (cupy 배열 대신 numpy 배열 사용)
+            log_info(f"      🔀 다수 클래스 랜덤 셔플 및 샘플링 중 (Fold별 다양성 확보)...")
+            
+            # [다양성 확보] 다수 클래스 셔플
+            majority_indices_shuffled = majority_indices.copy()
+            rng.shuffle(majority_indices_shuffled)
+            
+            # 1:1 비율로 샘플링
+            target_majority_size = n_minority * 1
+            selected_majority_indices = majority_indices_shuffled[:target_majority_size]
+            
+            # 인덱스 결합
+            balanced_indices = np.concatenate([minority_indices, selected_majority_indices])
+            
+            # [시계열 정합성] 시간 순서 유지 (과거 -> 미래)
+            balanced_indices.sort()
+            
             # 언더샘플링된 데이터 생성
             X_train_resampled = X_train.iloc[balanced_indices].reset_index(drop=True)
             y_train_resampled = y_train.iloc[balanced_indices].reset_index(drop=True)
             
-            # 결과 확인 (삭제 전에 확인)
+            # 결과 확인
             y_train_resampled_pandas = y_train_resampled.to_pandas()
             value_counts_resampled = y_train_resampled_pandas.value_counts()
             n_minority_resampled = value_counts_resampled[minority_class_label]
             n_majority_resampled = value_counts_resampled[majority_class_label]
             del y_train_resampled_pandas
             
-            # fold_data_cache 업데이트 (검증 데이터는 그대로 유지)
+            # fold_data_cache 업데이트
             fold_data_cache[fold] = (X_train_resampled, y_train_resampled, X_val, y_val)
             
             # 원본 데이터 삭제
@@ -2081,9 +2313,14 @@ def main():
             enhanced_gpu_memory_cleanup(force_defrag=False)
             gc.collect()
             
-            log_info(f"      ✅ 언더샘플링 완료: 소수 클래스 {n_minority:,}개 → {n_minority_resampled:,}개, 다수 클래스 {n_majority:,}개 → {n_majority_resampled:,}개")
+            log_info(f"      ✅ 언더샘플링 완료 (1:1 비율):")
+            log_info(f"         - 소수 클래스 ({minority_class_label}): {n_minority:,}개 → {n_minority_resampled:,}개 (100% 사용)")
+            log_info(f"         - 다수 클래스 ({majority_class_label}): {n_majority:,}개 → {n_majority_resampled:,}개")
         else:
-            log_info(f"      ℹ️ 클래스 불균형이 없어 샘플링을 건너뜁니다.")
+            # 클래스 불균형이 없는 경우
+            log_info(f"      ℹ️ 클래스 불균형이 없어 언더샘플링을 건너뜁니다.")
+            # 원본 데이터 그대로 사용
+            fold_data_cache[fold] = (X_train, y_train, X_val, y_val)
     
     log_info(f"   ✅ Trial 전 언더샘플링 완료: 총 {len(fold_data_cache)}개 Fold | 소요시간: {(datetime.now() - step_start).total_seconds():.1f}초")
     
@@ -2122,8 +2359,8 @@ def main():
         'n_mini_batches': 1,  # Optuna trial에서 단일 모델 사용
         # 모델 목표 정보 (메타데이터)
         'target_days': 10,  # 거래일 기준
-        'target_percentage': 8,  # 퍼센트
-        'target_description': '10거래일 내 5% 이하로 떨어지지 않고 8% 이상 상승'
+        'target_percentage': 7,  # 퍼센트
+        'target_description': '10거래일 내 5% 이하로 떨어지지 않고 7% 이상 상승'
     }
 
     # --- 4. 최종 모델 훈련 및 저장 (캐시 데이터 재사용) ---
@@ -2131,7 +2368,6 @@ def main():
         best_params = study.best_params
         best_params['random_state'] = 42
         best_params['n_streams'] = 1  # GPU 병렬 처리 개선 (속도 향상)
-        best_params['n_bins'] = 256  # 히스토그램 bin 개수 (기본값 128에서 256으로 증가)
         train_final_ensemble_model(fold_data_cache, features, best_params, rng, optimization_results, training_config, data_path)
     except Exception as e:
         log_critical("최종 모델 훈련 또는 저장 중 오류 발생", exception=e)
@@ -2141,8 +2377,11 @@ def main():
             fold_data = fold_data_cache[fold_key]
             if fold_data:
                 try:
-                    X_train, y_train, X_val, y_val = fold_data
-                    del X_train, y_train, X_val, y_val
+                    if len(fold_data) >= 4:
+                        X_train, y_train, X_val, y_val = fold_data[:4]
+                        del X_train, y_train, X_val, y_val
+                    if len(fold_data) >= 5:
+                        del fold_data[4]  # meta_data
                 except (ValueError, TypeError):
                     # 이미 삭제되었거나 None인 경우
                     pass
