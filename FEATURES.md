@@ -126,6 +126,15 @@
 - **의미**: 60일 기준 ATR을 종가로 나눈 비율로, 중기 변동성 판단
 - **사용 라이브러리**: pandas-ta
 
+### 5.7 Max_Drawdown_20 (최근 20일 최대 낙폭, %)
+- **역할**: 최근 20일 동안 “한 방에 얼마나 세게 얻어맞았는지” 측정 (손절/급락 습관성 필터)
+- **계산법**:
+  - `roll_max = 고가.rolling(20).max()`
+  - `daily_dd = (저가 / roll_max) - 1`
+  - `Max_Drawdown_20 = daily_dd.rolling(20).min() * 100`
+- **의미**: 값이 더 작을수록(예: -10% 이하) 최근 한 달 내 급락 위험이 컸음을 의미
+- **사용 라이브러리**: pandas, numpy
+
 ---
 
 ## 6. 수급 지표
@@ -160,19 +169,25 @@
 - **의미**: 0~1 범위, 1.0에 가까울수록 신고가 돌파 직전, 0에 가까울수록 신저가 근처
 - **사용 라이브러리**: pandas
 
-### 7.3 MA120_Slope (120일 이동평균선 기울기)
+### 7.3 MA20_Slope (20일 이동평균선 기울기)
+- **역할**: 20일 이동평균선의 기울기로 단기 추세 강도 측정
+- **계산법**: 정규화된 선형회귀 기울기 (5일 윈도우)
+- **의미**: 양수면 단기 상승 추세, 음수면 단기 하락 추세
+- **사용 라이브러리**: pandas, numpy
+
+### 7.4 MA120_Slope (120일 이동평균선 기울기)
 - **역할**: 120일 이동평균선의 기울기로 중장기 추세 강도 측정
 - **계산법**: 정규화된 선형회귀 기울기 (5일 윈도우)
 - **의미**: 양수면 중장기 상승 추세, 음수면 중장기 하락 추세
 - **사용 라이브러리**: pandas, numpy
 
-### 7.4 MA240_Slope (240일 이동평균선 기울기)
+### 7.5 MA240_Slope (240일 이동평균선 기울기)
 - **역할**: 240일 이동평균선의 기울기로 장기 추세 강도 측정
 - **계산법**: 정규화된 선형회귀 기울기 (5일 윈도우)
 - **의미**: 양수면 장기 상승 추세, 음수면 장기 하락 추세
 - **사용 라이브러리**: pandas, numpy
 
-### 7.5 KOSPI_MA20_Slope (KOSPI 20일 이동평균선 기울기)
+### 7.6 KOSPI_MA20_Slope (KOSPI 20일 이동평균선 기울기)
 - **역할**: KOSPI 지수의 20일 이동평균선 기울기로 시장 전체의 단기 추세 강도 측정
 - **계산법**: 정규화된 선형회귀 기울기 (5일 윈도우)
 - **의미**: 양수면 시장 단기 상승 추세, 음수면 시장 단기 하락 추세
@@ -200,11 +215,11 @@
 | **추세 지표** | 1개 | ADX_14 |
 | **이격도 지표** | 5개 | disparity_20, disparity_120, disparity_240, KOSPI_disparity_20, VWAP_Disparity_5 |
 | **거래량 지표** | 1개 | RVOL |
-| **변동성/수익률** | 6개 | HV_Volatility_5, HV_Volatility_20, HV_Volatility_60, ATRr_5, ATRr_20, ATRr_60 |
+| **변동성/수익률** | 7개 | HV_Volatility_5, HV_Volatility_20, HV_Volatility_60, ATRr_5, ATRr_20, ATRr_60, Max_Drawdown_20 |
 | **수급 지표** | 2개 | 시총 회전율(1W), 시총 회전율(3M) |
-| **위치 지표** | 5개 | Trend_Pullback_Score, Position_Range_60, MA120_Slope, MA240_Slope, KOSPI_MA20_Slope |
+| **위치 지표** | 6개 | Trend_Pullback_Score, Position_Range_60, MA20_Slope, MA120_Slope, MA240_Slope, KOSPI_MA20_Slope |
 | **모멘텀 지표** | 1개 | RSI_Signal_Oscillator |
-| **총계** | **23개** | |
+| **총계** | **25개** | |
 
 ---
 
@@ -244,3 +259,5 @@
 - 2025년 12월:
   - **추가된 피처**: disparity_20, Trend_Pullback_Score, HV_Volatility_5, ATRr_20, ATRr_60, VWAP_Disparity_5
   - **삭제된 피처**: RVOL(1W), Log_Return_20, VWAP_Disparity_20
+  - **추가된 피처**: Max_Drawdown_20 (최근 20일 최대 낙폭, %)
+  - **추가된 피처**: MA20_Slope (20일 이동평균선 기울기)

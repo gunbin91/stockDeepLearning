@@ -828,6 +828,18 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         except Exception as e:
             log_warning(f"Position_Range_60 계산 실패 ({ticker}): {e}")
             df['Position_Range_60'] = np.nan
+
+        # Max_Drawdown_20 계산 (최근 20일 최대 낙폭, %)
+        # roll_max = 고가.rolling(20).max()
+        # daily_dd = (저가 / roll_max) - 1
+        # Max_Drawdown_20 = daily_dd.rolling(20).min() * 100
+        try:
+            roll_max_20 = df['고가'].rolling(window=20).max()
+            daily_dd_20 = (df['저가'] / roll_max_20) - 1
+            df['Max_Drawdown_20'] = daily_dd_20.rolling(window=20).min() * 100
+        except Exception as e:
+            log_warning(f"Max_Drawdown_20 계산 실패 ({ticker}): {e}")
+            df['Max_Drawdown_20'] = np.nan
         
         # 변동성(1W), 변동성(3M) 피처 제거됨 (2024년 12월)
         
@@ -966,6 +978,14 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         except Exception as e:
             log_warning(f"MA120_Slope 계산 실패 ({ticker}): {e}")
             df['MA120_Slope'] = np.nan
+
+        # MA20_Slope 계산 (20일 이동평균선 기울기) - MA120/MA240과 동일한 방식
+        try:
+            ma20 = df['종가'].rolling(window=20).mean()
+            df['MA20_Slope'] = calculate_normalized_linear_regression_slope(ma20, window=5)
+        except Exception as e:
+            log_warning(f"MA20_Slope 계산 실패 ({ticker}): {e}")
+            df['MA20_Slope'] = np.nan
         
         # MA240_Slope 계산 (240일 이동평균선 기울기)
         try:

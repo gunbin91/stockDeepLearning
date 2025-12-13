@@ -492,7 +492,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
     log_info(f"   📅 사용자 입력 시작일: {start_date}")
     log_info(f"   📅 실제 데이터 수집 시작일: {actual_start_date} (웜업 기간 포함)")
 
-    # 기존 CPU 버전과 동일하게, 검증된 핵심 피처 목록을 하드코딩
+    # 기존 CPU 버전과 동일하게, 검증된 핵심 피처 목록을 공용 설정에서 로드
     # 제거된 피처: PBR, USDKRW_pct_1d, KOSPI_pct_1d, 이익수익률, 수익률(3M), 수익률(1M), ATRr_14
     # 제거된 피처: KOSPI_disparity_240, USDKRW_pct_5d, VIX_pct_1d, VIX_pct_5d, KOSPI_pct_5d
     # 추가된 피처: KOSPI_disparity_60
@@ -517,6 +517,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
         'Position_Range_60',
         # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
         # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
+        'MA20_Slope',  # 20일 이동평균선 기울기
         'MA120_Slope',  # 120일 이동평균선 기울기
         'MA240_Slope',  # 240일 이동평균선 기울기
         'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
@@ -540,6 +541,8 @@ def prepare_data_and_save(data_path, start_date, end_date):
         'HV_Volatility_5',   # HV 변동성 1주 (일별 로그 수익률의 5일 표준편차)
         'VWAP_Disparity_5',  # VWAP 괴리율 1주 (5일 기준)
         # Gap 피처 제거
+        # 신규 추가
+        'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
     ]
 
     try:
@@ -2045,7 +2048,7 @@ def main():
     
     log_info(f"   총 {len(file_paths)}개 종목의 데이터를 학습에 사용합니다.")
 
-    # 기존 CPU 버전과 동일하게, 검증된 핵심 피처 목록을 하드코딩
+    # 기존 CPU 버전과 동일하게, 검증된 핵심 피처 목록을 공용 설정에서 로드
     # 제거된 피처: PBR, USDKRW_pct_1d, KOSPI_pct_1d, 이익수익률, 수익률(3M), 수익률(1M), ATRr_14
     # 제거된 피처: KOSPI_disparity_240, USDKRW_pct_5d, VIX_pct_1d, VIX_pct_5d, KOSPI_pct_5d
     # 추가된 피처: KOSPI_disparity_60
@@ -2068,6 +2071,7 @@ def main():
         'Position_Range_60',
         # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
         # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
+        'MA20_Slope',  # 20일 이동평균선 기울기
         'MA120_Slope',  # 120일 이동평균선 기울기
         'MA240_Slope',  # 240일 이동평균선 기울기
         'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
@@ -2089,6 +2093,8 @@ def main():
         'HV_Volatility_60',  # HV 변동성 3개월 (일별 로그 수익률의 60일 표준편차)
         'VWAP_Disparity_5',  # VWAP 괴리율 1주 (5일 기준)
         # Gap 피처 제거
+        # 신규 추가
+        'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
     ]
     
     # 전체 데이터 중앙값 계산 제거 (Fold별로 Train 데이터만으로 계산)

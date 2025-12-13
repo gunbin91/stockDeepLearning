@@ -497,6 +497,14 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             log_warning(f"MA120_Slope 계산 실패 ({ticker}): {e}")
             latest_data['MA120_Slope'] = np.nan
 
+        # MA20_Slope 계산 (20일 이동평균선 기울기) - MA120/MA240과 동일한 방식
+        try:
+            ma20 = df_for_indicators['종가'].rolling(window=20).mean()
+            latest_data['MA20_Slope'] = calculate_normalized_linear_regression_slope_latest(ma20, window=5)
+        except Exception as e:
+            log_warning(f"MA20_Slope 계산 실패 ({ticker}): {e}")
+            latest_data['MA20_Slope'] = np.nan
+
         # MA240_Slope 계산 (240일 이동평균선 기울기)
         try:
             ma240 = df_for_indicators['종가'].rolling(window=240).mean()
@@ -605,6 +613,18 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         except Exception as e:
             log_warning(f"VWAP_Disparity_5 계산 실패 ({ticker}): {e}")
             latest_data['VWAP_Disparity_5'] = np.nan
+
+        # Max_Drawdown_20 (최근 20일 최대 낙폭, %)
+        # roll_max = 고가.rolling(20).max()
+        # daily_dd = (저가 / roll_max) - 1
+        # Max_Drawdown_20 = daily_dd.rolling(20).min() * 100
+        try:
+            roll_max_20 = df_for_indicators['고가'].rolling(window=20).max()
+            daily_dd_20 = (df_for_indicators['저가'] / roll_max_20) - 1
+            latest_data['Max_Drawdown_20'] = (daily_dd_20.rolling(window=20).min() * 100).iloc[-1]
+        except Exception as e:
+            log_warning(f"Max_Drawdown_20 계산 실패 ({ticker}): {e}")
+            latest_data['Max_Drawdown_20'] = np.nan
 
         # Trend_Pullback_Score (내부 MA20_Slope 활용)
         try:
