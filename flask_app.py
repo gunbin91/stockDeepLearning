@@ -49,6 +49,103 @@ from exceptions import DataFetchError, ModelPredictionError, AnalysisError
 from path_manager import path_manager, ensure_all_directories
 
 # =============================================================================
+# 가중치(최종점수 조합) 파일 관리 유틸/REST API
+# =============================================================================
+
+def _get_weights_file_path() -> str:
+    """최종 점수 계산에 사용되는 가중치 파일 경로"""
+    return str(path_manager.get_weights_path())
+
+def _load_weights_file():
+    """가중치 파일을 로드 (없으면 None 반환)"""
+    weights_path = _get_weights_file_path()
+    if not os.path.exists(weights_path):
+        return None
+    with open(weights_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("가중치 파일 형식이 올바르지 않습니다. (dict 형태여야 함)")
+    return data
+
+def _atomic_write_json(file_path: str, data: dict):
+    """JSON을 임시 파일에 쓴 뒤 원자적으로 교체 (Windows 포함)"""
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    tmp_path = file_path + ".tmp"
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+    os.replace(tmp_path, file_path)
+
+def _validate_and_prepare_weights(payload: dict):
+    """
+    가중치 payload 검증 및 정규화 처리
+    - key: 문자열(1~64)
+    - value: 실수, NaN/Inf 불가, 음수 불가
+    - normalize=true이면 합이 1이 되도록 정규화
+    """
+    if payload is None:
+        raise ValueError("요청 바디가 비어있습니다.")
+
+    # 프로젝트 호환 팩터(컬럼)만 수정 가능: 추후 팩터 추가 시 이 목록만 확장
+    allowed_keys = {'volatility_score', 'ml_pred_proba'}
+
+    # 입력 포맷 호환: {weights: {...}, normalize: true/false} 또는 {...} 직접
+    if isinstance(payload, dict) and 'weights' in payload and isinstance(payload.get('weights'), dict):
+        weights_in = payload.get('weights', {})
+        normalize = bool(payload.get('normalize', True))
+    elif isinstance(payload, dict):
+        weights_in = payload
+        normalize = True
+    else:
+        raise ValueError("가중치 데이터 형식이 올바르지 않습니다.")
+
+    if not isinstance(weights_in, dict):
+        raise ValueError("weights는 dict 형태여야 합니다.")
+    if len(weights_in) == 0:
+        raise ValueError("가중치가 비어있습니다.")
+
+    extra_keys = [k for k in weights_in.keys() if isinstance(k, str) and k.strip() not in allowed_keys]
+    if extra_keys:
+        raise ValueError(f"프로젝트에서 지원하지 않는 팩터 키가 포함되어 있습니다: {extra_keys}. "
+                         f"허용 키: {sorted(list(allowed_keys))}")
+
+    cleaned = {}
+    for k, v in weights_in.items():
+        if not isinstance(k, str):
+            raise ValueError("가중치 key는 문자열이어야 합니다.")
+        k = k.strip()
+        if len(k) == 0 or len(k) > 64:
+            raise ValueError("가중치 key 길이는 1~64자여야 합니다.")
+        if k not in allowed_keys:
+            raise ValueError(f"지원하지 않는 팩터 키입니다: {k}. 허용 키: {sorted(list(allowed_keys))}")
+
+        try:
+            fv = float(v)
+        except Exception:
+            raise ValueError(f"가중치 값이 숫자가 아닙니다: {k}={v}")
+
+        if np.isnan(fv) or np.isinf(fv):
+            raise ValueError(f"가중치 값이 NaN/Inf 입니다: {k}={v}")
+        if fv < 0:
+            raise ValueError(f"가중치 값은 음수일 수 없습니다: {k}={v}")
+
+        cleaned[k] = fv
+
+    # 누락된 허용 키는 0으로 채워 항상 동일한 구조로 저장
+    for k in allowed_keys:
+        if k not in cleaned:
+            cleaned[k] = 0.0
+
+    total = sum(cleaned.values())
+    if total <= 0:
+        raise ValueError("가중치 합이 0 이하입니다. (하나 이상 0보다 커야 함)")
+
+    if normalize:
+        cleaned = {k: (v / total) for k, v in cleaned.items()}
+
+    cleaned = {k: float(np.round(v, 10)) for k, v in cleaned.items()}
+    return cleaned
+
+# =============================================================================
 # 웹 애플리케이션 초기화
 # =============================================================================
 
@@ -1364,6 +1461,60 @@ def get_backtest_status():
         'process_running': is_backtest_process_running(current_backtest_process) if current_backtest_process else False,
         'timestamp': datetime.now().isoformat()
     })
+
+
+@app.route('/api/weights', methods=['GET'])
+def get_weights():
+    """가중치 파일 조회 API (주식추천/백테스트 공용)"""
+    try:
+        # ensemble.py 기본값과 동일한 디폴트
+        default_weights = {
+            'volatility_score': 0.10,
+            'ml_pred_proba': 0.90,
+        }
+
+        weights_path = _get_weights_file_path()
+        file_exists = os.path.exists(weights_path)
+        file_weights = _load_weights_file() if file_exists else None
+
+        merged = default_weights.copy()
+        if isinstance(file_weights, dict):
+            merged.update(file_weights)
+
+        allowed_keys = ['volatility_score', 'ml_pred_proba']
+        # UI 혼란 방지: 허용된 키만 반환/표시
+        merged_filtered = {k: merged.get(k, 0.0) for k in allowed_keys}
+        file_weights_filtered = {k: (file_weights or {}).get(k, 0.0) for k in allowed_keys}
+
+        return jsonify({
+            'file_path': weights_path,
+            'file_exists': file_exists,
+            'allowed_keys': allowed_keys,
+            'default_weights': default_weights,
+            'file_weights': file_weights_filtered,
+            'weights': merged_filtered
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/weights', methods=['POST'])
+def save_weights():
+    """가중치 파일 저장 API (정규화 기본 적용)"""
+    try:
+        payload = request.get_json(silent=True)
+        normalized_weights = _validate_and_prepare_weights(payload)
+
+        weights_path = _get_weights_file_path()
+        _atomic_write_json(weights_path, normalized_weights)
+
+        return jsonify({
+            'success': True,
+            'file_path': weights_path,
+            'weights': normalized_weights
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
 
 @app.route('/api/feature_correlation/calculate', methods=['POST'])
 def calculate_feature_correlation():

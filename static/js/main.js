@@ -127,6 +127,11 @@ $(document).ready(function() {
         $('input[type="number"]').on('blur', function() {
             formatNumberInput($(this));
         });
+
+        // 가중치 수정 버튼 (주식추천/백테스트 공용)
+        $(document).on('click', '.btn-edit-weights', function() {
+            openWeightsModal();
+        });
     }
     
     function initializePageSpecific() {
@@ -1382,4 +1387,168 @@ $(document).ready(function() {
     window.showStockDetails = showStockDetails;
     window.showToast = showToast;
     window.loadBacktestReport = loadBacktestReport;
+
+    // ==============================
+    // 가중치 수정 모달 (공용)
+    // ==============================
+
+    let weightsModalInstance = null;
+
+    function openWeightsModal() {
+        const modalEl = document.getElementById('weights_modal');
+        if (!modalEl) {
+            showToast('가중치 모달을 찾을 수 없습니다.', 'warning');
+            return;
+        }
+
+        if (!weightsModalInstance) {
+            weightsModalInstance = new bootstrap.Modal(modalEl);
+        }
+
+        // UI 초기화
+        hideWeightsAlert();
+        $('#weights_tbody').empty();
+        $('#weights_sum').text('0');
+        $('#weights_file_path').text('-');
+        $('#weights_file_exists_badge').removeClass('bg-success bg-danger bg-secondary').addClass('bg-secondary').text('확인중');
+
+        // 로드 후 표시
+        loadWeightsIntoModal().then(function() {
+            weightsModalInstance.show();
+        }).catch(function(err) {
+            showWeightsAlert(err?.message || '가중치 로딩 실패');
+            weightsModalInstance.show();
+        });
+    }
+
+    function showWeightsAlert(message) {
+        $('#weights_modal_alert').removeClass('d-none').text(message);
+    }
+
+    function hideWeightsAlert() {
+        $('#weights_modal_alert').addClass('d-none').text('');
+    }
+
+    function computeWeightsSum() {
+        let sum = 0;
+        $('#weights_tbody tr').each(function() {
+            const val = parseFloat($(this).find('.weight-value').val());
+            if (!isNaN(val)) sum += val;
+        });
+        $('#weights_sum').text(sum.toFixed(6));
+    }
+
+    function addWeightsRow(key = '', value = 0) {
+        const displayNameMap = {
+            'ml_pred_proba': 'ml_pred_proba (상승확률)',
+            'volatility_score': 'volatility_score (변동성 점수)'
+        };
+        const displayName = displayNameMap[key] || key;
+        const rowHtml = `
+            <tr data-key="${escapeHtml(key)}">
+                <td>
+                    <div class="fw-semibold">${escapeHtml(displayName)}</div>
+                    <div class="text-muted small">${escapeHtml(key)}</div>
+                </td>
+                <td>
+                    <input type="number" class="form-control form-control-sm weight-value" step="0.000001" min="0" value="${value}">
+                </td>
+            </tr>
+        `;
+        $('#weights_tbody').append(rowHtml);
+        computeWeightsSum();
+    }
+
+    function escapeHtml(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#039;');
+    }
+
+    function loadWeightsIntoModal() {
+        return $.get('/api/weights').then(function(data) {
+            if (!data || !data.weights) throw new Error('가중치 응답이 올바르지 않습니다.');
+
+            $('#weights_file_path').text(data.file_path || '-');
+            if (data.file_exists) {
+                $('#weights_file_exists_badge').removeClass('bg-secondary bg-danger').addClass('bg-success').text('존재');
+            } else {
+                $('#weights_file_exists_badge').removeClass('bg-secondary bg-success').addClass('bg-danger').text('없음');
+            }
+
+            const weights = data.weights || {};
+            const allowedKeys = (data.allowed_keys || Object.keys(weights)).slice();
+            // 서버에서 준 allowed_keys 순서를 우선 사용
+            const keys = allowedKeys.length ? allowedKeys : Object.keys(weights).sort();
+            $('#weights_tbody').empty();
+            keys.forEach(function(k) {
+                addWeightsRow(k, weights[k]);
+            });
+        });
+    }
+
+    function collectWeightsFromModal() {
+        const weights = {};
+        $('#weights_tbody tr').each(function() {
+            const k = String($(this).attr('data-key') || '').trim();
+            const vRaw = $(this).find('.weight-value').val();
+            const v = parseFloat(vRaw);
+            if (!k) return;
+            weights[k] = isNaN(v) ? 0 : v;
+        });
+        return weights;
+    }
+
+    $(document).on('input', '.weight-value', function() {
+        computeWeightsSum();
+    });
+
+    $(document).on('click', '#weights_save_btn', function() {
+        hideWeightsAlert();
+
+        const weights = collectWeightsFromModal();
+        const normalize = $('#weights_normalize_toggle').is(':checked');
+
+        if (Object.keys(weights).length === 0) {
+            showWeightsAlert('저장할 가중치가 없습니다. (키를 입력하세요)');
+            return;
+        }
+
+        // 저장 버튼 비활성화
+        $('#weights_save_btn').prop('disabled', true).text('저장 중...');
+
+        $.ajax({
+            url: '/api/weights',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ weights: weights, normalize: normalize }),
+            success: function(resp) {
+                if (resp && resp.success) {
+                    showToast('가중치가 저장되었습니다. (다음 분석/백테스트부터 반영)', 'success');
+                    // 다시 로드해서 정규화 결과 반영
+                    loadWeightsIntoModal().catch(function() {});
+                } else {
+                    showWeightsAlert(resp?.error || '저장 실패');
+                }
+            },
+            error: function(xhr) {
+                let msg = '저장 실패';
+                try {
+                    const j = JSON.parse(xhr.responseText);
+                    msg = j.error || j.message || msg;
+                } catch (e) {}
+                showWeightsAlert(msg);
+            },
+            complete: function() {
+                $('#weights_save_btn').prop('disabled', false).html('<i class="fas fa-save me-1"></i>저장');
+            }
+        });
+    });
+
+    // 전역으로도 노출 (디버그/재사용)
+    window.openWeightsModal = openWeightsModal;
 });
