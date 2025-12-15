@@ -177,29 +177,41 @@ def run_analysis(analysis_date_str):
             gc.collect()
             log_info("   🧹 메모리 정리 완료")
             
-            # 모델 예측 시도
-            log_info("   🤖 ML 모델 로딩 중...")
+            # 모델 예측 시도 (RF)
+            log_info("   🤖 [RF] 모델 로딩 및 예측 중...")
             try:
                 ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
             except Exception as predict_error:
-                # 예측 함수 호출 중 발생한 예외를 상세히 로깅
                 error_type = type(predict_error).__name__
                 error_msg = str(predict_error)
-                log_error(f"   ❌ ML 모델 예측 함수 호출 실패: {error_type}: {error_msg}")
-                import traceback
-                log_error(f"   ❌ 스택 트레이스:\n{traceback.format_exc()}")
+                log_error(f"   ❌ [RF] 모델 예측 실패: {error_type}: {error_msg}")
                 raise
             
-            if ml_predicted_df is None:
-                error_msg = "머신러닝 모델 예측 결과가 None입니다."
+            if ml_predicted_df is None or ml_predicted_df.empty:
+                error_msg = "[RF] 모델 예측 결과가 비어있습니다."
                 log_error(f"   ❌ {error_msg}")
-                raise AnalysisError(error_msg, step="ml_prediction")
-            
-            if ml_predicted_df.empty:
-                error_msg = "머신러닝 모델 예측 결과가 비어있습니다."
-                log_error(f"   ❌ {error_msg}")
-                raise AnalysisError(error_msg, step="ml_prediction")
-            
+                raise AnalysisError(error_msg, step="ml_prediction_rf")
+
+            log_info(f"   ✅ [RF] 예측 완료: {len(ml_predicted_df):,}개 종목")
+
+            # 모델 예측 시도 (LGBM)
+            log_info("   🤖 [LGBM] 모델 로딩 및 예측 중...")
+            try:
+                lgbm_predicted_df = ml_model.predict_with_lgbm_model(feature_df)
+                if not lgbm_predicted_df.empty and 'lgbm_pred_proba' in lgbm_predicted_df.columns:
+                    log_info(f"   ✅ [LGBM] 예측 완료: {len(lgbm_predicted_df):,}개 종목")
+                else:
+                    log_warning("   ⚠️ [LGBM] 예측 결과가 비어있거나 유효하지 않습니다.")
+            except Exception as e:
+                log_warning(f"   ⚠️ [LGBM] 예측 중 오류 (건너뜀): {e}")
+                lgbm_predicted_df = pd.DataFrame()
+
+            # 예측 결과 병합
+            # RF 결과에 LGBM 결과 병합
+            if not lgbm_predicted_df.empty:
+                ml_predicted_df = pd.merge(ml_predicted_df, lgbm_predicted_df, on='종목코드', how='left')
+                log_info(f"   📊 [통합] RF 및 LGBM 예측 결과 병합 완료")
+
             # 예측 결과 검증
             if '종목코드' not in ml_predicted_df.columns:
                 error_msg = "예측 결과에 '종목코드' 컬럼이 없습니다."

@@ -63,9 +63,23 @@ body {
 #stock_table {
     width: 100% !important;
     table-layout: fixed;
+    margin: 0;
+    border-collapse: collapse;
 }
 
 .table-responsive {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* DataTables 래퍼 스타일 조정 */
+.dataTables_wrapper {
+    width: 100%;
+    overflow-x: auto;
+}
+
+.dataTables_wrapper .dataTables_scroll {
     width: 100%;
 }
 
@@ -75,10 +89,30 @@ body {
 
 .table th {
     border-top: none;
-    font-weight: 600;
+    font-weight: 500;
+    font-size: 0.8rem;
+    text-transform: none;
+    letter-spacing: 0;
+    padding: 0.75rem 0.5rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* 주식 테이블 헤더 특별 스타일 */
+#stock_table thead th {
+    font-weight: 500;
+    font-size: 0.8rem;
+    padding: 0.6rem 0.4rem;
+    background-color: #212529;
+    color: #fff;
+    border: none;
+}
+
+#stock_table tbody td {
+    padding: 0.6rem 0.4rem;
     font-size: 0.875rem;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    vertical-align: middle;
 }
 
 /* 주식 테이블 특별 스타일 */
@@ -240,21 +274,39 @@ footer {
     }
     
     /* 모바일에서 테이블 컬럼 너비 조정 */
+    #stock_table {
+        min-width: 800px; /* 모바일에서도 최소 너비 보장 */
+    }
+    
     #stock_table th,
     #stock_table td {
-        font-size: 0.8rem;
+        font-size: 0.75rem;
+        padding: 0.5rem 0.25rem;
+    }
+    
+    #stock_table thead th {
+        font-size: 0.7rem;
         padding: 0.5rem 0.25rem;
     }
 }
 
-/* 데스크톱에서 테이블 전체 너비 보장 */
+/* 데스크톱에서 테이블 스타일 */
 @media (min-width: 769px) {
     .table-responsive {
-        overflow-x: visible;
+        overflow-x: auto;
+        max-width: 100%;
     }
     
     #stock_table {
-        min-width: 100%;
+        width: 100% !important;
+        min-width: 1040px; /* 최소 너비 설정 (모든 컬럼이 보이도록) */
+        max-width: 100%;
+    }
+    
+    /* DataTables 스크롤 컨테이너 */
+    .dataTables_scrollHead,
+    .dataTables_scrollBody {
+        width: 100% !important;
     }
 }
 
@@ -427,6 +479,14 @@ body.dark-mode .table th {
     background-color: #4a5568;
     color: #e9ecef;
     border-color: #718096;
+}
+
+body.dark-mode #stock_table thead th {
+    background-color: #212529;
+    color: #fff;
+    font-weight: 500;
+    font-size: 0.8rem;
+    padding: 0.6rem 0.4rem;
 }
 
 body.dark-mode .table td {

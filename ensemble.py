@@ -42,8 +42,17 @@ def calculate_final_score(df):
     # 기본 가중치 설정 (최적화된 가중치 파일이 없을 경우 사용)
     factor_weights = {
         'volatility_score': 0.10,    # 변동성 점수 10%
-        'ml_pred_proba': 0.90,        # ML 예측 확률 90%
+        'ml_pred_proba': 0.90,       # ML 예측 확률 90% (RF)
     }
+
+    # LGBM 결과가 있으면 가중치 분산 (기본값)
+    if 'lgbm_pred_proba' in final_df.columns:
+        log_info("[INFO] LGBM 예측 결과 발견 - 가중치 자동 조정")
+        factor_weights = {
+            'volatility_score': 0.10,
+            'ml_pred_proba': 0.45,    # RF 45%
+            'lgbm_pred_proba': 0.45   # LGBM 45%
+        }
 
     # 최적화된 가중치 파일이 있으면 불러오기
     script_dir = os.path.dirname(__file__)
@@ -52,13 +61,20 @@ def calculate_final_score(df):
     if os.path.exists(optimal_weights_path):
         with open(optimal_weights_path, 'r') as f:
             loaded_weights = json.load(f)
+            # 파일에 LGBM 가중치가 없고 데이터에는 LGBM이 있다면 기본 비율 유지하면서 로드된 값 반영
+            if 'lgbm_pred_proba' in final_df.columns and 'lgbm_pred_proba' not in loaded_weights:
+                 # 기존 ML 가중치를 반으로 나눠서 LGBM에 할당하는 전략
+                 ml_weight = loaded_weights.get('ml_pred_proba', 0.90)
+                 loaded_weights['ml_pred_proba'] = ml_weight / 2
+                 loaded_weights['lgbm_pred_proba'] = ml_weight / 2
+            
             factor_weights.update(loaded_weights)
         log_info("[OK] 최적화된 가중치 적용")
     else:
         log_info("[INFO] 기본 가중치 사용")
 
     active_factors = {k: v for k, v in factor_weights.items() if v > 0 and k in final_df.columns}
-    log_info(f"[SEARCH] 활성 팩터: {len(active_factors)}개")
+    log_info(f"[SEARCH] 활성 팩터: {len(active_factors)}개 - {list(active_factors.keys())}")
     
     if not active_factors:
         log_warning("[WARN] 활성화된 팩터가 없어 기본 점수를 적용합니다.")
@@ -70,7 +86,7 @@ def calculate_final_score(df):
     log_info("   📊 정규화 값 계산 중...")
     cached_norms = {}
     for factor in active_factors.keys():
-        if factor == 'ml_pred_proba':
+        if factor in ['ml_pred_proba', 'lgbm_pred_proba']:
             source_series = final_df[factor] * 100
         else:
             source_series = final_df[factor]
@@ -97,8 +113,8 @@ def calculate_final_score(df):
     # 각 팩터의 점수를 0-100점으로 정규화하여 공정한 비교가 가능하도록 함
     # 벡터화 연산을 사용하여 대용량 데이터 처리 성능 향상
     for factor in active_factors.keys():
-        if factor == 'ml_pred_proba':
-            # ML 예측 확률은 0-1 범위이므로 100을 곱하여 0-100 범위로 변환
+        if factor in ['ml_pred_proba', 'lgbm_pred_proba']:
+            # 예측 확률은 0-1 범위이므로 100을 곱하여 0-100 범위로 변환
             source_series = final_df[factor] * 100
         else:
             # 다른 팩터들은 이미 적절한 범위에 있음

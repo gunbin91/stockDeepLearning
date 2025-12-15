@@ -189,7 +189,9 @@ $(document).ready(function() {
                 pageLength: 25,
                 order: [[0, 'asc']],
                 autoWidth: false,
-                tableWidth: '100%',
+                scrollX: true,
+                scrollCollapse: false,
+                fixedColumns: false,
                 language: {
                     "lengthMenu": "페이지당 _MENU_ 개씩 보기",
                     "zeroRecords": "데이터가 없습니다",
@@ -205,16 +207,19 @@ $(document).ready(function() {
                     }
                 },
                 columnDefs: [
-                    { targets: [0], width: '8%' },      // 최종순위
-                    { targets: [1], width: '15%' },     // 종목명
-                    { targets: [2], width: '10%' },     // 종목코드
-                    { targets: [3, 4], width: '12%', className: 'text-end' },  // 현재가, 등락율
-                    { targets: [5], width: '12%', className: 'text-end' },      // 기준일가
-                    { targets: [6, 7, 8], width: '10%', className: 'text-end' }, // 최종점수, 상승확률, 변동성
-                    { targets: [9], width: '11%', className: 'text-end' }       // 시가총액
+                    { targets: [0], width: '70px', className: 'text-center' },      // 최종순위
+                    { targets: [1], width: '120px' },     // 종목명
+                    { targets: [2], width: '80px', className: 'text-center' },     // 종목코드
+                    { targets: [3], width: '100px', className: 'text-end' },  // 현재가
+                    { targets: [4], width: '80px', className: 'text-end' },  // 등락율
+                    { targets: [5], width: '100px', className: 'text-end' },      // 기준일가
+                    { targets: [6], width: '90px', className: 'text-end' }, // 최종점수
+                    { targets: [7], width: '100px', className: 'text-end' }, // RF상승확률
+                    { targets: [8], width: '110px', className: 'text-end' }, // LGBM상승확률
+                    { targets: [9], width: '90px', className: 'text-end' }, // 변동성
+                    { targets: [10], width: '100px', className: 'text-end' }       // 시가총액
                 ],
-                responsive: true,
-                scrollX: true,
+                responsive: false,
                 drawCallback: function() {
                     // 테이블이 다시 그려질 때마다 색상 적용
                     applyChangeRateColors();
@@ -1011,7 +1016,8 @@ $(document).ready(function() {
                                                 <th>시가총액</th>
                                                 <th>총자산</th>
                                                 <th>최종점수</th>
-                                                <th>상승확률</th>
+                                                <th>RF상승확률</th>
+                                                <th>LGBM상승확률</th>
                                                 <th>변동성</th>
                                             </tr>
                                         </thead>
@@ -1056,6 +1062,7 @@ $(document).ready(function() {
                         <td class="text-end">${trade.total_asset !== null && trade.total_asset !== undefined ? formatCurrency(trade.total_asset) : 'N/A'}</td>
                         <td class="text-end">${trade.final_score !== null && trade.final_score !== undefined ? trade.final_score.toFixed(2) : 'N/A'}</td>
                         <td class="text-end">${trade.ml_pred_proba !== null && trade.ml_pred_proba !== undefined ? (trade.ml_pred_proba * 100).toFixed(2) + '%' : 'N/A'}</td>
+                        <td class="text-end">${trade.lgbm_pred_proba !== null && trade.lgbm_pred_proba !== undefined ? (trade.lgbm_pred_proba * 100).toFixed(2) + '%' : '-'}</td>
                         <td class="text-end">${trade.volatility_score !== null && trade.volatility_score !== undefined ? trade.volatility_score.toFixed(2) : 'N/A'}</td>
                     </tr>
                 `;
@@ -1120,8 +1127,9 @@ $(document).ready(function() {
                         { width: "120px", targets: 13 }, // 시가총액
                         { width: "120px", targets: 14 }, // 총자산
                         { width: "100px", targets: 15 }, // 최종점수
-                        { width: "100px", targets: 16 }, // 상승확률
-                        { width: "100px", targets: 17 }  // 변동성
+                        { width: "100px", targets: 16 }, // RF상승확률
+                        { width: "100px", targets: 17 }, // LGBM상승확률
+                        { width: "100px", targets: 18 }  // 변동성
                     ]
                 });
             }
@@ -1440,7 +1448,8 @@ $(document).ready(function() {
 
     function addWeightsRow(key = '', value = 0) {
         const displayNameMap = {
-            'ml_pred_proba': 'ml_pred_proba (상승확률)',
+            'ml_pred_proba': 'ml_pred_proba (RF 상승확률)',
+            'lgbm_pred_proba': 'lgbm_pred_proba (LGBM 상승확률)',
             'volatility_score': 'volatility_score (변동성 점수)'
         };
         const displayName = displayNameMap[key] || key;
@@ -1451,13 +1460,29 @@ $(document).ready(function() {
                     <div class="text-muted small">${escapeHtml(key)}</div>
                 </td>
                 <td>
-                    <input type="number" class="form-control form-control-sm weight-value" step="0.000001" min="0" value="${value}">
+                    <input type="range" class="form-range weight-slider mb-1" min="0" max="1" step="0.01" value="${value}">
+                    <div class="input-group input-group-sm">
+                        <input type="number" class="form-control form-control-sm weight-value text-end" step="0.000001" min="0" value="${value}">
+                        <span class="input-group-text">%</span>
+                    </div>
                 </td>
             </tr>
         `;
         $('#weights_tbody').append(rowHtml);
         computeWeightsSum();
     }
+
+    $(document).on('input', '.weight-slider', function() {
+        const val = $(this).val();
+        $(this).closest('td').find('.weight-value').val(val);
+        computeWeightsSum();
+    });
+
+    $(document).on('input', '.weight-value', function() {
+        const val = $(this).val();
+        $(this).closest('td').find('.weight-slider').val(val);
+        computeWeightsSum();
+    });
 
     function escapeHtml(str) {
         if (str === null || str === undefined) return '';

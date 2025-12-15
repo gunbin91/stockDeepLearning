@@ -53,6 +53,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 내부 모듈 임포트
 import ensemble
 import data_processor
+import ml_model
 from logger import (log_info, log_error, log_critical, log_warning, shutdown_logger,
                    start_analysis_report, log_data_collection_status, log_processing_status, 
                    log_final_results, log_performance_info, log_saved_files, complete_analysis_report,
@@ -91,7 +92,27 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             if i % 10 == 0 or i == total_dates - 1:  # 10개마다 또는 마지막에 로그
                 log_progress("일별 최종 점수 계산", i + 1, total_dates)
             try:
-                temp_df = ensemble.calculate_final_score(daily_data.copy())
+                daily_data_copy = daily_data.copy()
+                
+                # LGBM 예측 추가 (lgbm_pred_proba 컬럼이 없는 경우)
+                if 'lgbm_pred_proba' not in daily_data_copy.columns:
+                    try:
+                        lgbm_predicted_df = ml_model.predict_with_lgbm_model(daily_data_copy)
+                        if not lgbm_predicted_df.empty and 'lgbm_pred_proba' in lgbm_predicted_df.columns:
+                            # LGBM 예측 결과 병합
+                            daily_data_copy = pd.merge(
+                                daily_data_copy, 
+                                lgbm_predicted_df[['종목코드', 'lgbm_pred_proba']], 
+                                on='종목코드', 
+                                how='left'
+                            )
+                    except Exception as e:
+                        # LGBM 예측 실패 시 경고만 출력하고 계속 진행
+                        log_warning(f"   ⚠️ [LGBM] 예측 실패 (날짜: {date}): {e}")
+                        # lgbm_pred_proba 컬럼을 NaN으로 추가
+                        daily_data_copy['lgbm_pred_proba'] = np.nan
+                
+                temp_df = ensemble.calculate_final_score(daily_data_copy)
                 temp_df['date'] = date
                 final_df_list.append(temp_df)
             except Exception as e:
@@ -106,7 +127,28 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             raise ValueError("계산된 점수 데이터가 없습니다")
             
         final_scores_df = pd.concat(final_df_list).set_index(['date', '종목코드'])
-        data = data.merge(final_scores_df[['final_score']], left_index=True, right_index=True, how='left')
+        
+        # 병합할 컬럼 목록 (final_score는 필수, 나머지는 final_scores_df에 있으면 포함)
+        merge_cols = ['final_score']
+        optional_cols = ['ml_pred_proba', 'lgbm_pred_proba', 'volatility_score']
+        for col in optional_cols:
+            if col in final_scores_df.columns:
+                merge_cols.append(col)
+        
+        # final_scores_df의 모든 관련 컬럼을 한 번에 병합
+        # 이렇게 하면 RF와 LGBM 예측이 모두 포함됨
+        data = data.merge(final_scores_df[merge_cols], left_index=True, right_index=True, how='left', suffixes=('', '_new'))
+        
+        # _new 접미사가 붙은 컬럼 처리 (final_scores_df의 값이 우선)
+        for col in optional_cols:
+            new_col = col + '_new'
+            if new_col in data.columns:
+                # final_scores_df의 값이 있으면 사용, 없으면 기존 data의 값 유지
+                mask = data[new_col].notna()
+                if mask.any():
+                    data.loc[mask, col] = data.loc[mask, new_col]
+                data.drop(columns=[new_col], inplace=True)
+        
         data.dropna(subset=['final_score'], inplace=True)
         
         log_info("최종 점수 계산 완료", context={
@@ -127,7 +169,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
     print(f"🔍 백테스팅 날짜 범위: {daily_dates.min()} ~ {daily_dates.max()}")
     print(f"🔍 총 백테스팅 날짜 수: {len(daily_dates)}개")
     
-    score_cols_to_log = ['final_score', 'ml_pred_proba', 'volatility_score']
+    score_cols_to_log = ['final_score', 'ml_pred_proba', 'lgbm_pred_proba', 'volatility_score']
 
     take_profit_multiplier = 1 + (take_profit_pct / 100)
     stop_loss_multiplier = 1 - (stop_loss_pct / 100)
@@ -239,14 +281,22 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                             buy_amount_with_fee = actual_buy_price * shares
                             cash -= buy_amount_with_fee
                             
-                            buy_scores = {col: row.get(col) for col in score_cols_to_log if col in row}
+                            # buy_scores 생성 (lgbm_pred_proba 포함)
+                            buy_scores = {}
+                            for col in score_cols_to_log:
+                                if col in row.index:
+                                    val = row[col]
+                                    # NaN 체크
+                                    if pd.notna(val):
+                                        buy_scores[col] = float(val) if isinstance(val, (int, float, np.number)) else val
+                            
                             portfolio[ticker] = {
                                 'buy_date': date, 
                                 'buy_price': buy_price, # 수수료 적용 전 가격
                                 'actual_buy_price': actual_buy_price, # 수수료 적용 후 가격
                                 'shares': shares, 
                                 'buy_scores': buy_scores,
-                                'buy_market_cap': row.get('시가총액')
+                                'buy_market_cap': row.get('시가총액') if '시가총액' in row.index else None
                             }
                             
                             # 매수 이력 추가
@@ -255,7 +305,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                                 'type': 'buy', 'trade_date': date, 'buy_date': date, 'ticker': ticker,
                                 'buy_price': buy_price, 'actual_buy_price': actual_buy_price,
                                 'buy_amount': buy_amount, 'shares': shares,
-                                'buy_market_cap': row.get('시가총액')
+                                'buy_market_cap': row.get('시가총액') if '시가총액' in row.index else None
                             }
                             buy_log_entry.update(buy_scores)
                             daily_trades.append(buy_log_entry)
@@ -533,6 +583,7 @@ def create_json_report(results, output_path=None):
                 'cumulative_profit': float(row['cumulative_profit']) if 'cumulative_profit' in row and pd.notna(row['cumulative_profit']) else None,
                 'final_score': float(row['final_score']) if 'final_score' in row and pd.notna(row['final_score']) else None,
                 'ml_pred_proba': float(row['ml_pred_proba']) if 'ml_pred_proba' in row and pd.notna(row['ml_pred_proba']) else None,
+                'lgbm_pred_proba': float(row['lgbm_pred_proba']) if 'lgbm_pred_proba' in row and pd.notna(row['lgbm_pred_proba']) else None,
                 'volatility_score': float(row['volatility_score']) if 'volatility_score' in row and pd.notna(row['volatility_score']) else None
             }
             trade_log_records.append(record)

@@ -86,7 +86,7 @@ def _validate_and_prepare_weights(payload: dict):
         raise ValueError("요청 바디가 비어있습니다.")
 
     # 프로젝트 호환 팩터(컬럼)만 수정 가능: 추후 팩터 추가 시 이 목록만 확장
-    allowed_keys = {'volatility_score', 'ml_pred_proba'}
+    allowed_keys = {'volatility_score', 'ml_pred_proba', 'lgbm_pred_proba'}
 
     # 입력 포맷 호환: {weights: {...}, normalize: true/false} 또는 {...} 직접
     if isinstance(payload, dict) and 'weights' in payload and isinstance(payload.get('weights'), dict):
@@ -174,6 +174,8 @@ def moment_filter(value, format_string='YYYY-MM-DD'):
 # 설정 (통일된 경로 사용)
 # cuML 모델 경로 (우선 사용)
 CUML_MODEL_PATH = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
+# LightGBM 모델 경로
+LGBM_MODEL_PATH = str(path_manager.data_dir / 'lgbm_model_metadata.joblib')
 # 기존 모델 경로 (fallback)
 MODEL_PATH = str(path_manager.get_model_path())
 
@@ -297,6 +299,16 @@ def load_cached_analysis_result():
             if 'ml_pred_proba' in display_df.columns:
                 display_df['ml_pred_proba'] = display_df['ml_pred_proba'] * 100
             
+            # lgbm_pred_proba가 있으면 백분율로 변환 (0-1 범위를 0-100으로)
+            if 'lgbm_pred_proba' in display_df.columns:
+                # NaN이 아닌 값만 처리
+                mask = display_df['lgbm_pred_proba'].notna()
+                if mask.any():
+                    # 최대값이 1.0 이하이면 0-1 범위로 가정하고 백분율로 변환
+                    max_val = display_df.loc[mask, 'lgbm_pred_proba'].max()
+                    if max_val <= 1.0:
+                        display_df.loc[mask, 'lgbm_pred_proba'] = display_df.loc[mask, 'lgbm_pred_proba'] * 100
+            
             # volatility_score가 없을 때 기본값 설정
             if 'volatility_score' not in display_df.columns:
                 display_df['volatility_score'] = 50.0
@@ -316,6 +328,10 @@ def load_cached_analysis_result():
             display_df.rename(columns=rename_map, inplace=True)
             
             display_columns = [ '최종순위', '종목명', '종목코드', '현재가(원)_formatted', '등락율(%)', '기준일가(원)', '최종점수(점)', '상승확률(%)', '변동성(점)', '시가총액(억)']
+            
+            # lgbm_pred_proba가 있으면 컬럼 목록에 추가 (이름은 그대로 유지)
+            if 'lgbm_pred_proba' in display_df.columns:
+                display_columns.append('lgbm_pred_proba')
             
             result_df = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(원)_formatted': '현재가(원)'})
             
@@ -501,6 +517,7 @@ def index():
 def model_analysis():
     """학습 모델 분석 페이지"""
     model_info = None
+    lgbm_model_info = None
     error = None
     
     try:
@@ -511,7 +528,7 @@ def model_analysis():
         if memory_usage.percent > 85:
             raise MemoryError(f"메모리 사용량이 높습니다: {memory_usage.percent:.1f}%")
         
-        # cuML 모델 파일 우선 확인, 없으면 기존 모델 파일 확인
+        # --- 1. RF (cuML) 모델 로드 ---
         model_path = None
         metadata_path = None
         is_cuml_model = False
@@ -524,332 +541,143 @@ def model_analysis():
             model_path = MODEL_PATH
             metadata_path = str(path_manager.data_dir / 'model_metadata.joblib')
             is_cuml_model = False
-        else:
-            error = f"모델 파일을 찾을 수 없습니다. (cuML: {CUML_MODEL_PATH}, 기존: {MODEL_PATH})"
-            return render_template('model_analysis.html', model_info=None, error=error)
         
-        # 메타데이터 파일이 있으면 메타데이터만 로드 (메모리 최적화)
-        # 없으면 모델 파일에서 정보 추출 (메모리 많이 사용)
-        if os.path.exists(metadata_path):
-            try:
-                model_data = joblib.load(metadata_path)
-                log_info("메타데이터 파일에서 모델 정보 로드 (메모리 최적화)")
-                # 디버깅: 메타데이터 파일 내용 확인
-                log_info(f"메타데이터 파일 키: {list(model_data.keys())}")
-                if 'training_config' in model_data:
-                    log_info(f"training_config 키: {list(model_data['training_config'].keys())}")
-                if 'optimization_results' in model_data:
-                    log_info(f"optimization_results 키: {list(model_data['optimization_results'].keys())}")
-            except Exception as e:
-                log_warning(f"메타데이터 파일 로드 실패: {e}. 모델 파일에서 로드합니다.")
-                # 메타데이터 로드 실패 시 모델 파일에서 로드 (기존 방식)
+        # RF 모델 정보 로드 (기존 로직)
+        if model_path:
+            # 메타데이터 파일 우선 로드
+            if os.path.exists(metadata_path):
+                try:
+                    model_data = joblib.load(metadata_path)
+                    log_info("RF 메타데이터 로드 완료")
+                except Exception as e:
+                    log_warning(f"RF 메타데이터 로드 실패: {e}. 모델 파일 시도")
+                    model_data = joblib.load(model_path)
+            else:
                 model_data = joblib.load(model_path)
+
+            # 모델 정보 추출 (RF)
+            # 메타데이터 파일인지 확인 ('model' 키가 없으면 메타데이터 파일)
+            is_metadata_file = 'model' not in model_data and 'models' not in model_data
+            
+            # cuML 모델인지 확인
+            is_cuml_single_model = is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'single_model'
+            is_cuml_ensemble_model = is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'mini_batch_ensemble'
+            
+            if is_cuml_ensemble_model or is_cuml_single_model or is_metadata_file:
+                # 메타데이터 기반 로드
+                features = model_data.get('features', [])
+                training_config = model_data.get('training_config', {})
+                optimization_results = model_data.get('optimization_results', {})
+                best_params = model_data.get('best_params', {})
+                if not best_params and optimization_results:
+                    best_params = optimization_results.get('best_params', {})
+                parameter_explanations = model_data.get('parameter_explanations', {})
+                feature_importances = model_data.get('feature_importances', None)
+                permutation_importances = model_data.get('permutation_importances', None)
                 
-                # 메모리 사용량 재확인
-                memory_usage = psutil.virtual_memory()
-                if memory_usage.percent > 90:
-                    del model_data
-                    gc.collect()
-                    raise MemoryError(f"모델 로드 후 메모리 사용량이 너무 높습니다: {memory_usage.percent:.1f}%")
-        else:
-            # 메타데이터 파일이 없으면 모델 파일에서 로드 (기존 방식, 메모리 많이 사용)
-            log_warning("메타데이터 파일이 없습니다. 모델 파일에서 직접 로드합니다 (메모리 많이 사용).")
-            log_warning("다음 학습 시 메타데이터 파일이 자동 생성되어 메모리 사용량이 크게 줄어듭니다.")
-            
-            # 파일 크기 확인
-            file_size_mb = os.path.getsize(model_path) / (1024 * 1024)
-            if file_size_mb > 1000:  # 1GB 이상
-                log_warning(f"모델 파일이 매우 큽니다 ({file_size_mb:.1f}MB). 메모리 부족 위험이 있습니다.")
-            
-            model_data = joblib.load(model_path)
-            
-            # 메모리 사용량 재확인
-            memory_usage = psutil.virtual_memory()
-            if memory_usage.percent > 90:
-                del model_data
-                gc.collect()
-                raise MemoryError(f"모델 로드 후 메모리 사용량이 너무 높습니다: {memory_usage.percent:.1f}%")
-            
-            # 메타데이터 파일 생성 시도 (다음 접근 시 메모리 절약)
-            try:
-                # cuML 모델인 경우 (앙상블 또는 단일 모델)
-                if is_cuml_model and 'model_type' in model_data:
-                    model_type = model_data.get('model_type', 'single_model')
-                    metadata_to_save = {
-                        'features': model_data.get('features', []),
-                        'best_params': model_data.get('best_params', {}),
-                        'model_type': model_type,
-                        'optimization_results': model_data.get('optimization_results', {}),
-                        'training_config': model_data.get('training_config', {}),
-                        'feature_importances': model_data.get('feature_importances', None),  # SHAP 값으로 계산된 피처 중요도
-                        'parameter_explanations': {
-                            'n_estimators': 'RandomForest가 만들 트리의 개수',
-                            'max_depth': '각 트리의 최대 깊이 (과적합 방지)',
-                            'min_samples_split': '노드 분할에 필요한 최소 샘플 수',
-                            'min_samples_leaf': '리프 노드의 최소 샘플 수',
-                            'max_samples': '각 트리가 사용할 샘플 비율',
-                            'max_features': '각 분할에서 사용할 최대 피처 비율',
-                            'split_criterion': '분할 기준 (0: Gini, 1: Entropy)'
-                        }
-                    }
+                # 모델 타입 문자열
+                if is_cuml_ensemble_model:
+                    n_models = training_config.get('n_final_models') or training_config.get('n_mini_batches', 5)
+                    model_type_str = f"cuML 앙상블 ({n_models}개 모델)"
+                elif is_cuml_single_model:
+                    model_type_str = "cuML 단일 모델"
                 else:
-                    # 기존 모델인 경우
-                    metadata_to_save = {
-                        'features': model_data.get('features', []),
-                        'training_config': model_data.get('training_config', {}),
-                        'optimization_results': model_data.get('optimization_results', {}),
-                        'feature_importances': model_data.get('feature_importances', None),  # 피처 중요도 (있을 경우)
-                        'parameter_explanations': model_data.get('parameter_explanations', {})
-                    }
-                
-                joblib.dump(metadata_to_save, metadata_path, compress=3)
-                log_info(f"메타데이터 파일이 생성되었습니다: {metadata_path} (다음 접근 시 메모리 절약)")
-            except Exception as e:
-                log_warning(f"메타데이터 파일 생성 실패 (선택사항): {e}")
-        
-        # 메타데이터 파일인지 확인 ('model' 키가 없으면 메타데이터 파일)
-        is_metadata_file = 'model' not in model_data and 'models' not in model_data
-        
-        # cuML 모델인지 확인 (앙상블 또는 단일 모델)
-        is_cuml_single_model = is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'single_model'
-        is_cuml_ensemble_model = is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'mini_batch_ensemble'
-        
-        # cuML 모델 처리 (메타데이터 파일 또는 모델 파일 모두 지원)
-        if is_cuml_ensemble_model or is_cuml_single_model:
-            # cuML 모델 처리 (메모리 최적화: 모델 객체 접근 완전 차단)
+                    model_type_str = "기존 모델 (메타데이터)"
+
+                model_info = {
+                    'model_type': model_type_str,
+                    'model_path': model_path,
+                    'last_modified': datetime.fromtimestamp(os.path.getmtime(model_path)).strftime('%Y-%m-%d %H:%M:%S'),
+                    'oob_score': None,
+                    'features': features,
+                    'feature_importances': feature_importances,
+                    'permutation_importances': permutation_importances,
+                    'params': best_params,
+                    'training_config': training_config,
+                    'optimization_results': optimization_results,
+                    'parameter_explanations': parameter_explanations
+                }
             
-            # 필요한 정보만 먼저 추출 (모델 객체는 절대 추출하지 않음)
-            # 주의: model_data['models'] 또는 model_data['model']을 접근하면 모든 모델이 메모리에 로드됨
-            features = model_data.get('features', [])
-            training_config = model_data.get('training_config', {})
-            optimization_results = model_data.get('optimization_results', {})
-            best_params = model_data.get('best_params', {})
-            parameter_explanations = model_data.get('parameter_explanations', {})
-            feature_importances = model_data.get('feature_importances', None)  # SHAP 값으로 계산된 피처 중요도
-            permutation_importances = model_data.get('permutation_importances', None)  # 순열 중요도
-            
-            # 디버깅: 피처 중요도 로드 확인
-            if feature_importances is None:
-                log_warning("⚠️ 메타데이터 파일에 SHAP 피처 중요도가 없습니다. SHAP 계산이 실패했거나 이전 모델일 수 있습니다.")
-            else:
-                log_info(f"✅ SHAP 피처 중요도 로드 완료: {len(feature_importances)}개 피처")
-            
-            if permutation_importances is None:
-                log_warning("⚠️ 메타데이터 파일에 순열 중요도가 없습니다. 순열 중요도 계산이 실패했거나 이전 모델일 수 있습니다.")
-            else:
-                log_info(f"✅ 순열 중요도 로드 완료: {len(permutation_importances)}개 피처")
-            
-            # 모델 개수는 training_config에서 가져오거나, 없으면 기본값 사용
-            # (model_data['models']에 접근하지 않음 - 메모리 최적화)
-            if is_cuml_ensemble_model:
-                n_models = training_config.get('n_final_models') or training_config.get('n_mini_batches', 5)
-                model_type_str = f"cuML 앙상블 ({n_models}개 모델)"
-            else:
-                n_models = 1
-                model_type_str = "cuML 단일 모델"
-            
-            # model_data에서 models, model, scaler, imputation_values는 메모리를 많이 사용하므로 즉시 삭제
-            # (이미 필요한 정보는 추출했으므로)
-            if 'models' in model_data:
-                del model_data['models']
-            if 'model' in model_data:
-                del model_data['model']
-            if 'scaler' in model_data:
-                del model_data['scaler']
-            if 'imputation_values' in model_data:
-                del model_data['imputation_values']
+            # 객체 정리
             del model_data
             gc.collect()
-            
-            # 피처 중요도는 메타데이터 파일에서 로드 (SHAP 값으로 계산된 경우)
-            # 메타데이터에 없으면 None (모델 객체 접근 없이 처리)
-            
-            # 파라미터는 best_params에서 가져옴 (모델 객체 접근 없음)
-            model_params = best_params.copy() if best_params else {}
-            
-            # optimization_results가 비어있거나 불완전하면 best_params로부터 구성
-            if not optimization_results:
-                optimization_results = {}
-            
-            if 'best_params' not in optimization_results and best_params:
-                optimization_results['best_params'] = best_params
-            
-            if 'best_score' not in optimization_results:
-                optimization_results['best_score'] = None
-            
-            if 'total_combinations_tested' not in optimization_results:
-                optimization_results['total_combinations_tested'] = None
-            
-            # training_config가 비어있거나 불완전하면 기본값 구성
-            if not training_config:
-                training_config = {}
-            
-            # GPU 버전에서는 사용하지 않는 필드들에 대한 기본값 설정
-            if 'n_jobs' not in training_config:
-                training_config['n_jobs'] = None  # GPU 버전은 CPU 코어 사용 안 함
-            
-            if 'test_size' not in training_config:
-                training_config['test_size'] = None  # GPU 버전은 교차검증 사용
-            
-            # 필수 필드들 기본값 설정
-            if 'search_method' not in training_config:
-                training_config['search_method'] = 'Optuna (TPE Sampler)'
-            
-            if 'scoring' not in training_config:
-                training_config['scoring'] = 'roc_auc'
-            
-            if 'cv_folds' not in training_config:
-                training_config['cv_folds'] = 3
-            
-            if 'n_iter' not in training_config:
-                training_config['n_iter'] = None
-            
-            if 'max_depth_candidates' not in training_config:
-                training_config['max_depth_candidates'] = []
-            
-            # 모델 목표 정보 기본값 설정 (하위 호환성)
-            if 'target_days' not in training_config:
-                training_config['target_days'] = 10  # 기본값: 10거래일
-            if 'target_percentage' not in training_config:
-                training_config['target_percentage'] = 8  # 기본값: 8%
-            if 'target_description' not in training_config:
-                training_config['target_description'] = f"{training_config.get('target_days', 10)}거래일 사이 한번이라도 {training_config.get('target_percentage', 8)}% 상승이 있었는지 확인"
-            
-            # 모델 정보 (메모리 최적화: 모델 객체 생성 없이 필요한 정보만 저장)
-            model_info = {
-                'model_type': model_type_str,
-                'model_path': model_path,
-                'last_modified': datetime.fromtimestamp(os.path.getmtime(model_path)).strftime('%Y-%m-%d %H:%M:%S'),
-                'oob_score': None,  # cuML은 OOB 지원 안 함
-                'features': features,
-                'feature_importances': feature_importances,  # SHAP 값으로 계산된 피처 중요도 (있을 경우)
-                'permutation_importances': permutation_importances,  # 순열 중요도 (있을 경우)
-                'params': model_params,  # best_params 사용 (모델 객체 접근 없음)
-                'training_config': training_config,
-                'optimization_results': optimization_results,
-                'parameter_explanations': parameter_explanations,
-                'n_models': n_models
-            }
-            
-            # 모델 객체는 생성하지 않았으므로 삭제 불필요
-            # models와 scaler는 이미 model_data에서 삭제했으므로 추가 삭제 불필요
-            gc.collect()
-        elif is_metadata_file:
-            # 메타데이터 파일인데 cuML 모델이 아닌 경우 (기존 CPU 모델의 메타데이터)
-            features = model_data.get('features', [])
-            training_config = model_data.get('training_config', {})
-            optimization_results = model_data.get('optimization_results', {})
-            parameter_explanations = model_data.get('parameter_explanations', {})
-            feature_importances = model_data.get('feature_importances', None)  # 메타데이터에 저장된 피처 중요도
-            permutation_importances = model_data.get('permutation_importances', None)  # 순열 중요도
-            
-            # best_params는 optimization_results에서 가져오거나 직접 가져오기
-            best_params = model_data.get('best_params', {})
-            if not best_params and optimization_results:
-                best_params = optimization_results.get('best_params', {})
-            
-            # 모델 목표 정보 기본값 설정 (하위 호환성)
-            if 'target_days' not in training_config:
-                training_config['target_days'] = 10  # 기본값: 10거래일
-            if 'target_percentage' not in training_config:
-                training_config['target_percentage'] = 8  # 기본값: 8%
-            if 'target_description' not in training_config:
-                training_config['target_description'] = f"{training_config.get('target_days', 10)}거래일 사이 한번이라도 {training_config.get('target_percentage', 8)}% 상승이 있었는지 확인"
-            
-            del model_data
-            gc.collect()
-            
-            # 모델 정보 (메타데이터만 사용, 모델 객체 없음)
-            model_info = {
-                'model_type': '기존 모델 (메타데이터)',
-                'model_path': model_path,
-                'last_modified': datetime.fromtimestamp(os.path.getmtime(model_path)).strftime('%Y-%m-%d %H:%M:%S'),
-                'oob_score': None,
-                'features': features,
-                'feature_importances': feature_importances,  # 메타데이터에 저장된 피처 중요도 (있을 경우)
-                'permutation_importances': permutation_importances,  # 순열 중요도 (있을 경우)
-                'params': best_params,
-                'training_config': training_config,
-                'optimization_results': optimization_results,
-                'parameter_explanations': parameter_explanations
-            }
-        else:
-            # 기존 모델 구조 (sklearn, 메모리 최적화)
-            # 메타데이터 파일이 아닌 경우에만 모델 객체 접근
-            model = model_data['model']
-            features = model_data['features']
-            training_config = model_data.get('training_config', {})
-            optimization_results = model_data.get('optimization_results', {})
-            parameter_explanations = model_data.get('parameter_explanations', {})
-            
-            # 모델 목표 정보 기본값 설정 (하위 호환성)
-            if 'target_days' not in training_config:
-                training_config['target_days'] = 10  # 기본값: 10거래일
-            if 'target_percentage' not in training_config:
-                training_config['target_percentage'] = 8  # 기본값: 8%
-            if 'target_description' not in training_config:
-                training_config['target_description'] = f"{training_config.get('target_days', 10)}거래일 사이 한번이라도 {training_config.get('target_percentage', 8)}% 상승이 있었는지 확인"
-            
-            # model_data에서 필요한 정보 추출 후 즉시 삭제
-            del model_data
-            gc.collect()
-            
-            # 피처 중요도 데이터 정리 (CPU/GPU 모델 호환)
-            feature_importances = None
+
+        # --- 2. LGBM 모델 로드 ---
+        if os.path.exists(LGBM_MODEL_PATH):
             try:
-                if hasattr(model, 'feature_importances_'):
-                    importances = model.feature_importances_
-                    # cuML 모델도 feature_importances_를 제공하지만, cuDF Series나 다른 형태로 반환될 수 있음
-                    if hasattr(importances, 'to_pandas'):
-                        # cuDF Series인 경우 pandas로 변환
-                        importances = importances.to_pandas().values
-                    elif hasattr(importances, 'values'):
-                        # pandas Series나 다른 형태인 경우
-                        importances = importances.values
-                    elif hasattr(importances, 'to_numpy'):
-                        # numpy 배열로 변환 가능한 경우
-                        importances = importances.to_numpy()
-                    elif not isinstance(importances, np.ndarray):
-                        # 기타 타입은 numpy 배열로 변환
-                        importances = np.array(importances)
-                    
-                    # numpy 배열로 확실히 변환
-                    if not isinstance(importances, np.ndarray):
-                        importances = np.array(importances)
-                    
-                    # 피처와 중요도 매칭
-                    if len(importances) == len(features):
-                        feature_importances = list(zip(features, importances))
-                        feature_importances.sort(key=lambda x: x[1], reverse=True)
+                lgbm_data = joblib.load(LGBM_MODEL_PATH)
+                log_info("LGBM 메타데이터 로드 완료")
+                
+                lgbm_model_info = {
+                    'model_type': 'LightGBM (GPU)',
+                    'model_path': str(path_manager.data_dir / 'lgbm_model.txt'),
+                    'last_modified': datetime.fromtimestamp(os.path.getmtime(LGBM_MODEL_PATH)).strftime('%Y-%m-%d %H:%M:%S'),
+                    'features': lgbm_data.get('features', []),
+                    'params': lgbm_data.get('best_params', {}),
+                    'best_score': lgbm_data.get('best_score', None),
+                    'best_iteration': lgbm_data.get('best_iteration', None)
+                }
+                
+                # 기본 중요도: 모델에서 직접 가져오기
+                try:
+                    import lightgbm as lgb
+                    lgbm_model_file = path_manager.data_dir / 'lgbm_model.txt'
+                    if lgbm_model_file.exists():
+                        model = lgb.Booster(model_file=str(lgbm_model_file))
+                        feature_importance = model.feature_importance(importance_type='gain')
+                        features = lgbm_model_info['features']
+                        if len(features) == len(feature_importance):
+                            # 튜플 리스트로 변환 [(feature, importance), ...]
+                            importance_list = list(zip(features, feature_importance.tolist()))
+                            # 중요도 높은 순서대로 정렬 (내림차순)
+                            importance_list.sort(key=lambda x: x[1], reverse=True)
+                            lgbm_model_info['default_importances'] = importance_list
+                        else:
+                            lgbm_model_info['default_importances'] = None
                     else:
-                        # 길이가 맞지 않는 경우 경고
-                        log_warning(f"피처 중요도 길이 불일치: features={len(features)}, importances={len(importances)}")
-                        feature_importances = None
-            except (AttributeError, TypeError, ValueError) as e:
-                # cuML 모델 등 feature_importances_ 처리 실패
-                log_warning(f"피처 중요도 추출 실패: {e}")
-                feature_importances = None
-            
-            # 모델 정보 (메모리 최적화: 필요한 정보만 저장)
-            # 순열 중요도는 모델 파일에서 직접 로드할 수 없으므로 None (메타데이터 파일에만 저장됨)
-            model_info = {
-                'model_type': type(model).__name__,
-                'model_path': model_path,
-                'last_modified': datetime.fromtimestamp(os.path.getmtime(model_path)).strftime('%Y-%m-%d %H:%M:%S'),
-                'oob_score': getattr(model, 'oob_score_', None),
-                'features': features,
-                'feature_importances': feature_importances,
-                'permutation_importances': None,  # 모델 파일 직접 로드 시에는 순열 중요도 없음 (메타데이터 파일에만 저장)
-                'params': model.get_params() if hasattr(model, 'get_params') else {},
-                'training_config': training_config,
-                'optimization_results': optimization_results,
-                'parameter_explanations': parameter_explanations
-            }
-            
-            # 모델 객체는 더 이상 필요 없으므로 삭제
-            del model
-            gc.collect()
-        
+                        lgbm_model_info['default_importances'] = None
+                except Exception as e:
+                    log_warning(f"LGBM 기본 중요도 로드 실패: {e}")
+                    lgbm_model_info['default_importances'] = None
+                
+                # SHAP 및 Permutation 중요도: CSV 파일에서 로드
+                fi_path = path_manager.data_dir / 'lgbm_feature_importance.csv'
+                if fi_path.exists():
+                    try:
+                        fi_df = pd.read_csv(fi_path)
+                        
+                        # SHAP 중요도
+                        if 'shap_importance' in fi_df.columns:
+                            shap_df = fi_df[['feature', 'shap_importance']].sort_values(by='shap_importance', ascending=False)
+                            lgbm_model_info['shap_importances'] = list(shap_df.itertuples(index=False, name=None))
+                        else:
+                            lgbm_model_info['shap_importances'] = None
+                            
+                        # 순열 중요도 (추후 템플릿에 추가 가능)
+                        if 'permutation_importance' in fi_df.columns:
+                            perm_df = fi_df[['feature', 'permutation_importance']].sort_values(by='permutation_importance', ascending=False)
+                            lgbm_model_info['permutation_importances'] = list(perm_df.itertuples(index=False, name=None))
+                        else:
+                            lgbm_model_info['permutation_importances'] = None
+                            
+                    except Exception as e:
+                        log_warning(f"LGBM 중요도 CSV 파일 처리 중 오류: {e}")
+                        lgbm_model_info['shap_importances'] = None
+                        lgbm_model_info['permutation_importances'] = None
+                else:
+                    lgbm_model_info['shap_importances'] = None
+                    lgbm_model_info['permutation_importances'] = None
+                
+                # 기본적으로 기본 중요도를 feature_importances로 설정 (하위 호환성)
+                lgbm_model_info['feature_importances'] = lgbm_model_info.get('default_importances') or lgbm_model_info.get('shap_importances')
+                    
+            except Exception as e:
+                log_warning(f"LGBM 정보 로드 실패: {e}")
+                lgbm_model_info = None
+
+        if model_info is None and lgbm_model_info is None:
+             error = "학습된 모델 정보를 찾을 수 없습니다."
+
     except FileNotFoundError:
         error = "모델 파일을 찾을 수 없습니다. 먼저 모델을 학습해주세요."
     except MemoryError as e:
@@ -859,7 +687,7 @@ def model_analysis():
         import traceback
         log_error(f"모델 분석 페이지 오류: {traceback.format_exc()}")
     
-    return render_template('model_analysis.html', model_info=model_info, error=error)
+    return render_template('model_analysis.html', model_info=model_info, lgbm_model_info=lgbm_model_info, error=error)
 
 @app.route('/backtest')
 def backtest():
@@ -1481,7 +1309,7 @@ def get_weights():
         if isinstance(file_weights, dict):
             merged.update(file_weights)
 
-        allowed_keys = ['volatility_score', 'ml_pred_proba']
+        allowed_keys = ['volatility_score', 'ml_pred_proba', 'lgbm_pred_proba']
         # UI 혼란 방지: 허용된 키만 반환/표시
         merged_filtered = {k: merged.get(k, 0.0) for k in allowed_keys}
         file_weights_filtered = {k: (file_weights or {}).get(k, 0.0) for k in allowed_keys}

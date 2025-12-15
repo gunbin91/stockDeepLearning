@@ -27,3 +27,6 @@ eventlet>=0.33.0
 # 불균형 데이터 처리 (SMOTEENN)
 imbalanced-learn>=0.11.0
 
+# LightGBM (추가됨)
+lightgbm>=4.0.0
+

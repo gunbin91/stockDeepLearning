@@ -1,4 +1,5 @@
 {
-    "volatility_score": 1.0,
-    "ml_pred_proba": 0.0
+    "volatility_score": 0.0,
+    "ml_pred_proba": 0.5,
+    "lgbm_pred_proba": 0.5
 }

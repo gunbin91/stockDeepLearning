@@ -632,10 +632,36 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             ma20_slope = calculate_normalized_linear_regression_slope_latest(ma20, window=5)
             mean_20 = df_for_indicators['종가'].rolling(20).mean()
             std_20 = df_for_indicators['종가'].rolling(20).std()
-            z_score_20 = (df_for_indicators['종가'] - mean_20) / std_20
-            if len(z_score_20) > 0:
-                latest_score = np.abs(z_score_20.iloc[-1]) * ma20_slope if (ma20_slope > 0 and z_score_20.iloc[-1] < 0) else 0
-                latest_data['Trend_Pullback_Score'] = latest_score
+            
+            # std_20이 0인 경우 처리 (변동성이 없으면 z_score를 0으로 설정)
+            if len(std_20) > 0 and len(mean_20) > 0:
+                std_20_clean = std_20.replace(0, np.nan)
+                z_score_20 = (df_for_indicators['종가'] - mean_20) / std_20_clean
+                z_score_20 = z_score_20.fillna(0)  # std가 0인 경우 z_score를 0으로 설정
+                
+                if len(z_score_20) > 0:
+                    z_score_latest = z_score_20.iloc[-1]
+                    # NaN 값 처리
+                    if pd.isna(ma20_slope) or pd.isna(z_score_latest):
+                        latest_data['Trend_Pullback_Score'] = np.nan
+                    else:
+                        # 기본 점수 계산: abs(z_score) * ma20_slope
+                        base_score = np.abs(z_score_latest) * ma20_slope
+                        
+                        # 조건별 가중치 적용
+                        if ma20_slope > 0 and z_score_latest < 0:
+                            # 상승 추세 + 눌림: 최고 점수
+                            latest_data['Trend_Pullback_Score'] = base_score * 1.0
+                        elif ma20_slope > 0 and z_score_latest >= 0:
+                            # 상승 추세 + 과열: 낮은 점수
+                            latest_data['Trend_Pullback_Score'] = base_score * 0.3
+                        elif ma20_slope <= 0:
+                            # 하락 추세: 매우 낮은 점수
+                            latest_data['Trend_Pullback_Score'] = base_score * 0.1
+                        else:
+                            latest_data['Trend_Pullback_Score'] = 0.0
+                else:
+                    latest_data['Trend_Pullback_Score'] = np.nan
             else:
                 latest_data['Trend_Pullback_Score'] = np.nan
         except Exception as e:

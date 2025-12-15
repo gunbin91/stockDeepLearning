@@ -804,16 +804,56 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         try:
             mean_20 = df['종가'].rolling(20).mean()
             std_20 = df['종가'].rolling(20).std()
-            z_score_20 = (df['종가'] - mean_20) / std_20
+            
+            # std_20이 0인 경우 처리 (변동성이 없으면 z_score를 0으로 설정)
+            z_score_20 = (df['종가'] - mean_20) / std_20.replace(0, np.nan)
+            z_score_20 = z_score_20.fillna(0)  # std가 0인 경우 z_score를 0으로 설정
+            
             # MA20_Slope 내부 계산용
             ma20 = df['종가'].rolling(window=20).mean()
             ma20_slope = calculate_normalized_linear_regression_slope(ma20, window=5)
-            # Trend_Pullback_Score: 상승 추세이면서 눌림(-Z)인 경우만 점수
+            
+            # Trend_Pullback_Score 계산
+            # 의미: 추세 강도와 눌림 정도를 결합한 점수
+            # - 상승 추세(ma20_slope > 0) + 눌림(z_score_20 < 0): 높은 양수 점수
+            # - 상승 추세 + 과열(z_score_20 > 0): 낮은 양수 또는 0
+            # - 하락 추세(ma20_slope < 0): 음수 또는 0
+            # 기본 공식: abs(z_score_20) * ma20_slope (단, 조건에 따라 가중치 조정)
+            
+            # NaN 값 처리
+            ma20_slope_clean = ma20_slope.fillna(0)
+            z_score_20_clean = z_score_20.fillna(0)
+            
+            # 기본 점수 계산: abs(z_score) * ma20_slope
+            base_score = np.abs(z_score_20_clean) * ma20_slope_clean
+            
+            # 조건별 가중치 적용
+            # 1. 상승 추세 + 눌림: 가중치 1.0 (가장 높은 점수)
+            # 2. 상승 추세 + 과열: 가중치 0.3 (낮은 점수)
+            # 3. 하락 추세: 가중치 0.1 또는 음수 (매우 낮은 점수)
+            
+            condition_up_pullback = (ma20_slope_clean > 0) & (z_score_20_clean < 0)  # 상승 추세 + 눌림
+            condition_up_overheat = (ma20_slope_clean > 0) & (z_score_20_clean >= 0)  # 상승 추세 + 과열
+            condition_down = (ma20_slope_clean <= 0)  # 하락 추세
+            
             df['Trend_Pullback_Score'] = np.where(
-                (ma20_slope > 0) & (z_score_20 < 0),
-                np.abs(z_score_20) * ma20_slope,
-                0
+                condition_up_pullback,
+                base_score * 1.0,  # 상승 추세 + 눌림: 최고 점수
+                np.where(
+                    condition_up_overheat,
+                    base_score * 0.3,  # 상승 추세 + 과열: 낮은 점수
+                    np.where(
+                        condition_down,
+                        base_score * 0.1,  # 하락 추세: 매우 낮은 점수
+                        0
+                    )
+                )
             )
+            
+            # 원본 데이터에 NaN이 있던 위치는 NaN으로 복원
+            nan_mask = ma20_slope.isna() | z_score_20.isna()
+            df.loc[nan_mask, 'Trend_Pullback_Score'] = np.nan
+            
         except Exception as e:
             log_warning(f"Trend_Pullback_Score 계산 실패 ({ticker}): {e}")
             df['Trend_Pullback_Score'] = np.nan

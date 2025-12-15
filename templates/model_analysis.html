@@ -14,20 +14,51 @@
   <hr />
   <h6>해결 방법:</h6>
   <ul class="mb-0">
-    {% if "메모리" in error %}
-    <li>다른 프로그램을 종료하여 메모리를 확보하세요</li>
-    <li>컴퓨터를 재시작한 후 다시 시도하세요</li>
-    {% elif "파일을 찾을 수 없습니다" in error %}
-    <li>
-      먼저 <a href="/" class="alert-link">주식 추천 페이지</a>에서 모델을
-      학습하세요
-    </li>
-    <li><code>run/run_train_gpu.bat</code> 파일을 실행하여 모델을 학습하세요</li>
-    {% else %}
     <li>페이지를 새로고침해보세요</li>
     <li>문제가 지속되면 관리자에게 문의하세요</li>
-    {% endif %}
   </ul>
+</div>
+    {% endif %}
+
+<!-- 모델 선택 탭 -->
+<ul class="nav nav-tabs mb-4" id="modelSelectTabs" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button
+      class="nav-link active"
+      id="rf-tab"
+      data-bs-toggle="tab"
+      data-bs-target="#rf-pane"
+      type="button"
+      role="tab"
+      aria-controls="rf-pane"
+      aria-selected="true"
+    >
+      <i class="fas fa-tree me-2"></i>RandomForest (RF)
+    </button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button
+      class="nav-link"
+      id="lgbm-tab"
+      data-bs-toggle="tab"
+      data-bs-target="#lgbm-pane"
+      type="button"
+      role="tab"
+      aria-controls="lgbm-pane"
+      aria-selected="false"
+    >
+      <i class="fas fa-bolt me-2"></i>LightGBM (LGBM)
+    </button>
+  </li>
+  </ul>
+
+<div class="tab-content" id="modelSelectTabContent">
+  <!-- RF 탭 콘텐츠 -->
+  <div class="tab-pane fade show active" id="rf-pane" role="tabpanel" aria-labelledby="rf-tab">
+    
+    {% if not model_info %}
+    <div class="alert alert-warning" role="alert">
+      <i class="fas fa-exclamation-circle me-2"></i>RandomForest 모델 정보가 없습니다. 모델을 학습해주세요.
 </div>
 {% else %}
 
@@ -36,7 +67,7 @@
 <div class="card mb-4">
   <div class="card-header">
     <h5 class="mb-0">
-      <i class="fas fa-cogs text-primary me-2"></i>학습 설정 정보
+          <i class="fas fa-cogs text-primary me-2"></i>학습 설정 정보 (RF)
     </h5>
   </div>
   <div class="card-body">
@@ -112,7 +143,7 @@
 <div class="card mb-4">
   <div class="card-header">
     <h5 class="mb-0">
-      <i class="fas fa-trophy text-warning me-2"></i>최적화 결과
+          <i class="fas fa-trophy text-warning me-2"></i>최적화 결과 (RF)
     </h5>
   </div>
   <div class="card-body">
@@ -164,7 +195,7 @@
 <div class="card mb-4">
   <div class="card-header">
     <h5 class="mb-0">
-      <i class="fas fa-info-circle text-info me-2"></i>모델 개요
+          <i class="fas fa-info-circle text-info me-2"></i>모델 개요 (RF)
     </h5>
   </div>
   <div class="card-body">
@@ -224,96 +255,25 @@
   </div>
 </div>
 
-<!-- 모델 성능 -->
-{% if model_info.oob_score %}
+    <!-- 피처 중요도 (RF) -->
 <div class="card mb-4">
   <div class="card-header">
     <h5 class="mb-0">
-      <i class="fas fa-chart-line text-success me-2"></i>모델 성능
-    </h5>
-  </div>
-  <div class="card-body">
-    <div class="row">
-      <div class="col-md-6">
-        <div class="card bg-light">
-          <div class="card-body text-center">
-            <h6 class="card-title">OOB 점수 (자체 검증 정확도)</h6>
-            <h3 class="text-primary">
-              {{ "{:.4f}".format(model_info.oob_score) }}
-            </h3>
-            <small class="text-muted"
-              >모델이 학습에 사용하지 않은 데이터를 가지고 자체적으로 검증한
-              정확도입니다. 0.5 이상이면 일반적으로 유의미한 성능으로
-              봅니다.</small
-            >
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-{% endif %}
-
-<!-- 파라미터 설명 -->
-{% if model_info.parameter_explanations %}
-<div class="card mb-4">
-  <div class="card-header">
-    <h5 class="mb-0">
-      <i class="fas fa-question-circle text-info me-2"></i>파라미터 의미 설명
-    </h5>
-  </div>
-  <div class="card-body">
-    <div class="alert alert-info" role="alert">
-      <i class="fas fa-info-circle me-2"></i>
-      각 파라미터가 모델 학습에 어떤 영향을 미치는지 설명합니다.
-    </div>
-    <div class="accordion" id="paramExplanations">
-      {% for param, explanation in model_info.parameter_explanations.items() %}
-      <div class="accordion-item">
-        <h2 class="accordion-header">
-          <button
-            class="accordion-button collapsed"
-            type="button"
-            data-bs-toggle="collapse"
-            data-bs-target="#param{{ loop.index }}"
-          >
-            <strong>{{ param }}</strong>
-            <span class="badge bg-secondary ms-2"
-              >{{ model_info.params.get(param, 'N/A') }}</span
-            >
-          </button>
-        </h2>
-        <div id="param{{ loop.index }}" class="accordion-collapse collapse">
-          <div class="accordion-body">
-            <p class="mb-0">{{ explanation }}</p>
-          </div>
-        </div>
-      </div>
-      {% endfor %}
-    </div>
-  </div>
-</div>
-{% endif %}
-
-<!-- 피처 중요도 -->
-<div class="card mb-4">
-  <div class="card-header">
-    <h5 class="mb-0">
-      <i class="fas fa-chart-bar text-warning me-2"></i>피처 중요도
+          <i class="fas fa-chart-bar text-warning me-2"></i>피처 중요도 (RF)
     </h5>
   </div>
   <div class="card-body">
     <!-- 탭 네비게이션 -->
-    <ul class="nav nav-tabs mb-4" id="featureImportanceTabs" role="tablist">
+        <ul class="nav nav-tabs mb-4" id="rfFeatureTabs" role="tablist">
       <li class="nav-item" role="presentation">
         <button
           class="nav-link active"
-          id="shap-tab"
+              id="rf-shap-tab"
           data-bs-toggle="tab"
-          data-bs-target="#shap-pane"
+              data-bs-target="#rf-shap-pane"
           type="button"
           role="tab"
-          aria-controls="shap-pane"
+              aria-controls="rf-shap-pane"
           aria-selected="true"
         >
           <i class="fas fa-chart-line me-2"></i>SHAP 중요도
@@ -322,12 +282,12 @@
       <li class="nav-item" role="presentation">
         <button
           class="nav-link"
-          id="permutation-tab"
+              id="rf-perm-tab"
           data-bs-toggle="tab"
-          data-bs-target="#permutation-pane"
+              data-bs-target="#rf-perm-pane"
           type="button"
           role="tab"
-          aria-controls="permutation-pane"
+              aria-controls="rf-perm-pane"
           aria-selected="false"
         >
           <i class="fas fa-exchange-alt me-2"></i>순열 중요도
@@ -335,45 +295,34 @@
       </li>
     </ul>
 
-    <!-- 탭 콘텐츠 -->
-    <div class="tab-content" id="featureImportanceTabContent">
+        <div class="tab-content" id="rfFeatureTabContent">
       <!-- SHAP 탭 -->
-      <div
-        class="tab-pane fade show active"
-        id="shap-pane"
-        role="tabpanel"
-        aria-labelledby="shap-tab"
-      >
-        <div class="alert alert-info" role="alert">
-          <i class="fas fa-info-circle me-2"></i>SHAP 값으로 계산된 피처 중요도입니다. 각 피처가 모델 예측에 기여한 평균 기여도를 보여줍니다. 값이 클수록 해당 피처가 주가 상승 예측에 더 중요한 역할을 합니다.
-        </div>
-
-        <!-- 차트 -->
+          <div class="tab-pane fade show active" id="rf-shap-pane" role="tabpanel" aria-labelledby="rf-shap-tab">
         <div class="mb-4">
-          <canvas id="shap_importance_chart" width="400" height="200"></canvas>
+              <canvas id="rf_shap_chart" width="400" height="200"></canvas>
         </div>
 
-        <!-- 상세 데이터 -->
-        <div class="accordion" id="shapAccordion">
+            <!-- 상세 데이터 보기 아코디언 -->
+            <div class="accordion" id="rfShapAccordion">
           <div class="accordion-item">
             <h2 class="accordion-header">
               <button
                 class="accordion-button collapsed"
                 type="button"
                 data-bs-toggle="collapse"
-                data-bs-target="#shapDetails"
+                    data-bs-target="#rfShapDetails"
               >
-                <i class="fas fa-table me-2"></i>SHAP 중요도 상세 데이터 보기
+                    <i class="fas fa-table me-2"></i>상세 데이터 보기
               </button>
             </h2>
             <div
-              id="shapDetails"
+                  id="rfShapDetails"
               class="accordion-collapse collapse"
-              data-bs-parent="#shapAccordion"
+                  data-bs-parent="#rfShapAccordion"
             >
               <div class="accordion-body">
                 <div class="table-responsive">
-                  <table class="table table-striped" id="shap_table">
+                      <table class="table table-striped" id="rf_shap_table">
                     <thead class="table-dark">
                       <tr>
                         <th>피처 (Feature)</th>
@@ -390,7 +339,7 @@
                         {% endfor %}
                       {% else %}
                         <tr>
-                          <td class="text-center text-muted" colspan="2">SHAP 피처 중요도 정보를 사용할 수 없습니다.</td>
+                              <td class="text-center text-muted" colspan="2">중요도 정보가 없습니다.</td>
                         </tr>
                       {% endif %}
                     </tbody>
@@ -401,44 +350,33 @@
           </div>
         </div>
       </div>
-
       <!-- 순열 중요도 탭 -->
-      <div
-        class="tab-pane fade"
-        id="permutation-pane"
-        role="tabpanel"
-        aria-labelledby="permutation-tab"
-      >
-        <div class="alert alert-info" role="alert">
-          <i class="fas fa-info-circle me-2"></i>순열 중요도(Permutation Importance)로 계산된 피처 중요도입니다. 각 피처의 값을 랜덤하게 섞었을 때 모델 성능이 얼마나 감소하는지 측정합니다. 값이 클수록 해당 피처가 모델 예측에 더 중요한 역할을 합니다.
-        </div>
-
-        <!-- 차트 -->
+          <div class="tab-pane fade" id="rf-perm-pane" role="tabpanel" aria-labelledby="rf-perm-tab">
         <div class="mb-4">
-          <canvas id="permutation_importance_chart" width="400" height="200"></canvas>
+              <canvas id="rf_perm_chart" width="400" height="200"></canvas>
         </div>
 
-        <!-- 상세 데이터 -->
-        <div class="accordion" id="permutationAccordion">
+            <!-- 상세 데이터 보기 아코디언 -->
+            <div class="accordion" id="rfPermAccordion">
           <div class="accordion-item">
             <h2 class="accordion-header">
               <button
                 class="accordion-button collapsed"
                 type="button"
                 data-bs-toggle="collapse"
-                data-bs-target="#permutationDetails"
+                    data-bs-target="#rfPermDetails"
               >
-                <i class="fas fa-table me-2"></i>순열 중요도 상세 데이터 보기
+                    <i class="fas fa-table me-2"></i>상세 데이터 보기
               </button>
             </h2>
             <div
-              id="permutationDetails"
+                  id="rfPermDetails"
               class="accordion-collapse collapse"
-              data-bs-parent="#permutationAccordion"
+                  data-bs-parent="#rfPermAccordion"
             >
               <div class="accordion-body">
                 <div class="table-responsive">
-                  <table class="table table-striped" id="permutation_table">
+                      <table class="table table-striped" id="rf_perm_table">
                     <thead class="table-dark">
                       <tr>
                         <th>피처 (Feature)</th>
@@ -455,11 +393,13 @@
                         {% endfor %}
                       {% else %}
                         <tr>
-                          <td class="text-center text-muted" colspan="2">순열 중요도 정보를 사용할 수 없습니다.</td>
+                              <td class="text-center text-muted" colspan="2">순열 중요도 정보가 없습니다.</td>
                         </tr>
                       {% endif %}
                     </tbody>
                   </table>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -468,469 +408,394 @@
       </div>
     </div>
 
-    <!-- 학습 파라미터 (공통) -->
-    <div class="accordion mt-4" id="featureAccordion">
-
-      <div class="accordion-item">
-        <h2 class="accordion-header">
-          <button
-            class="accordion-button collapsed"
-            type="button"
-            data-bs-toggle="collapse"
-            data-bs-target="#modelParams"
-          >
-            <i class="fas fa-cogs me-2"></i>주요 학습 파라미터 보기
+    <!-- 상관관계 계산 섹션 (RF) -->
+    <div class="card mb-4">
+      <div class="card-header">
+        <h5 class="mb-0">
+          <i class="fas fa-project-diagram text-info me-2"></i>피처 상관관계 분석 (RF)
+        </h5>
+      </div>
+      <div class="card-body">
+        <p class="text-muted mb-3">
+          주요 피처들 간의 상관관계를 분석하여 피처 간의 관계를 파악할 수 있습니다.
+        </p>
+        <button type="button" class="btn btn-primary" id="calculateCorrelationBtn">
+          <i class="fas fa-calculator me-2"></i>상관관계 계산
           </button>
-        </h2>
-        <div
-          id="modelParams"
-          class="accordion-collapse collapse"
-          data-bs-parent="#featureAccordion"
-        >
-          <div class="accordion-body">
+        <div id="correlationResult" class="mt-4" style="display: none;">
+          <div class="alert alert-info">
+            <i class="fas fa-info-circle me-2"></i>상관관계 계산이 완료되었습니다. 아래 차트를 확인하세요.
+          </div>
+          <div id="correlationChart" style="height: 600px;"></div>
+        </div>
+      </div>
+    </div>
+    {% endif %} <!-- RF 모델 정보 끝 -->
+  </div>
+
+  <!-- LGBM 탭 콘텐츠 -->
+  <div class="tab-pane fade" id="lgbm-pane" role="tabpanel" aria-labelledby="lgbm-tab">
+    {% if not lgbm_model_info %}
+    <div class="alert alert-warning" role="alert">
+      <i class="fas fa-exclamation-circle me-2"></i>LightGBM 모델 정보가 없습니다. 모델을 학습해주세요.
+    </div>
+    {% else %}
+    
+    <!-- 모델 개요 -->
+    <div class="card mb-4">
+      <div class="card-header">
+        <h5 class="mb-0">
+          <i class="fas fa-info-circle text-info me-2"></i>모델 개요 (LightGBM)
+        </h5>
+      </div>
+      <div class="card-body">
             <div class="row">
-              <div class="col-md-6">
-                <h6>주요 파라미터</h6>
-                <ul class="list-group">
-                  <li class="list-group-item d-flex justify-content-between">
-                    <span>n_estimators</span>
-                    <span class="badge bg-primary"
-                      >{{ model_info.params.get('n_estimators', 'N/A') }}</span
-                    >
-                  </li>
-                  <li class="list-group-item d-flex justify-content-between">
-                    <span>max_depth</span>
-                    <span class="badge bg-primary"
-                      >{{ model_info.params.get('max_depth', 'N/A') }}</span
-                    >
-                  </li>
-                  <li class="list-group-item d-flex justify-content-between">
-                    <span>min_samples_split</span>
-                    <span class="badge bg-primary"
-                      >{{ model_info.params.get('min_samples_split', 'N/A')
-                      }}</span
-                    >
-                  </li>
-                </ul>
+          <div class="col-md-4">
+            <div class="card bg-light">
+              <div class="card-body">
+                <h6 class="card-title">
+                  <i class="fas fa-trophy text-warning me-2"></i>최고 성능
+                </h6>
+                <h3 class="mb-1 text-success">
+                  {% if lgbm_model_info.best_score %}{{ lgbm_model_info.best_score | round(4) }}{% else %}N/A{% endif %}
+                </h3>
+                <small class="text-muted">ROC-AUC 점수</small>
               </div>
-              <div class="col-md-6">
-                <h6>추가 파라미터</h6>
-                <ul class="list-group">
-                  <li class="list-group-item d-flex justify-content-between">
-                    <span>min_samples_leaf</span>
-                    <span class="badge bg-secondary"
-                      >{{ model_info.params.get('min_samples_leaf', 'N/A')
-                      }}</span
-                    >
-                  </li>
-                  <li class="list-group-item d-flex justify-content-between">
-                    <span>max_samples</span>
-                    <span class="badge bg-secondary"
-                      >{{ model_info.params.get('max_samples', 'N/A') }}</span
-                    >
-                  </li>
-                  <li class="list-group-item d-flex justify-content-between">
-                    <span>class_weight</span>
-                    <span class="badge bg-secondary"
-                      >{{ model_info.params.get('class_weight', 'N/A') }}</span
-                    >
-                  </li>
-                </ul>
+              </div>
+            </div>
+          <div class="col-md-4">
+            <div class="card bg-light">
+              <div class="card-body">
+                <h6 class="card-title">
+                  <i class="fas fa-redo text-primary me-2"></i>Best Iteration
+                </h6>
+                <h3 class="mb-1">
+                  {{ lgbm_model_info.best_iteration or 'N/A' }}
+                </h3>
+                <small class="text-muted">최적 학습 횟수</small>
+          </div>
+        </div>
+          </div>
+          <div class="col-md-4">
+            <div class="card bg-light">
+              <div class="card-body">
+                <h6 class="card-title">
+                  <i class="fas fa-calendar text-info me-2"></i>최종 학습일
+                </h6>
+                <p class="card-text">{{ lgbm_model_info.last_modified }}</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+        <div class="row mt-3">
+          <div class="col-12">
+            <div class="card bg-light">
+              <div class="card-body">
+                <h6 class="card-title">
+                  <i class="fas fa-file-code text-warning me-2"></i>모델 파일 경로
+                </h6>
+                <code>{{ lgbm_model_info.model_path }}</code>
               </div>
             </div>
           </div>
         </div>
       </div>
     </div>
-  </div>
-</div>
 
-<!-- 피처 상관관계 분석 -->
+    <!-- 최적 파라미터 -->
 <div class="card mb-4">
   <div class="card-header">
     <h5 class="mb-0">
-      <i class="fas fa-project-diagram text-info me-2"></i>피처 상관관계 분석
+          <i class="fas fa-cogs text-primary me-2"></i>최적 파라미터 (LightGBM)
+        </h5>
+      </div>
+      <div class="card-body">
+        <div class="row">
+          {% for param, value in lgbm_model_info.params.items() %}
+          <div class="col-md-4 mb-2">
+            <div class="d-flex justify-content-between align-items-center border-bottom pb-1">
+              <span class="fw-bold">{{ param }}</span>
+              <span class="badge bg-secondary">{{ value }}</span>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <!-- 피처 중요도 -->
+    <div class="card mb-4">
+      <div class="card-header">
+        <h5 class="mb-0">
+          <i class="fas fa-chart-bar text-warning me-2"></i>피처 중요도 (LightGBM)
     </h5>
   </div>
   <div class="card-body">
     <!-- 탭 네비게이션 -->
-    <ul class="nav nav-tabs mb-4" id="correlationTabs" role="tablist">
+        <ul class="nav nav-tabs mb-4" id="lgbmFeatureTabs" role="tablist">
       <li class="nav-item" role="presentation">
         <button
           class="nav-link active"
-          id="heatmap-tab"
+              id="lgbm-default-tab"
           data-bs-toggle="tab"
-          data-bs-target="#heatmap-pane"
+              data-bs-target="#lgbm-default-pane"
           type="button"
           role="tab"
-          aria-controls="heatmap-pane"
+              aria-controls="lgbm-default-pane"
           aria-selected="true"
         >
-          <i class="fas fa-th me-2"></i>상관관계 히트맵
+              <i class="fas fa-star me-2"></i>기본 중요도
         </button>
       </li>
       <li class="nav-item" role="presentation">
         <button
           class="nav-link"
-          id="table-tab"
+              id="lgbm-shap-tab"
           data-bs-toggle="tab"
-          data-bs-target="#table-pane"
+              data-bs-target="#lgbm-shap-pane"
           type="button"
           role="tab"
-          aria-controls="table-pane"
+              aria-controls="lgbm-shap-pane"
           aria-selected="false"
         >
-          <i class="fas fa-table me-2"></i>상관관계 테이블
+              <i class="fas fa-chart-line me-2"></i>SHAP 중요도
+        </button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button
+          class="nav-link"
+              id="lgbm-perm-tab"
+          data-bs-toggle="tab"
+              data-bs-target="#lgbm-perm-pane"
+          type="button"
+          role="tab"
+              aria-controls="lgbm-perm-pane"
+          aria-selected="false"
+        >
+              <i class="fas fa-random me-2"></i>순열 중요도
         </button>
       </li>
     </ul>
 
-    <!-- 탭 콘텐츠 -->
-    <div class="tab-content" id="correlationTabContent">
-      <!-- 히트맵 탭 -->
-      <div
-        class="tab-pane fade show active"
-        id="heatmap-pane"
-        role="tabpanel"
-        aria-labelledby="heatmap-tab"
-      >
-        <div class="alert alert-info" role="alert">
-          <i class="fas fa-info-circle me-2"></i>
-          피처 간 상관관계를 히트맵으로 시각화합니다. 색상이 진할수록 상관관계가 높습니다. 
-          높은 상관관계(|r| > 0.7)는 중복 의미를 가진 피처일 가능성이 있습니다.
-        </div>
+        <div class="tab-content" id="lgbmFeatureTabContent">
+          <!-- 기본 중요도 탭 -->
+          <div class="tab-pane fade show active" id="lgbm-default-pane" role="tabpanel" aria-labelledby="lgbm-default-tab">
+            <div class="alert alert-info mb-3">
+              <i class="fas fa-info-circle me-2"></i>
+              <strong>기본 중요도 (Gain):</strong> LightGBM 모델의 정보 획득량(Gain)을 나타냅니다. 
+              이 값은 큰 수치로 표시되는 것이 정상이며, 피처가 모델 예측에 기여한 정도를 나타냅니다. 
+              값이 클수록 해당 피처가 모델 예측에 더 중요합니다.
+            </div>
+            <div class="mb-4">
+              <canvas id="lgbm_default_chart" width="400" height="200"></canvas>
+            </div>
         
-        <div class="mb-3">
-          <button type="button" class="btn btn-primary" id="calculate_correlation_btn">
-            <i class="fas fa-calculator me-2"></i>상관관계 계산
+            <div class="accordion" id="lgbmDefaultAccordion">
+              <div class="accordion-item">
+                <h2 class="accordion-header">
+                  <button
+                    class="accordion-button collapsed"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#lgbmDefaultDetails"
+                  >
+                    <i class="fas fa-table me-2"></i>상세 데이터 보기
           </button>
-          <span id="correlation_status" class="ms-3 text-muted"></span>
+                </h2>
+                <div
+                  id="lgbmDefaultDetails"
+                  class="accordion-collapse collapse"
+                  data-bs-parent="#lgbmDefaultAccordion"
+                >
+                  <div class="accordion-body">
+                    <div class="table-responsive">
+                      <table class="table table-striped" id="lgbm_default_table">
+                        <thead class="table-dark">
+                          <tr>
+                            <th>피처 (Feature)</th>
+                            <th>중요도 (Importance)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% if lgbm_model_info.default_importances %}
+                            {% for feature, importance in lgbm_model_info.default_importances %}
+                            <tr>
+                              <td>{{ feature }}</td>
+                              <td>
+                                {% if importance >= 1000 %}
+                                  {{ "{:,.2f}".format(importance) }}
+                                {% else %}
+                                  {{ "{:.6f}".format(importance) }}
+                                {% endif %}
+                              </td>
+                            </tr>
+                            {% endfor %}
+                          {% else %}
+                            <tr>
+                              <td class="text-center text-muted" colspan="2">기본 중요도 정보가 없습니다.</td>
+                            </tr>
+                          {% endif %}
+                        </tbody>
+                      </table>
         </div>
-        
-        <div id="correlation_heatmap_container">
-          <div class="text-center text-muted p-5">
-            <i class="fas fa-chart-heatmap fa-3x mb-3"></i>
-            <p>위 버튼을 클릭하여 상관관계를 계산하세요.</p>
+                  </div>
+                </div>
           </div>
         </div>
       </div>
 
-      <!-- 테이블 탭 -->
-      <div
-        class="tab-pane fade"
-        id="table-pane"
-        role="tabpanel"
-        aria-labelledby="table-tab"
-      >
-        <div class="alert alert-info" role="alert">
-          <i class="fas fa-info-circle me-2"></i>
-          모든 피처 쌍의 상관계수를 테이블로 표시합니다. 상관계수 절댓값 기준으로 정렬할 수 있습니다.
+          <!-- SHAP 중요도 탭 -->
+          <div class="tab-pane fade" id="lgbm-shap-pane" role="tabpanel" aria-labelledby="lgbm-shap-tab">
+            <div class="mb-4">
+              <canvas id="lgbm_shap_chart" width="400" height="200"></canvas>
         </div>
         
-        <div class="mb-3">
-          <button type="button" class="btn btn-primary" id="calculate_correlation_table_btn">
-            <i class="fas fa-calculator me-2"></i>상관관계 계산
+            <div class="accordion" id="lgbmShapAccordion">
+              <div class="accordion-item">
+                <h2 class="accordion-header">
+                  <button
+                    class="accordion-button collapsed"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#lgbmShapDetails"
+                  >
+                    <i class="fas fa-table me-2"></i>상세 데이터 보기
           </button>
-          <span id="correlation_table_status" class="ms-3 text-muted"></span>
+                </h2>
+                <div
+                  id="lgbmShapDetails"
+                  class="accordion-collapse collapse"
+                  data-bs-parent="#lgbmShapAccordion"
+                >
+                  <div class="accordion-body">
+                    <div class="table-responsive">
+                      <table class="table table-striped" id="lgbm_shap_table">
+                        <thead class="table-dark">
+                          <tr>
+                            <th>피처 (Feature)</th>
+                            <th>중요도 (Importance)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% if lgbm_model_info.shap_importances %}
+                            {% for feature, importance in lgbm_model_info.shap_importances %}
+                            <tr>
+                              <td>{{ feature }}</td>
+                              <td>{{ "{:.6f}".format(importance) }}</td>
+                            </tr>
+                            {% endfor %}
+                          {% else %}
+                            <tr>
+                              <td class="text-center text-muted" colspan="2">SHAP 중요도 정보가 없습니다.</td>
+                            </tr>
+                          {% endif %}
+                        </tbody>
+                      </table>
         </div>
-        
-        <div id="correlation_table_container">
-          <div class="text-center text-muted p-5">
-            <i class="fas fa-table fa-3x mb-3"></i>
-            <p>위 버튼을 클릭하여 상관관계를 계산하세요.</p>
           </div>
         </div>
       </div>
     </div>
+          </div>
+
+          <!-- 순열 중요도 탭 -->
+          <div class="tab-pane fade" id="lgbm-perm-pane" role="tabpanel" aria-labelledby="lgbm-perm-tab">
+            <div class="mb-4">
+              <canvas id="lgbm_perm_chart" width="400" height="200"></canvas>
+            </div>
+        
+            <div class="accordion" id="lgbmPermAccordion">
+              <div class="accordion-item">
+                <h2 class="accordion-header">
+                  <button
+                    class="accordion-button collapsed"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#lgbmPermDetails"
+                  >
+                    <i class="fas fa-table me-2"></i>상세 데이터 보기
+                  </button>
+                </h2>
+                <div
+                  id="lgbmPermDetails"
+                  class="accordion-collapse collapse"
+                  data-bs-parent="#lgbmPermAccordion"
+                >
+                  <div class="accordion-body">
+                    <div class="table-responsive">
+                      <table class="table table-striped" id="lgbm_perm_table">
+                        <thead class="table-dark">
+                          <tr>
+                            <th>피처 (Feature)</th>
+                            <th>중요도 (Importance)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% if lgbm_model_info.permutation_importances %}
+                            {% for feature, importance in lgbm_model_info.permutation_importances %}
+                            <tr>
+                              <td>{{ feature }}</td>
+                              <td>{{ "{:.6f}".format(importance) }}</td>
+                            </tr>
+                            {% endfor %}
+                          {% else %}
+                            <tr>
+                              <td class="text-center text-muted" colspan="2">순열 중요도 정보가 없습니다.</td>
+                            </tr>
+                          {% endif %}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
   </div>
 </div>
 
-{% endif %} {% endblock %} {% block extra_scripts %}
+{% endblock %} 
+
+{% block extra_scripts %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
 <script>
   $(document).ready(function() {
-      // 상관관계 계산 함수
-      let correlationData = null;
-      
-      function calculateCorrelation() {
-          const btn = $('#calculate_correlation_btn');
-          const status = $('#correlation_status');
-          const container = $('#correlation_heatmap_container');
-          
-          btn.prop('disabled', true);
-          status.html('<i class="fas fa-spinner fa-spin me-2"></i>계산 중...');
-          
-          $.ajax({
-              url: '/api/feature_correlation/calculate',
-              method: 'POST',
-              success: function(response) {
-                  if (response.success) {
-                      correlationData = response;
-                      status.html(`<span class="text-success"><i class="fas fa-check-circle me-2"></i>${response.message}</span>`);
-                      renderHeatmap(response);
-                      renderTable(response);
-                  } else {
-                      status.html(`<span class="text-danger"><i class="fas fa-exclamation-circle me-2"></i>계산 실패</span>`);
-                      container.html('<div class="alert alert-danger">상관관계 계산에 실패했습니다.</div>');
-                  }
-              },
-              error: function(xhr) {
-                  const errorMsg = xhr.responseJSON?.error || '서버 오류가 발생했습니다.';
-                  status.html(`<span class="text-danger"><i class="fas fa-exclamation-circle me-2"></i>오류: ${errorMsg}</span>`);
-                  container.html(`<div class="alert alert-danger">${errorMsg}</div>`);
-              },
-              complete: function() {
-                  btn.prop('disabled', false);
-              }
-          });
-      }
-      
-      function calculateCorrelationTable() {
-          const btn = $('#calculate_correlation_table_btn');
-          const status = $('#correlation_table_status');
-          const container = $('#correlation_table_container');
-          
-          btn.prop('disabled', true);
-          status.html('<i class="fas fa-spinner fa-spin me-2"></i>계산 중...');
-          
-          $.ajax({
-              url: '/api/feature_correlation/calculate',
-              method: 'POST',
-              success: function(response) {
-                  if (response.success) {
-                      correlationData = response;
-                      status.html(`<span class="text-success"><i class="fas fa-check-circle me-2"></i>${response.message}</span>`);
-                      renderTable(response);
-                      // 히트맵도 함께 업데이트
-                      if ($('#heatmap-pane').hasClass('active')) {
-                          renderHeatmap(response);
-                      }
-                  } else {
-                      status.html(`<span class="text-danger"><i class="fas fa-exclamation-circle me-2"></i>계산 실패</span>`);
-                      container.html('<div class="alert alert-danger">상관관계 계산에 실패했습니다.</div>');
-                  }
-              },
-              error: function(xhr) {
-                  const errorMsg = xhr.responseJSON?.error || '서버 오류가 발생했습니다.';
-                  status.html(`<span class="text-danger"><i class="fas fa-exclamation-circle me-2"></i>오류: ${errorMsg}</span>`);
-                  container.html(`<div class="alert alert-danger">${errorMsg}</div>`);
-              },
-              complete: function() {
-                  btn.prop('disabled', false);
-              }
-          });
-      }
-      
-      function renderHeatmap(data) {
-          const container = $('#correlation_heatmap_container');
-          
-          // 상관관계 행렬 데이터 준비
-          const featureList = data.feature_list;
-          const correlationMatrix = data.correlation_matrix;
-          
-          // 2D 배열로 변환
-          const z = [];
-          for (let i = 0; i < featureList.length; i++) {
-              const row = [];
-              for (let j = 0; j < featureList.length; j++) {
-                  row.push(correlationMatrix[featureList[i]][featureList[j]]);
-              }
-              z.push(row);
-          }
-          
-          // 높은 상관관계 쌍 정보
-          const highCorrPairs = data.high_correlation_pairs || [];
-          let highCorrInfo = '';
-          if (highCorrPairs.length > 0) {
-              highCorrInfo = '<div class="alert alert-warning mt-3"><strong>높은 상관관계 피처 쌍 (|r| > 0.7):</strong><ul class="mb-0 mt-2">';
-              highCorrPairs.slice(0, 10).forEach(pair => {
-                  const corrStr = pair.correlation.toFixed(3);
-                  highCorrInfo += `<li>${pair.feature1} ↔ ${pair.feature2}: ${corrStr}</li>`;
-              });
-              if (highCorrPairs.length > 10) {
-                  highCorrInfo += `<li class="text-muted">... 외 ${highCorrPairs.length - 10}개</li>`;
-              }
-              highCorrInfo += '</ul></div>';
-          }
-          
-          // Plotly 히트맵 생성
-          const trace = {
-              z: z,
-              x: featureList,
-              y: featureList,
-              type: 'heatmap',
-              colorscale: [
-                  [0, 'rgb(0,0,255)'],      // -1: 파랑
-                  [0.5, 'rgb(255,255,255)'], // 0: 흰색
-                  [1, 'rgb(255,0,0)']        // +1: 빨강
-              ],
-              zmid: 0,
-              colorbar: {
-                  title: '상관계수',
-                  titleside: 'right'
-              },
-              hovertemplate: '<b>%{y}</b> ↔ <b>%{x}</b><br>상관계수: %{z:.3f}<extra></extra>'
-          };
-          
-          const layout = {
-              title: {
-                  text: '피처 상관관계 히트맵',
-                  font: { size: 16 }
-              },
-              xaxis: {
-                  title: '피처',
-                  tickangle: -45,
-                  tickfont: { size: 10 }
-              },
-              yaxis: {
-                  title: '피처',
-                  tickfont: { size: 10 }
-              },
-              width: Math.max(800, featureList.length * 30),
-              height: Math.max(600, featureList.length * 30),
-              margin: { l: 150, r: 50, t: 80, b: 150 }
-          };
-          
-          container.html('<div id="correlation_heatmap" style="width: 100%; height: 600px;"></div>' + highCorrInfo);
-          
-          Plotly.newPlot('correlation_heatmap', [trace], layout, {responsive: true});
-      }
-      
-      function renderTable(data) {
-          const container = $('#correlation_table_container');
-          
-          // 상관관계 행렬 데이터 준비
-          const featureList = data.feature_list;
-          const correlationMatrix = data.correlation_matrix;
-          
-          // 테이블 데이터 생성
-          const tableData = [];
-          for (let i = 0; i < featureList.length; i++) {
-              for (let j = i + 1; j < featureList.length; j++) {
-                  const corrValue = correlationMatrix[featureList[i]][featureList[j]];
-                  tableData.push({
-                      feature1: featureList[i],
-                      feature2: featureList[j],
-                      correlation: corrValue,
-                      abs_correlation: Math.abs(corrValue)
-                  });
-              }
-          }
-          
-          // 절댓값 기준 내림차순 정렬
-          tableData.sort((a, b) => b.abs_correlation - a.abs_correlation);
-          
-          // 테이블 HTML 생성
-          let tableHtml = '<div class="table-responsive"><table class="table table-striped table-hover" id="correlation_table"><thead class="table-dark"><tr><th>피처 1</th><th>피처 2</th><th>상관계수</th><th>절댓값</th></tr></thead><tbody>';
-          
-          tableData.forEach(row => {
-              const corrClass = Math.abs(row.correlation) > 0.7 ? 'table-warning' : '';
-              tableHtml += `<tr class="${corrClass}">
-                  <td>${row.feature1}</td>
-                  <td>${row.feature2}</td>
-                  <td>${row.correlation.toFixed(4)}</td>
-                  <td>${row.abs_correlation.toFixed(4)}</td>
-              </tr>`;
-          });
-          
-          tableHtml += '</tbody></table></div>';
-          
-          // 높은 상관관계 쌍 정보
-          const highCorrPairs = data.high_correlation_pairs || [];
-          let highCorrInfo = '';
-          if (highCorrPairs.length > 0) {
-              highCorrInfo = '<div class="alert alert-warning mt-3"><strong>높은 상관관계 피처 쌍 (|r| > 0.7):</strong><ul class="mb-0 mt-2">';
-              highCorrPairs.forEach(pair => {
-                  const corrStr = pair.correlation.toFixed(3);
-                  highCorrInfo += `<li>${pair.feature1} ↔ ${pair.feature2}: ${corrStr}</li>`;
-              });
-              highCorrInfo += '</ul></div>';
-          }
-          
-          container.html(tableHtml + highCorrInfo);
-          
-          // DataTables 초기화
-          if ($.fn.DataTable.isDataTable('#correlation_table')) {
-              $('#correlation_table').DataTable().destroy();
-          }
-          
-          $('#correlation_table').DataTable({
-              pageLength: 25,
-              order: [[3, 'desc']], // 절댓값 기준 내림차순
-              language: {
-                  "lengthMenu": "페이지당 _MENU_ 개씩 보기",
-                  "zeroRecords": "데이터가 없습니다",
-                  "info": "_START_ - _END_ / _TOTAL_ 개",
-                  "infoEmpty": "0 개",
-                  "infoFiltered": "(전체 _MAX_ 개 중 필터링됨)",
-                  "search": "검색:",
-                  "paginate": {
-                      "first": "처음",
-                      "last": "마지막",
-                      "next": "다음",
-                      "previous": "이전"
-                  }
-              },
-              scrollX: true,
-              responsive: true
-          });
-      }
-      
-      // 버튼 이벤트 핸들러
-      $('#calculate_correlation_btn').on('click', calculateCorrelation);
-      $('#calculate_correlation_table_btn').on('click', calculateCorrelationTable);
-      
-      // 탭 전환 시 히트맵 리사이즈
-      $('#correlationTabs button[data-bs-toggle="tab"]').on('shown.bs.tab', function(event) {
-          if (event.target.getAttribute('data-bs-target') === '#heatmap-pane' && correlationData) {
-              // 히트맵이 이미 렌더링된 경우 리사이즈
-              setTimeout(() => {
-                  const heatmapDiv = document.getElementById('correlation_heatmap');
-                  if (heatmapDiv) {
-                      Plotly.Plots.resize('correlation_heatmap');
-                  }
-              }, 100);
-          }
-      });
-      
-      // 피처 중요도 차트 생성 (기존 코드)
-      // 피처 중요도 차트 생성 (model_info가 있을 때만)
-      {% if model_info and model_info.feature_importances %}
-      const featureImportances = {{ model_info.feature_importances | tojson }};
-
-      // 상위 20개 피처만 표시
-      const topFeatures = featureImportances.slice(0, 20).map(item => item[0]);
-      const topImportances = featureImportances.slice(0, 20).map(item => item[1]);
-      {% else %}
-      // model_info가 없을 때 빈 데이터로 처리
-      const featureImportances = [];
-      const topFeatures = [];
-      const topImportances = [];
-      {% endif %}
-
-      // 차트 생성 함수
-      function createChart(canvasId, data, title) {
+      // --- Chart 생성 유틸리티 ---
+      function createChart(canvasId, data, label) {
           const canvas = document.getElementById(canvasId);
           if (!canvas) return null;
           
-          const ctx = canvas.getContext('2d');
-          if (data.length === 0) {
-              canvas.parentElement.innerHTML = '<div class="text-center text-muted p-4">데이터를 사용할 수 없습니다.</div>';
+          if (!data || data.length === 0) {
+              const ctx = canvas.getContext('2d');
+              ctx.font = "14px Arial";
+              ctx.fillText("데이터가 없습니다.", 10, 50);
               return null;
           }
 
-          // 상위 20개 피처만 표시
-          const topFeatures = data.slice(0, 20).map(item => item[0]);
-          const topImportances = data.slice(0, 20).map(item => item[1]);
+          // 데이터가 이미 정렬되어 있는지 확인하고, 필요시 정렬
+          const sortedData = [...data].sort((a, b) => b[1] - a[1]);
+          
+          // 상위 20개
+          const topData = sortedData.slice(0, 20);
+          const labels = topData.map(item => item[0]);
+          const values = topData.map(item => item[1]);
 
-          return new Chart(ctx, {
+          return new Chart(canvas, {
               type: 'bar',
               data: {
-                  labels: topFeatures,
+                  labels: labels,
                   datasets: [{
-                      label: '중요도',
-                      data: topImportances,
+                      label: label,
+                      data: values,
                       backgroundColor: 'rgba(54, 162, 235, 0.6)',
                       borderColor: 'rgba(54, 162, 235, 1)',
                       borderWidth: 1
@@ -938,32 +803,41 @@
               },
               options: {
                   responsive: true,
-                  maintainAspectRatio: true,
-                  plugins: {
-                      title: {
-                          display: true,
-                          text: title
-                      },
-                      legend: {
-                          display: false
+                  maintainAspectRatio: false,
+                  indexAxis: 'y', // 가로 막대 차트로 변경 (중요도 높은 순서대로 위에서 아래로)
+                  plugins: { 
+                      legend: { display: false },
+                      tooltip: {
+                          callbacks: {
+                              label: function(context) {
+                                  const value = context.parsed.x || context.parsed.y;
+                                  // 큰 수치인 경우 천 단위 구분 기호 추가
+                                  if (value >= 1000) {
+                                      return label + ': ' + value.toLocaleString('ko-KR');
+                                  }
+                                  return label + ': ' + value.toFixed(2);
+                              }
+                          }
                       }
                   },
                   scales: {
-                      y: {
+                      x: { 
                           beginAtZero: true,
-                          title: {
-                              display: true,
-                              text: '중요도'
+                          ticks: {
+                              callback: function(value) {
+                                  // 큰 수치인 경우 천 단위 구분 기호 추가
+                                  if (value >= 1000) {
+                                      return value.toLocaleString('ko-KR');
+                                  }
+                                  return value;
+                              }
                           }
                       },
-                      x: {
-                          title: {
-                              display: true,
-                              text: '피처'
-                          },
-                          ticks: {
-                              maxRotation: 45,
-                              minRotation: 45
+                      y: { 
+                          ticks: { 
+                              maxRotation: 0,
+                              minRotation: 0,
+                              autoSkip: false
                           }
                       }
                   }
@@ -971,88 +845,155 @@
           });
       }
 
-      // 순열 중요도 데이터 준비
-      {% if model_info and model_info.permutation_importances %}
-      const permutationImportances = {{ model_info.permutation_importances | tojson }};
-      {% else %}
-      const permutationImportances = [];
+      // --- RF 차트 ---
+      {% if model_info %}
+        const rfShapData = {{ model_info.feature_importances | tojson if model_info.feature_importances else '[]' }};
+        const rfPermData = {{ model_info.permutation_importances | tojson if model_info.permutation_importances else '[]' }};
+        
+        let rfShapChart = createChart('rf_shap_chart', rfShapData, 'RF SHAP Importance');
+        let rfPermChart = createChart('rf_perm_chart', rfPermData, 'RF Permutation Importance');
+        
+        // RF DataTables 초기화
+        if (!$.fn.DataTable.isDataTable('#rf_shap_table')) {
+            $('#rf_shap_table').DataTable({
+                pageLength: 10,
+                order: [[1, 'desc']],
+                language: {
+                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
+                }
+            });
+        }
+        if (!$.fn.DataTable.isDataTable('#rf_perm_table')) {
+            $('#rf_perm_table').DataTable({
+                pageLength: 10,
+                order: [[1, 'desc']],
+                language: {
+                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
+              }
+          });
+      }
       {% endif %}
 
-      // SHAP 차트 생성
-      let shapChart = null;
-      if (topFeatures.length > 0) {
-          shapChart = createChart('shap_importance_chart', featureImportances, 'SHAP 중요도 (상위 20개)');
-      }
+      // --- LGBM 차트 ---
+      {% if lgbm_model_info %}
+        const lgbmDefaultData = {{ lgbm_model_info.default_importances | tojson if lgbm_model_info.default_importances else '[]' }};
+        const lgbmShapData = {{ lgbm_model_info.shap_importances | tojson if lgbm_model_info.shap_importances else '[]' }};
+        const lgbmPermData = {{ lgbm_model_info.permutation_importances | tojson if lgbm_model_info.permutation_importances else '[]' }};
+        
+        let lgbmDefaultChart = createChart('lgbm_default_chart', lgbmDefaultData, 'LGBM Default Importance');
+        let lgbmShapChart = createChart('lgbm_shap_chart', lgbmShapData, 'LGBM SHAP Importance');
+        let lgbmPermChart = createChart('lgbm_perm_chart', lgbmPermData, 'LGBM Permutation Importance');
+        
+        // LGBM DataTables 초기화
+        if (!$.fn.DataTable.isDataTable('#lgbm_default_table')) {
+            $('#lgbm_default_table').DataTable({
+                pageLength: 10,
+                order: [[1, 'desc']], // 중요도 높은 순서대로 정렬
+                language: {
+                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
+                },
+                columnDefs: [
+                    {
+                        targets: 1,
+                        render: function(data, type, row) {
+                            if (type === 'display' || type === 'type') {
+                                // 큰 수치인 경우 천 단위 구분 기호 추가
+                                const num = parseFloat(data);
+                                if (num >= 1000) {
+                                    return num.toLocaleString('ko-KR', {maximumFractionDigits: 2});
+                                }
+                                return num.toFixed(6);
+                            }
+                            return data;
+                        }
+                    }
+                ]
+            });
+        }
+        if (!$.fn.DataTable.isDataTable('#lgbm_shap_table')) {
+            $('#lgbm_shap_table').DataTable({
+                pageLength: 10,
+              order: [[1, 'desc']],
+              language: {
+                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
+                }
+          });
+        }
+        if (!$.fn.DataTable.isDataTable('#lgbm_perm_table')) {
+            $('#lgbm_perm_table').DataTable({
+                pageLength: 10,
+              order: [[1, 'desc']],
+              language: {
+                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
+                }
+          });
+        }
+      {% endif %}
 
-      // 순열 중요도 차트 생성
-      let permutationChart = null;
-      if (permutationImportances.length > 0) {
-          permutationChart = createChart('permutation_importance_chart', permutationImportances, '순열 중요도 (상위 20개)');
-      }
+      // --- 탭 전환 시 리사이즈 ---
+      $('button[data-bs-toggle="tab"]').on('shown.bs.tab', function (e) {
+          if (e.target.id === 'rf-shap-tab' && rfShapChart) rfShapChart.resize();
+          if (e.target.id === 'rf-perm-tab' && rfPermChart) rfPermChart.resize();
+          if (e.target.id === 'lgbm-default-tab' && lgbmDefaultChart) lgbmDefaultChart.resize();
+          if (e.target.id === 'lgbm-shap-tab' && lgbmShapChart) lgbmShapChart.resize();
+          if (e.target.id === 'lgbm-perm-tab' && lgbmPermChart) lgbmPermChart.resize();
+      });
 
-      // 탭 전환 시 차트 리사이즈
-      const tabButtons = document.querySelectorAll('#featureImportanceTabs button[data-bs-toggle="tab"]');
-      tabButtons.forEach(button => {
-          button.addEventListener('shown.bs.tab', function(event) {
-              const targetId = event.target.getAttribute('data-bs-target');
-              if (targetId === '#shap-pane' && shapChart) {
-                  shapChart.resize();
-              } else if (targetId === '#permutation-pane' && permutationChart) {
-                  permutationChart.resize();
+      // --- 상관관계 계산 버튼 ---
+      $('#calculateCorrelationBtn').on('click', function() {
+          const btn = $(this);
+          const resultDiv = $('#correlationResult');
+          
+          btn.prop('disabled', true).html('<i class="fas fa-spinner fa-spin me-2"></i>계산 중...');
+          resultDiv.hide();
+          
+          $.ajax({
+              url: '/api/calculate_feature_correlation',
+              method: 'POST',
+              success: function(data) {
+                  if (data.success && data.correlation_matrix) {
+                      // 상관관계 히트맵 생성
+                      const correlationData = data.correlation_matrix;
+                      const features = Object.keys(correlationData);
+                      const z = features.map(f1 => 
+                          features.map(f2 => correlationData[f1][f2] || 0)
+                      );
+                      
+                      const trace = {
+                          z: z,
+                          x: features,
+                          y: features,
+                          type: 'heatmap',
+                          colorscale: 'RdBu',
+                          zmid: 0,
+                          colorbar: {
+                              title: '상관계수'
+                          }
+                      };
+                      
+                      const layout = {
+                          title: '피처 상관관계 히트맵',
+                          width: 800,
+                          height: 600,
+                          xaxis: { tickangle: -45 },
+                          yaxis: { tickangle: 0 }
+                      };
+                      
+                      Plotly.newPlot('correlationChart', [trace], layout);
+                      resultDiv.show();
+                  } else {
+                      alert('상관관계 계산에 실패했습니다: ' + (data.error || '알 수 없는 오류'));
+                  }
+              },
+              error: function(xhr) {
+                  const error = JSON.parse(xhr.responseText);
+                  alert('상관관계 계산 중 오류: ' + (error.error || '알 수 없는 오류'));
+              },
+              complete: function() {
+                  btn.prop('disabled', false).html('<i class="fas fa-calculator me-2"></i>상관관계 계산');
               }
           });
       });
-
-      // 테이블 초기화
-      {% if model_info and model_info.feature_importances %}
-      if (!$.fn.DataTable.isDataTable('#shap_table')) {
-          $('#shap_table').DataTable({
-              pageLength: 25,
-              order: [[1, 'desc']],
-              language: {
-                  "lengthMenu": "페이지당 _MENU_ 개씩 보기",
-                  "zeroRecords": "데이터가 없습니다",
-                  "info": "_START_ - _END_ / _TOTAL_ 개",
-                  "infoEmpty": "0 개",
-                  "infoFiltered": "(전체 _MAX_ 개 중 필터링됨)",
-                  "search": "검색:",
-                  "paginate": {
-                      "first": "처음",
-                      "last": "마지막",
-                      "next": "다음",
-                      "previous": "이전"
-                  }
-              },
-              scrollX: true,
-              responsive: true
-          });
-      }
-      {% endif %}
-
-      {% if model_info and model_info.permutation_importances %}
-      if (!$.fn.DataTable.isDataTable('#permutation_table')) {
-          $('#permutation_table').DataTable({
-              pageLength: 25,
-              order: [[1, 'desc']],
-              language: {
-                  "lengthMenu": "페이지당 _MENU_ 개씩 보기",
-                  "zeroRecords": "데이터가 없습니다",
-                  "info": "_START_ - _END_ / _TOTAL_ 개",
-                  "infoEmpty": "0 개",
-                  "infoFiltered": "(전체 _MAX_ 개 중 필터링됨)",
-                  "search": "검색:",
-                  "paginate": {
-                      "first": "처음",
-                      "last": "마지막",
-                      "next": "다음",
-                      "previous": "이전"
-                  }
-              },
-              scrollX: true,
-              responsive: true
-          });
-      }
-      {% endif %}
   });
 </script>
 {% endblock %}
