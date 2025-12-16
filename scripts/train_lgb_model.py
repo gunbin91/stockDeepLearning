@@ -55,7 +55,11 @@ from scripts.train_model import (
     check_memory_and_cleanup,
     calculate_shap_importance,
     calculate_permutation_importance,
-    create_training_data
+    create_training_data,
+    split_by_date,
+    _sanitize_numeric_frame,
+    compute_imputation_values_train_only,
+    expanding_time_series_folds
 )
 
 import data_processor
@@ -64,7 +68,7 @@ from logger import log_info, log_warning, log_error
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 
-def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, n_jobs, n_iter, model_path=None):
+def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, n_jobs, n_iter, model_path=None):
     """
     LightGBM 모델 학습 및 저장 함수
     
@@ -73,12 +77,17 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, n_jobs,
         y: 학습 타겟
         features: 피처 이름 리스트
         imputation_values: 결측치 대체값
+        dates: 날짜 데이터 (Series, datetime 타입)
         n_jobs: 사용할 CPU 코어 수
         n_iter: Optuna 최적화 시도 횟수
         model_path: 모델 저장 경로 (None이면 기본 경로 사용)
     """
     if X is None or y is None or X.empty or y.empty:
         log_error("학습 데이터가 없어 모델링을 건너뜁니다.")
+        return
+    
+    if dates is None or dates.empty:
+        log_error("❌ 날짜 데이터가 없어 모델링을 건너뜁니다.")
         return
 
     # 통일된 경로 사용
@@ -88,107 +97,112 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, n_jobs,
     log_info("🤖 LightGBM 모델 학습 및 평가를 시작합니다...")
     log_memory_usage("모델 학습 시작")
     
-    # 메모리 효율적인 train_test_split
-    log_info("   📊 학습/테스트 데이터 분할 중...")
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+    # 날짜 기반 데이터 분할 (미래 데이터 참조 방지)
+    log_info("   📊 날짜 기반 학습/테스트 데이터 분할 중...")
+    X_train, X_test, y_train, y_test, train_dates, test_dates = split_by_date(X, y, dates, test_size=0.3)
     log_memory_usage("데이터 분할 완료")
     check_memory_and_cleanup()
-
-    log_info("\n   📏 피처 스케일링 (StandardScaler) 적용 중...")
-    scaler = StandardScaler()
     
-    try:
-        X_train_scaled = scaler.fit_transform(X_train)
-        # LightGBM 피처 이름 경고 방지를 위해 pandas DataFrame으로 변환
-        X_train_scaled = pd.DataFrame(X_train_scaled, columns=features)
-        log_memory_usage("훈련 데이터 스케일링 완료")
-        check_memory_and_cleanup()
-        
-        X_test_scaled = scaler.transform(X_test)
-        # LightGBM 피처 이름 경고 방지를 위해 pandas DataFrame으로 변환
-        X_test_scaled = pd.DataFrame(X_test_scaled, columns=features)
-        log_memory_usage("테스트 데이터 스케일링 완료")
-        
-        # 중간 변수 즉시 메모리 해제
-        del X_train, X_test
-        gc.collect()
-        log_info("   🧹 중간 변수 메모리 해제 완료")
-        
-    except MemoryError as e:
-        log_error(f"스케일링 중 메모리 부족: {e}")
-        log_info("   🔄 메모리 정리 후 재시도합니다...")
-        safe_memory_cleanup()
-        X_train_scaled = scaler.fit_transform(X_train)
-        # LightGBM 피처 이름 경고 방지를 위해 pandas DataFrame으로 변환
-        X_train_scaled = pd.DataFrame(X_train_scaled, columns=features)
-        X_test_scaled = scaler.transform(X_test)
-        # LightGBM 피처 이름 경고 방지를 위해 pandas DataFrame으로 변환
-        X_test_scaled = pd.DataFrame(X_test_scaled, columns=features)
-        
-        # 중간 변수 즉시 메모리 해제
-        del X_train, X_test
-        gc.collect()
-        
-        log_memory_usage("재시도 후 스케일링 완료")
+    # Optuna 튜닝은 raw train 기준으로 시간 기반 CV를 수행해야 함
+    # (스케일러/중앙값을 train 전체에 미리 fit하면 CV 단계에서 누수가 발생할 수 있음)
+    X_train_raw = X_train.copy()
+    X_test_raw = X_test.copy()
 
     log_info("\n학습 데이터 타겟 분포:\n" + str(y_train.value_counts(normalize=True)))
 
-    log_info("🔍 Optuna를 사용하여 최적 파라미터 탐색...")
+    # ======================================================================
+    # ✅ Trial마다 반복되는 공통 작업 캐싱 (gpuStock 스타일)
+    # - Expanding CV fold 인덱스 생성 (1회)
+    # - Fold별 Train-only 중앙값(imputation) 계산 (1회)
+    # - CV에서 스케일링 제거 (LightGBM은 트리 모델이라 불필요)
+    # ======================================================================
+    log_info("   🧠 [CACHE] 시간 기반 Expanding CV fold/결측치 대체값을 미리 계산합니다...")
+    train_dates_cv = pd.to_datetime(train_dates).reset_index(drop=True)
+    y_train_cv = y_train.reset_index(drop=True)
+    X_train_cv = X_train_raw.reset_index(drop=True)
+
+    fold_indices = expanding_time_series_folds(train_dates_cv, n_splits=3)
+    if not fold_indices:
+        log_warning("   ⚠️ Expanding CV fold 생성 실패(데이터 기간 부족). Optuna 튜닝을 중단합니다.")
+        return
+
+    # 각 fold마다 (train_idx, val_idx, train_only_imputation_dict) 캐시
+    cv_cache = []
+    for (tr_idx, va_idx) in fold_indices:
+        X_tr_base = X_train_cv.iloc[tr_idx][features]
+        imp = compute_imputation_values_train_only(X_tr_base)
+        cv_cache.append((tr_idx, va_idx, imp))
+    log_info(f"   ✅ [CACHE] fold 캐시 준비 완료: {len(cv_cache)}개 fold")
+
+    log_info("🔍 Optuna를 사용하여 최적 파라미터 탐색... (시간 기반 Expanding CV)")
     log_info(f"   ⚙️ 탐색할 파라미터 조합: {n_iter}개")
-    log_info(f"   🔄 교차 검증: 3-fold")
+    log_info(f"   🔄 교차 검증: 3-fold (시간 기반 Expanding)")
     log_info(f"   💻 사용할 CPU 코어: {n_jobs}")
     
     # Optuna objective 함수 정의 (클로저로 데이터 접근)
     def objective(trial):
         """Optuna objective 함수: 하이퍼파라미터 튜닝을 위한 목적 함수"""
         # 주식 데이터에 최적화된 파라미터 범위 설정
-        max_depth = trial.suggest_int('max_depth', 3, 7)
-        num_leaves = trial.suggest_int('num_leaves', 15, 63)
+        # ✅ 사용자 요청: max_depth 범위를 더 공격적으로 확장
+        max_depth = trial.suggest_int('max_depth', 5, 20)
+        # num_leaves는 max_depth에 맞춰 상한을 제한 (num_leaves <= 2^max_depth)
+        max_leaves = min(255, 2 ** max_depth)
+        if max_leaves < 31:
+            max_leaves = 31
+        num_leaves = trial.suggest_int('num_leaves', 31, max_leaves)
         
         # LightGBM 하이퍼파라미터 제안 (주식 예측 최적화)
+        model_n_jobs = -1 if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
         params = {
             'objective': 'binary',
             'metric': 'auc',
             'boosting_type': 'gbdt',
             'num_leaves': num_leaves,
             'max_depth': max_depth,
-            'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),  # 주식에선 0.01 이하가 국룰
-            'n_estimators': 10000,  # 넉넉하게 설정 (Early Stopping으로 제어)
-            'min_child_samples': trial.suggest_int('min_child_samples', 50, 500),  # 노이즈 필터 강화
-            'subsample': trial.suggest_float('subsample', 0.6, 0.9),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.9),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10.0, log=True),  # L1 정규화 강화
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10.0, log=True),  # L2 정규화 강화
-            'scale_pos_weight': trial.suggest_float('scale_pos_weight', 2.0, 5.0),  # 불균형 데이터 처리
+            # 너무 보수적이지 않게 범위 완화 (중간 성향)
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.08, log=True),
+            # CV에서는 early stopping을 사용하므로 충분히 크게 두고 조기 종료로 제어
+            'n_estimators': 5000,
+            'min_child_samples': trial.suggest_int('min_child_samples', 20, 200),
+            'subsample': trial.suggest_float('subsample', 0.7, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.01, 5.0, log=True),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.01, 5.0, log=True),
+            'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 4.0),
             'random_state': 42,
-            'n_jobs': 1,  # 각 모델은 단일 코어 사용 (메모리 절약)
+            'n_jobs': model_n_jobs,  # LGBM 내부 멀티스레드 사용 (trial 병렬 대신 모델 병렬 권장)
             'verbose': -1  # 로그 출력 억제
         }
-        
-        # 모델 생성
-        model = lgb.LGBMClassifier(**params)
-        
-        # 교차 검증 수행 (메모리 효율적)
+
+        # 시간 기반 Expanding CV 수행 (누수 방지 + 캐시 재사용 + early stopping)
+        scores = []
         try:
-            cv_scores = cross_val_score(
-                model, 
-                X_train_scaled, 
-                y_train, 
-                cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
-                scoring='roc_auc',
-                n_jobs=1  # 단일 코어 사용 (메모리 절약)
-            )
-            mean_score = cv_scores.mean()
-            
-            # 메모리 정리
-            del model
-            gc.collect()
-            
-            return mean_score
+            for (tr_idx, va_idx, imp) in cv_cache:
+                X_tr = X_train_cv.iloc[tr_idx][features].copy()
+                y_tr_fold = y_train_cv.iloc[tr_idx].copy()
+                X_va = X_train_cv.iloc[va_idx][features].copy()
+                y_va_fold = y_train_cv.iloc[va_idx].copy()
+
+                X_tr = _sanitize_numeric_frame(X_tr)
+                X_va = _sanitize_numeric_frame(X_va)
+                X_tr.fillna(imp, inplace=True)
+                X_va.fillna(imp, inplace=True)
+
+                model = lgb.LGBMClassifier(**params)
+                model.fit(
+                    X_tr, y_tr_fold,
+                    eval_set=[(X_va, y_va_fold)],
+                    callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
+                )
+                y_va_proba = model.predict_proba(X_va)[:, 1]
+                scores.append(roc_auc_score(y_va_fold, y_va_proba))
+
+                del model, X_tr, X_va, y_tr_fold, y_va_fold, y_va_proba
+                gc.collect()
+
+            return float(np.mean(scores)) if scores else 0.0
         except Exception as e:
-            # 오류 발생 시 낮은 점수 반환
             log_warning(f"   ⚠️ Trial {trial.number} 실패: {e}")
-            del model
             gc.collect()
             return 0.0
 
@@ -210,8 +224,9 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, n_jobs,
         )
         
         # 하이퍼파라미터 최적화 실행
-        # n_jobs 처리: -1이면 None (모든 코어 사용), 0 이하면 1, 그 외는 지정된 값
-        optuna_n_jobs = None if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
+        # ✅ 성능/안정성: trial 병렬(optuna n_jobs) 대신 LightGBM 내부 멀티스레드를 사용
+        # (trial 병렬은 메모리/CPU oversubscription으로 오히려 느려질 수 있음)
+        optuna_n_jobs = 1
         study.optimize(
             objective, 
             n_trials=n_iter,
@@ -225,13 +240,47 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, n_jobs,
         best_params = study.best_params.copy()
         best_score = study.best_value
         
-        # 최적 모델 생성 (전체 훈련 데이터로 학습)
-        log_info("   🔧 최적 파라미터로 최종 모델 학습 중...")
-        
-        # Early stopping을 위한 validation set 분할
-        X_train_fit, X_val, y_train_fit, y_val = train_test_split(
-            X_train_scaled, y_train, test_size=0.2, random_state=42, stratify=y_train
-        )
+        # ===========================
+        # 최적 모델 생성 (최종 학습/평가용 전처리: Train-only)
+        # ===========================
+        log_info("   🔧 최적 파라미터로 최종 모델 학습 중... (Train-only 전처리)")
+        X_train_raw = _sanitize_numeric_frame(X_train_raw)
+        X_test_raw = _sanitize_numeric_frame(X_test_raw)
+        imputation_values = compute_imputation_values_train_only(X_train_raw)
+        X_train_raw.fillna(imputation_values, inplace=True)
+        X_test_raw.fillna(imputation_values, inplace=True)
+
+        # Early stopping을 위한 validation set 분할 (날짜 기반)
+        # Train 데이터의 마지막 20%를 validation으로 사용 (미래 데이터 참조 방지)
+        val_size = int(len(X_train_raw) * 0.2)
+        X_train_fit_raw = X_train_raw.iloc[:-val_size].copy()
+        X_val_raw = X_train_raw.iloc[-val_size:].copy()
+        y_train_fit = y_train.iloc[:-val_size].copy()
+        y_val = y_train.iloc[-val_size:].copy()
+
+        # 날짜 기반 분할 검증
+        train_fit_max_date = train_dates.iloc[:-val_size].max()
+        val_min_date = train_dates.iloc[-val_size:].min()
+        if train_fit_max_date >= val_min_date:
+            log_warning(f"   ⚠️ Train/Val 분할 경고: Train 최대 날짜({train_fit_max_date}) >= Val 최소 날짜({val_min_date})")
+        else:
+            log_info(f"   ✅ Train/Val 날짜 분할 확인: Train 최대 날짜 < Val 최소 날짜")
+
+        # 스케일링은 train_fit에서만 fit (val/test는 transform)
+        scaler = StandardScaler()
+        X_train_fit_scaled = scaler.fit_transform(X_train_fit_raw)
+        X_val_scaled = scaler.transform(X_val_raw)
+        X_test_scaled = scaler.transform(X_test_raw)
+
+        # LightGBM 피처 이름 경고 방지를 위해 pandas DataFrame으로 변환
+        X_train_fit_scaled = pd.DataFrame(X_train_fit_scaled, columns=features)
+        X_val_scaled = pd.DataFrame(X_val_scaled, columns=features)
+        X_test_scaled = pd.DataFrame(X_test_scaled, columns=features)
+
+        # 중간 변수 메모리 해제
+        del X_train_fit_raw, X_val_raw, X_train_raw, X_test_raw
+        gc.collect()
+        log_memory_usage("최종 전처리 완료")
         
         # n_estimators를 충분히 크게 설정하고 early stopping 사용
         best_model = lgb.LGBMClassifier(
@@ -255,8 +304,8 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, n_jobs,
         
         # Early stopping을 사용하여 학습
         best_model.fit(
-            X_train_fit, y_train_fit,
-            eval_set=[(X_val, y_val)],
+            X_train_fit_scaled, y_train_fit,
+            eval_set=[(X_val_scaled, y_val)],
             callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
         )
         log_memory_usage("최적 모델 학습 완료")
@@ -269,44 +318,58 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, n_jobs,
         # 더 작은 파라미터 범위로 재시도 (메모리 부족 시)
         def objective_small(trial):
             # 주식 데이터에 최적화된 파라미터 범위 설정 (축소 버전)
-            max_depth = trial.suggest_int('max_depth', 3, 6)
-            num_leaves = trial.suggest_int('num_leaves', 15, 31)
+            # 메모리 부족 시에도 사용자의 의도를 최대한 반영하되, 범위는 약간 축소
+            max_depth = trial.suggest_int('max_depth', 5, 15)
+            max_leaves = min(127, 2 ** max_depth)
+            if max_leaves < 31:
+                max_leaves = 31
+            num_leaves = trial.suggest_int('num_leaves', 31, max_leaves)
             
+            model_n_jobs = -1 if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
             params = {
                 'objective': 'binary',
                 'metric': 'auc',
                 'boosting_type': 'gbdt',
                 'num_leaves': num_leaves,
                 'max_depth': max_depth,
-                'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.03, log=True),
-                'n_estimators': 5000,  # Early Stopping으로 제어
-                'min_child_samples': trial.suggest_int('min_child_samples', 100, 300),
-                'subsample': trial.suggest_float('subsample', 0.7, 0.9),
-                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 0.9),
-                'reg_alpha': trial.suggest_float('reg_alpha', 0.5, 5.0, log=True),
-                'reg_lambda': trial.suggest_float('reg_lambda', 0.5, 5.0, log=True),
-                'scale_pos_weight': trial.suggest_float('scale_pos_weight', 2.0, 4.0),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.06, log=True),
+                'n_estimators': 4000,  # early stopping으로 제어
+                'min_child_samples': trial.suggest_int('min_child_samples', 30, 200),
+                'subsample': trial.suggest_float('subsample', 0.75, 1.0),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.75, 1.0),
+                'reg_alpha': trial.suggest_float('reg_alpha', 0.05, 5.0, log=True),
+                'reg_lambda': trial.suggest_float('reg_lambda', 0.05, 5.0, log=True),
+                'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 4.0),
                 'random_state': 42,
-                'n_jobs': 1,
+                'n_jobs': model_n_jobs,
                 'verbose': -1
             }
-            model = lgb.LGBMClassifier(**params)
             try:
-                cv_scores = cross_val_score(
-                    model, 
-                    X_train_scaled, 
-                    y_train, 
-                    cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
-                    scoring='roc_auc',
-                    n_jobs=1
-                )
-                mean_score = cv_scores.mean()
-                del model
-                gc.collect()
-                return mean_score
+                scores = []
+                for (tr_idx, va_idx, imp) in cv_cache:
+                    X_tr = X_train_cv.iloc[tr_idx][features].copy()
+                    y_tr_fold = y_train_cv.iloc[tr_idx].copy()
+                    X_va = X_train_cv.iloc[va_idx][features].copy()
+                    y_va_fold = y_train_cv.iloc[va_idx].copy()
+
+                    X_tr = _sanitize_numeric_frame(X_tr)
+                    X_va = _sanitize_numeric_frame(X_va)
+                    X_tr.fillna(imp, inplace=True)
+                    X_va.fillna(imp, inplace=True)
+
+                    model = lgb.LGBMClassifier(**params)
+                    model.fit(
+                        X_tr, y_tr_fold,
+                        eval_set=[(X_va, y_va_fold)],
+                        callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
+                    )
+                    y_va_proba = model.predict_proba(X_va)[:, 1]
+                    scores.append(roc_auc_score(y_va_fold, y_va_proba))
+                    del model, X_tr, X_va, y_tr_fold, y_va_fold, y_va_proba
+                    gc.collect()
+                return float(np.mean(scores)) if scores else 0.0
             except Exception as e:
                 log_warning(f"   ⚠️ Trial {trial.number} 실패: {e}")
-                del model
                 gc.collect()
                 return 0.0
         
@@ -326,10 +389,38 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, n_jobs,
         best_params = study.best_params.copy()
         best_score = study.best_value
         
-        # Early stopping을 위한 validation set 분할
-        X_train_fit, X_val, y_train_fit, y_val = train_test_split(
-            X_train_scaled, y_train, test_size=0.2, random_state=42, stratify=y_train
-        )
+        # (재시도 경로에서도) 최종 학습/평가용 Train-only 전처리
+        log_info("   🔧 재시도 경로: Train-only 전처리 적용 중...")
+        X_train_raw = _sanitize_numeric_frame(X_train_raw)
+        X_test_raw = _sanitize_numeric_frame(X_test_raw)
+        imputation_values = compute_imputation_values_train_only(X_train_raw)
+        X_train_raw.fillna(imputation_values, inplace=True)
+        X_test_raw.fillna(imputation_values, inplace=True)
+
+        val_size = int(len(X_train_raw) * 0.2)
+        X_train_fit_raw = X_train_raw.iloc[:-val_size].copy()
+        X_val_raw = X_train_raw.iloc[-val_size:].copy()
+        y_train_fit = y_train.iloc[:-val_size].copy()
+        y_val = y_train.iloc[-val_size:].copy()
+
+        train_fit_max_date = train_dates.iloc[:-val_size].max()
+        val_min_date = train_dates.iloc[-val_size:].min()
+        if train_fit_max_date >= val_min_date:
+            log_warning(f"   ⚠️ Train/Val 분할 경고: Train 최대 날짜({train_fit_max_date}) >= Val 최소 날짜({val_min_date})")
+        else:
+            log_info(f"   ✅ Train/Val 날짜 분할 확인: Train 최대 날짜 < Val 최소 날짜")
+
+        scaler = StandardScaler()
+        X_train_fit_scaled = scaler.fit_transform(X_train_fit_raw)
+        X_val_scaled = scaler.transform(X_val_raw)
+        X_test_scaled = scaler.transform(X_test_raw)
+
+        X_train_fit_scaled = pd.DataFrame(X_train_fit_scaled, columns=features)
+        X_val_scaled = pd.DataFrame(X_val_scaled, columns=features)
+        X_test_scaled = pd.DataFrame(X_test_scaled, columns=features)
+
+        del X_train_fit_raw, X_val_raw, X_train_raw, X_test_raw
+        gc.collect()
         
         # n_estimators를 충분히 크게 설정하고 early stopping 사용
         best_model = lgb.LGBMClassifier(
@@ -353,8 +444,8 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, n_jobs,
         
         # Early stopping을 사용하여 학습
         best_model.fit(
-            X_train_fit, y_train_fit,
-            eval_set=[(X_val, y_val)],
+            X_train_fit_scaled, y_train_fit,
+            eval_set=[(X_val_scaled, y_val)],
             callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
         )
         log_memory_usage("재시도 후 하이퍼파라미터 튜닝 완료")
@@ -403,8 +494,8 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, n_jobs,
     # 2. SHAP 중요도 계산 (1000건 계층적 샘플링)
     shap_importance = calculate_shap_importance(
         best_model, 
-        X_train_scaled, 
-        y_train, 
+        X_train_fit_scaled, 
+        y_train_fit, 
         features, 
         sample_size=1000
     )
@@ -520,10 +611,10 @@ def main():
         log_memory_usage("프로그램 시작")
 
         # 3. 메인 학습 로직 실행 (공통 create_training_data 함수 사용)
-        X, y, features, imputation_values = create_training_data(years=args.years)
-        if X is not None:
+        X, y, features, imputation_values, dates = create_training_data(years=args.years)
+        if X is not None and dates is not None:
             log_info("🎯 LightGBM 모델 학습을 시작합니다...")
-            train_evaluate_and_save_lgb_model(X, y, features, imputation_values, args.n_jobs, args.n_iter)
+            train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, args.n_jobs, args.n_iter)
             log_info("🎉 LightGBM 모델 학습이 성공적으로 완료되었습니다!")
         else:
             log_error("❌ 학습 데이터 생성에 실패하여 모델 학습을 중단합니다.")

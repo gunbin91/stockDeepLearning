@@ -680,6 +680,23 @@ def _fetch_and_prepare_data(start_date, end_date, calculate_factor_scores=True):
         df_marcap_long = pd.concat(marcap_dfs, ignore_index=True)
         df_marcap_long.sort_values(by=['Code', 'date'], inplace=True)
         
+        # KONEX 제외 (KOSPI, KOSDAQ만 포함)
+        if 'Market' in df_marcap_long.columns:
+            before_count = len(df_marcap_long)
+            df_marcap_long = df_marcap_long[df_marcap_long['Market'].isin(['KOSPI', 'KOSDAQ'])].copy()
+            excluded_count = before_count - len(df_marcap_long)
+            if excluded_count > 0:
+                log_info(f"   🚫 KONEX 제외: {excluded_count}개 레코드 제외 (KOSPI/KOSDAQ만 포함)")
+        
+        # 시가총액 100억 미만 제외 (100억 = 10,000,000,000원)
+        if 'Marcap' in df_marcap_long.columns:
+            min_marcap = 10_000_000_000  # 100억원
+            before_count = len(df_marcap_long)
+            df_marcap_long = df_marcap_long[df_marcap_long['Marcap'] >= min_marcap].copy()
+            excluded_count = before_count - len(df_marcap_long)
+            if excluded_count > 0:
+                log_info(f"   🚫 시가총액 100억 미만 제외: {excluded_count}개 레코드 제외 (시가총액 100억 이상만 포함)")
+        
         # 원본 시가총액 데이터 메모리 해제
         del marcap_dfs
         import gc
@@ -717,6 +734,19 @@ def _fetch_and_prepare_data(start_date, end_date, calculate_factor_scores=True):
         
         log_info(f"✅ 시가총액 데이터 수집 및 일별 분배 완료: {len(df_marcap_long)}개 레코드")
         
+        # 필터링된 종목 리스트 생성 (시가총액 데이터 기준)
+        # 시가총액 데이터에 있는 종목만 사용 (KONEX 제외, 시가총액 100억 미만 제외)
+        valid_tickers = df_marcap_long['Code'].unique()
+        before_count = len(stock_list)
+        stock_list = stock_list[stock_list['종목코드'].isin(valid_tickers)].copy()
+        excluded_count = before_count - len(stock_list)
+        
+        if excluded_count > 0:
+            log_info(f"📋 종목 리스트 필터링 완료: {excluded_count}개 종목 제외 (KONEX 및 시가총액 100억 미만)")
+            log_info(f"   ✅ 최종 분석 대상: {len(stock_list)}개 종목 (KOSPI/KOSDAQ, 시가총액 100억 이상)")
+        else:
+            log_info(f"📋 종목 리스트: {len(stock_list)}개 종목 (모두 유효)")
+        
     except Exception as e:
         raise ConnectionError(f"시가총액 데이터 수집 실패: {e}")
     
@@ -734,10 +764,14 @@ def _fetch_and_prepare_data(start_date, end_date, calculate_factor_scores=True):
         log_warning(f"재무데이터 수집 실패: {e}. 분석을 계속합니다.")
         df_financial_long = pd.DataFrame()
     
+    # 종목 리스트가 비어있으면 오류 발생
+    if stock_list.empty:
+        raise ValueError("필터링 후 유효한 종목이 없습니다. (KONEX 및 시가총액 100억 미만 제외)")
+    
     all_data = []
     stock_records = stock_list.to_dict('records')
     
-    log_info(f"개별 종목 피처 데이터 생성 시작: {len(stock_records)}개 종목")
+    log_info(f"📊 개별 종목 피처 데이터 생성 시작: {len(stock_records)}개 종목 (KONEX 제외, 시가총액 100억 이상)")
     
     # =================================================================
     # 1단계: API 다운로드 (I/O 바운드 - 스레드 사용)

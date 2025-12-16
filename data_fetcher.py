@@ -164,9 +164,23 @@ def _get_stock_list_from_marcap(analysis_date=None):
         # 스팩, 리츠 제외
         df_marcap = df_marcap[~df_marcap['Name'].str.contains('스팩|리츠', na=False)].copy()
         
+        # KONEX 제외 (KOSPI, KOSDAQ만 포함)
+        if 'Market' in df_marcap.columns:
+            df_marcap = df_marcap[df_marcap['Market'].isin(['KOSPI', 'KOSDAQ'])].copy()
+            log_info(f"KONEX 제외 후 종목 수: {len(df_marcap)}개")
+        
         # 상장주식수가 있는 경우만 필터링
         if 'Stocks' in df_marcap.columns:
             df_marcap = df_marcap[df_marcap['Stocks'] > 0]
+        
+        # 시가총액 100억 미만 제외 (100억 = 10,000,000,000원)
+        if 'Marcap' in df_marcap.columns:
+            min_marcap = 10_000_000_000  # 100억원
+            before_count = len(df_marcap)
+            df_marcap = df_marcap[df_marcap['Marcap'] >= min_marcap].copy()
+            excluded_count = before_count - len(df_marcap)
+            if excluded_count > 0:
+                log_info(f"시가총액 100억 미만 종목 {excluded_count}개 제외")
         
         # 컬럼명 정리 및 종목코드 6자리 패딩
         stock_list = df_marcap[['Code', 'Name', 'Stocks']].copy()

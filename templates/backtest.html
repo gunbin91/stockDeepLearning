@@ -83,6 +83,24 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- 백테스팅 기간 설정 (기본: 최근 1년) -->
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="modal_start_date" class="form-label">백테스팅 시작일</label>
+                                <input type="date" class="form-control" id="modal_start_date" required>
+                                <div class="form-text">기본값은 최근 1년입니다. (웜업 데이터는 자동으로 더 앞 기간을 불러옵니다)</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="modal_end_date" class="form-label">백테스팅 종료일</label>
+                                <input type="date" class="form-control" id="modal_end_date" required>
+                                <div class="form-text">종료일은 시작일보다 이후여야 합니다.</div>
+                            </div>
+                        </div>
+                    </div>
                     
                     <div class="row">
                         <div class="col-md-6">

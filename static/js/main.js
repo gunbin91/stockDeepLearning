@@ -687,6 +687,25 @@ $(document).ready(function() {
         
         // 모달이 열릴 때 서버 상태 확인
         $('#backtest_modal').on('show.bs.modal', function() {
+            // 기본 기간(최근 1년) 자동 세팅: 입력값이 비어 있을 때만 적용
+            try {
+                const $start = $('#modal_start_date');
+                const $end = $('#modal_end_date');
+                if ($start.length && $end.length) {
+                    const today = new Date();
+                    const endStr = today.toISOString().slice(0, 10);
+                    const start = new Date(today);
+                    // 1년 기본값 (윤년/월말 이슈를 최소화하기 위해 setFullYear 사용)
+                    start.setFullYear(start.getFullYear() - 1);
+                    const startStr = start.toISOString().slice(0, 10);
+
+                    if (!$end.val()) $end.val(endStr);
+                    if (!$start.val()) $start.val(startStr);
+                }
+            } catch (e) {
+                // 날짜 기본값 설정 실패 시 무시 (사용자 입력으로 대체)
+            }
+
             checkBacktestServerStatus().then(function(serverRunning) {
                 if (serverRunning) {
                     // 서버에서 백테스팅이 실행 중이면 실행 중 상태로 표시
@@ -738,7 +757,22 @@ $(document).ready(function() {
     
     function executeBacktest() {
         // 폼 데이터 수집
+        const startDate = $('#modal_start_date').val();
+        const endDate = $('#modal_end_date').val();
+
+        // 기간 유효성 검사
+        if (!startDate || !endDate) {
+            showToast('백테스팅 기간(시작일/종료일)을 입력하세요.', 'warning');
+            return;
+        }
+        if (startDate > endDate) {
+            showToast('백테스팅 기간이 올바르지 않습니다. (시작일 ≤ 종료일)', 'warning');
+            return;
+        }
+
         const formData = {
+            start_date: startDate,
+            end_date: endDate,
             capital: parseInt($('#modal_capital').val()),
             max_hold: parseInt($('#modal_max_hold').val()),
             take_profit: parseFloat($('#modal_take_profit').val()),

@@ -736,6 +736,12 @@ def start_backtest():
         for param in required_params:
             if param not in data:
                 return jsonify({'error': f'{param} 파라미터가 필요합니다.'}), 400
+
+        # 기간 파라미터 (선택): UI에서 전달되면 스크립트로 그대로 전달
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+        if start_date and end_date and start_date > end_date:
+            return jsonify({'error': '기간이 올바르지 않습니다. (start_date ≤ end_date)'}), 400
         
         # 기존 백테스팅 프로세스 정리
         global current_backtest_process
@@ -765,6 +771,10 @@ def start_backtest():
                     '--buy-universe', str(data['buy_universe']),
                     '--fee', str(data['transaction_fee'])
                 ]
+
+                # 기간 옵션 전달 (있을 때만)
+                if start_date and end_date:
+                    command.extend(['--start-date', str(start_date), '--end-date', str(end_date)])
                 
                 env = os.environ.copy()
                 env['PYTHONIOENCODING'] = 'utf-8'

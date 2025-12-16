@@ -34,6 +34,7 @@ import optuna
 from optuna.samplers import TPESampler
 from sklearn.utils import resample
 from sklearn.inspection import permutation_importance
+from typing import List, Tuple, Optional, Dict
 
 # Windows 환경에서 로케일 설정 (FinanceDataReader 내부 오류 방지)
 if platform.system() == 'Windows':
@@ -266,6 +267,125 @@ def calculate_permutation_importance(model, X_test_scaled, y_test, features, n_r
         log_error(f"   ❌ Permutation Importance 계산 중 오류 발생: {e}")
         return None
 
+def _sanitize_numeric_frame(X: pd.DataFrame) -> pd.DataFrame:
+    """Inf 값을 NaN으로 치환해 스케일러/중앙값 계산이 깨지지 않도록 합니다."""
+    try:
+        numeric_cols = X.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 0:
+            X = X.copy()
+            X[numeric_cols] = X[numeric_cols].replace([np.inf, -np.inf], np.nan)
+        return X
+    except Exception:
+        return X
+
+def compute_imputation_values_train_only(X_train: pd.DataFrame) -> Dict[str, float]:
+    """Train 데이터에서만 중앙값을 계산해 결측치 대체값을 만듭니다(누수 방지)."""
+    X_train = _sanitize_numeric_frame(X_train)
+    med = X_train.median(numeric_only=True)
+    # pandas Series -> dict (joblib 저장/로드 및 fillna 호환)
+    return med.to_dict()
+
+def expanding_time_series_folds(
+    dates: pd.Series,
+    n_splits: int = 3
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """
+    gpuStock 철학에 맞춘 Expanding Window 방식의 시간 기반 CV split 생성.
+    - Train은 누적(expanding)
+    - Val은 바로 다음 구간(미래)
+    - 같은 날짜는 Train/Val에 동시에 걸리지 않도록 unique date 단위로 나눔
+    Returns:
+        (train_idx_positions, val_idx_positions) 리스트. 인덱스는 '위치' 기준(0..N-1).
+    """
+    if dates is None or len(dates) == 0:
+        return []
+    d = pd.to_datetime(dates).reset_index(drop=True)
+    # unique date 단위로 split (동일 날짜가 양쪽에 걸리는 것 방지)
+    unique_dates = pd.Series(d.dt.date.unique()).sort_values().tolist()
+    if len(unique_dates) < (n_splits + 1):
+        return []
+    fold_size = len(unique_dates) // (n_splits + 1)
+    if fold_size <= 0:
+        return []
+
+    folds: List[Tuple[np.ndarray, np.ndarray]] = []
+    for i in range(n_splits):
+        train_end = fold_size * (i + 1)
+        val_end = fold_size * (i + 2)
+        train_dates = set(unique_dates[:train_end])
+        val_dates = set(unique_dates[train_end:val_end])
+        if not train_dates or not val_dates:
+            continue
+        train_idx = np.where(d.dt.date.isin(train_dates).values)[0]
+        val_idx = np.where(d.dt.date.isin(val_dates).values)[0]
+        if len(train_idx) == 0 or len(val_idx) == 0:
+            continue
+        folds.append((train_idx, val_idx))
+    return folds
+
+def time_series_cv_auc(
+    model_builder,
+    X: pd.DataFrame,
+    y: pd.Series,
+    dates: pd.Series,
+    features: List[str],
+    n_splits: int = 3
+) -> float:
+    """
+    시간 기반 Expanding CV로 ROC-AUC 평균을 계산합니다.
+    - 각 fold마다 Train-only로 imputation/scaler fit
+    """
+    folds = expanding_time_series_folds(dates, n_splits=n_splits)
+    if not folds:
+        return 0.0
+
+    scores: List[float] = []
+    X = X.reset_index(drop=True)
+    y = y.reset_index(drop=True)
+    dates = pd.to_datetime(dates).reset_index(drop=True)
+
+    for (tr_idx, va_idx) in folds:
+        X_tr = X.iloc[tr_idx][features].copy()
+        y_tr = y.iloc[tr_idx].copy()
+        X_va = X.iloc[va_idx][features].copy()
+        y_va = y.iloc[va_idx].copy()
+
+        # Train-only imputation
+        imp = compute_imputation_values_train_only(X_tr)
+        X_tr = _sanitize_numeric_frame(X_tr)
+        X_va = _sanitize_numeric_frame(X_va)
+        X_tr.fillna(imp, inplace=True)
+        X_va.fillna(imp, inplace=True)
+
+        # Train-only scaling
+        scaler = StandardScaler()
+        X_tr_s = scaler.fit_transform(X_tr)
+        X_va_s = scaler.transform(X_va)
+
+        # ✅ 경고 방지: fit/predict 모두 feature name이 있는 DataFrame 형태로 통일
+        # (특히 LGBMClassifier는 fit 시 feature names를 기억하므로, predict 입력이 numpy면 sklearn warning 발생 가능)
+        X_tr_s = pd.DataFrame(X_tr_s, columns=features)
+        X_va_s = pd.DataFrame(X_va_s, columns=features)
+
+        model = model_builder()
+        try:
+            model.fit(X_tr_s, y_tr)
+            y_va_proba = model.predict_proba(X_va_s)[:, 1]
+            scores.append(roc_auc_score(y_va, y_va_proba))
+        except Exception:
+            # fold 실패는 점수 0으로 처리 (Optuna objective 안정성)
+            scores.append(0.0)
+        finally:
+            try:
+                del model, X_tr, X_va, X_tr_s, X_va_s, scaler
+            except Exception:
+                pass
+            gc.collect()
+
+    if not scores:
+        return 0.0
+    return float(np.mean(scores))
+
 def load_training_data_from_file(training_data_path):
     """학습 데이터 파일에서 로드"""
     try:
@@ -292,6 +412,108 @@ def save_training_data_to_file(final_df, training_data_path):
         log_error(f"학습 데이터 파일 저장 실패: {e}")
         return False
 
+def split_by_date(X, y, dates, test_size=0.3):
+    """
+    날짜 기반 데이터 분할 함수 (미래 데이터 참조 방지)
+    
+    Args:
+        X: 피처 데이터 (DataFrame)
+        y: 타겟 데이터 (Series)
+        dates: 날짜 데이터 (Series, datetime 타입)
+        test_size: 테스트 데이터 비율 (기본값: 0.3)
+    
+    Returns:
+        X_train, X_test, y_train, y_test, train_dates, test_dates
+    """
+    # 날짜 기준으로 정렬
+    sorted_indices = dates.argsort()
+    X_sorted = X.iloc[sorted_indices].reset_index(drop=True)
+    y_sorted = y.iloc[sorted_indices].reset_index(drop=True)
+    dates_sorted = dates.iloc[sorted_indices].reset_index(drop=True)
+    
+    # 날짜 기준으로 분할 (과거 데이터 = Train, 미래 데이터 = Test)
+    # 같은 날짜의 데이터가 Train과 Test 양쪽에 포함되지 않도록 처리
+    split_idx = int(len(X_sorted) * (1 - test_size))
+    
+    # split_idx 위치의 날짜 확인
+    split_date = dates_sorted.iloc[split_idx]
+    
+    # 같은 날짜의 모든 데이터를 Train에 포함시키기 위해
+    # split_date와 같은 날짜의 마지막 인덱스를 찾음
+    same_date_mask = dates_sorted.dt.date == split_date.date()
+    if same_date_mask.any():
+        # 같은 날짜의 마지막 인덱스 찾기 (reset_index 후이므로 인덱스는 0부터 시작)
+        same_date_positions = dates_sorted.index[same_date_mask]
+        last_same_date_idx = same_date_positions.max()
+        # 같은 날짜의 모든 데이터를 Train에 포함
+        split_idx = last_same_date_idx + 1
+    
+    # split_idx가 범위를 벗어나지 않도록 확인
+    if split_idx >= len(X_sorted):
+        split_idx = len(X_sorted) - 1
+    
+    X_train = X_sorted.iloc[:split_idx].copy()
+    X_test = X_sorted.iloc[split_idx:].copy()
+    y_train = y_sorted.iloc[:split_idx].copy()
+    y_test = y_sorted.iloc[split_idx:].copy()
+    train_dates = dates_sorted.iloc[:split_idx].copy()
+    test_dates = dates_sorted.iloc[split_idx:].copy()
+    
+    # 데이터 정합성 검증: Train의 최대 날짜 < Test의 최소 날짜
+    train_max_date = train_dates.max()
+    test_min_date = test_dates.min()
+    
+    # 같은 날짜가 Train과 Test 양쪽에 포함되어 있으면 조정
+    if train_max_date >= test_min_date:
+        # Train의 최대 날짜와 같은 날짜의 모든 데이터를 Train에 포함
+        train_max_date_mask = dates_sorted.dt.date == train_max_date.date()
+        if train_max_date_mask.any():
+            # 같은 날짜의 마지막 인덱스 찾기
+            same_date_positions = dates_sorted.index[train_max_date_mask]
+            last_same_date_idx = same_date_positions.max()
+            # 같은 날짜의 모든 데이터를 Train에 포함
+            split_idx = last_same_date_idx + 1
+            
+            # split_idx가 범위를 벗어나지 않도록 확인
+            if split_idx >= len(X_sorted):
+                split_idx = len(X_sorted) - 1
+            
+            # 재분할
+            X_train = X_sorted.iloc[:split_idx].copy()
+            X_test = X_sorted.iloc[split_idx:].copy()
+            y_train = y_sorted.iloc[:split_idx].copy()
+            y_test = y_sorted.iloc[split_idx:].copy()
+            train_dates = dates_sorted.iloc[:split_idx].copy()
+            test_dates = dates_sorted.iloc[split_idx:].copy()
+            
+            train_max_date = train_dates.max()
+            if len(test_dates) > 0:
+                test_min_date = test_dates.min()
+            else:
+                # Test 데이터가 없으면 오류
+                log_error(f"❌ 심각한 오류: Test 데이터가 없습니다!")
+                log_error(f"   Train 데이터 수: {len(X_train):,}행")
+                raise ValueError("날짜 기반 분할이 실패했습니다. Test 데이터가 없습니다.")
+    
+    # 최종 검증
+    if len(test_dates) > 0 and train_max_date >= test_min_date:
+        log_error(f"❌ 심각한 오류: 날짜 기반 분할 실패!")
+        log_error(f"   Train 최대 날짜: {train_max_date}")
+        log_error(f"   Test 최소 날짜: {test_min_date}")
+        log_error(f"   Train 데이터 수: {len(X_train):,}행")
+        log_error(f"   Test 데이터 수: {len(X_test):,}행")
+        # 디버깅 정보 추가
+        log_error(f"   Train 최대 날짜의 데이터 수: {(train_dates.dt.date == train_max_date.date()).sum()}행")
+        log_error(f"   Test 최소 날짜의 데이터 수: {(test_dates.dt.date == test_min_date.date()).sum()}행")
+        raise ValueError("날짜 기반 분할이 실패했습니다. Train 데이터의 최대 날짜가 Test 데이터의 최소 날짜보다 크거나 같습니다.")
+    
+    log_info(f"   ✅ 날짜 기반 분할 완료:")
+    log_info(f"      Train: {train_dates.min().strftime('%Y-%m-%d')} ~ {train_max_date.strftime('%Y-%m-%d')} ({len(X_train):,}행)")
+    log_info(f"      Test:  {test_min_date.strftime('%Y-%m-%d')} ~ {test_dates.max().strftime('%Y-%m-%d')} ({len(X_test):,}행)")
+    log_info(f"      ✅ 미래 데이터 참조 방지 확인: Train 최대 날짜 < Test 최소 날짜")
+    
+    return X_train, X_test, y_train, y_test, train_dates, test_dates
+
 def create_training_data(years=None):
     """
     학습 데이터 생성 함수
@@ -300,7 +522,7 @@ def create_training_data(years=None):
         years: 학습에 사용할 최근 N년치 데이터 (None이면 전체 데이터)
     
     Returns:
-        X, y, features, imputation_values
+        X, y, features, imputation_values, dates
     """
     training_data_path = path_manager.get_training_data_path()
     
@@ -416,7 +638,12 @@ def create_training_data(years=None):
     for col in features + [target]:
         if col not in final_df.columns:
             log_error(f"오류: 필요한 컬럼 '{col}'이 데이터프레임에 없습니다.")
-            return None, None, None, None
+            return None, None, None, None, None
+    
+    # 날짜 컬럼 확인 (필수)
+    if 'date' not in final_df.columns:
+        log_error("❌ 심각한 오류: 'date' 컬럼이 데이터에 없습니다. 날짜 기반 분할을 수행할 수 없습니다.")
+        return None, None, None, None, None
             
     final_df.dropna(subset=[target], inplace=True)
     log_info(f"3. 타겟 변수 결측치 제거 후: {len(final_df):,} 행")
@@ -424,10 +651,13 @@ def create_training_data(years=None):
 
     if final_df.empty:
         log_error("오류: 최종 학습 데이터가 비어있습니다.")
-        return None, None, None, None
+        return None, None, None, None, None
 
     # 메모리 효율적인 데이터 타입 변환
     log_info("   🔄 메모리 효율적인 데이터 타입 변환 중...")
+    
+    # 날짜 컬럼 보존
+    dates = pd.to_datetime(final_df['date'])
     
     # 필요한 컬럼만 선택하여 메모리 절약
     required_columns = features + [target]
@@ -444,30 +674,26 @@ def create_training_data(years=None):
     
     log_memory_usage("데이터 타입 변환 완료")
     
-    # 중앙값 계산 (메모리 효율적)
-    log_info("   📊 피처별 대표 중앙값 계산 중...")
-    imputation_values = X.median()
-    log_info("\n--- 피처별 대표 중앙값 (결측치 대체용) ---")
-    log_info(str(imputation_values))
-    log_info("-----------------------------------------")
-    
-    # 결측치 대체
-    log_info("   🔧 결측치 대체 중...")
-    X.fillna(imputation_values, inplace=True)
-    log_memory_usage("결측치 대체 완료")
-    check_memory_and_cleanup()
+    # ⚠️ 중요: 결측치 대체값(imputation) 계산/적용은 Train 데이터에서만 수행해야 데이터 누수를 방지할 수 있습니다.
+    # 여기서는 결측치를 유지한 채로 반환합니다. (gpuStock 방식과 동일 철학)
+    imputation_values = None
     
     log_info(f"4. 최종 학습 데이터셋 (X): {X.shape}")
     log_info(f"   - 타겟 분포 (y):\n{y.value_counts(normalize=True).to_string()}")
+    log_info(f"   - 날짜 범위: {dates.min().strftime('%Y-%m-%d')} ~ {dates.max().strftime('%Y-%m-%d')}")
     log_info("---------------------------------")
     log_memory_usage("최종 학습 데이터 준비 완료")
 
     log_info("✅ 학습 데이터 생성 완료!")
-    return X, y, features, imputation_values
+    return X, y, features, imputation_values, dates
 
-def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_iter, max_depth_list, model_path=None):
+def train_evaluate_and_save_model(X, y, features, imputation_values, dates, n_jobs, n_iter, max_depth_list, model_path=None):
     if X is None or y is None or X.empty or y.empty:
         log_error("학습 데이터가 없어 모델링을 건너뜁니다.")
+        return
+    
+    if dates is None or dates.empty:
+        log_error("❌ 날짜 데이터가 없어 모델링을 건너뜁니다.")
         return
 
     # 통일된 경로 사용
@@ -477,44 +703,43 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
     log_info("🤖 모델 학습 및 평가를 시작합니다...")
     log_memory_usage("모델 학습 시작")
     
-    # 메모리 효율적인 train_test_split
-    log_info("   📊 학습/테스트 데이터 분할 중...")
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+    # 날짜 기반 데이터 분할 (미래 데이터 참조 방지)
+    log_info("   📊 날짜 기반 학습/테스트 데이터 분할 중...")
+    X_train, X_test, y_train, y_test, train_dates, test_dates = split_by_date(X, y, dates, test_size=0.3)
     log_memory_usage("데이터 분할 완료")
     check_memory_and_cleanup()
 
-    log_info("\n   📏 피처 스케일링 (StandardScaler) 적용 중...")
-    scaler = StandardScaler()
-    
-    try:
-        X_train_scaled = scaler.fit_transform(X_train)
-        log_memory_usage("훈련 데이터 스케일링 완료")
-        check_memory_and_cleanup()
-        
-        X_test_scaled = scaler.transform(X_test)
-        log_memory_usage("테스트 데이터 스케일링 완료")
-        
-        # 중간 변수 즉시 메모리 해제
-        del X_train, X_test
-        gc.collect()
-        log_info("   🧹 중간 변수 메모리 해제 완료")
-        
-    except MemoryError as e:
-        log_error(f"스케일링 중 메모리 부족: {e}")
-        log_info("   🔄 메모리 정리 후 재시도합니다...")
-        safe_memory_cleanup()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-        
-        # 중간 변수 즉시 메모리 해제
-        del X_train, X_test
-        gc.collect()
-        
-        log_memory_usage("재시도 후 스케일링 완료")
+    # Optuna 튜닝은 "raw train" 기준으로 시간 기반 CV를 수행해야 함
+    # (스케일러/중앙값을 train 전체에 미리 fit하면 CV 단계에서 누수가 발생할 수 있음)
+    X_train_raw = X_train.copy()
+    X_test_raw = X_test.copy()
+
+    # ======================================================================
+    # ✅ Trial마다 반복되는 공통 작업 캐싱 (gpuStock 스타일)
+    # - Expanding CV fold 인덱스 생성 (1회)
+    # - Fold별 Train-only 중앙값(imputation) 계산 (1회)
+    # - CV에서 스케일링 제거 (RandomForest는 트리 모델이라 불필요)
+    # ======================================================================
+    log_info("   🧠 [CACHE] 시간 기반 Expanding CV fold/결측치 대체값을 미리 계산합니다...")
+    train_dates_cv = pd.to_datetime(train_dates).reset_index(drop=True)
+    y_train_cv = y_train.reset_index(drop=True)
+    X_train_cv = X_train_raw.reset_index(drop=True)
+
+    fold_indices = expanding_time_series_folds(train_dates_cv, n_splits=3)
+    if not fold_indices:
+        log_warning("   ⚠️ Expanding CV fold 생성 실패(데이터 기간 부족). Optuna 튜닝을 중단합니다.")
+        return
+
+    cv_cache = []
+    for (tr_idx, va_idx) in fold_indices:
+        X_tr_base = X_train_cv.iloc[tr_idx][features]
+        imp = compute_imputation_values_train_only(X_tr_base)
+        cv_cache.append((tr_idx, va_idx, imp))
+    log_info(f"   ✅ [CACHE] fold 캐시 준비 완료: {len(cv_cache)}개 fold")
 
     log_info("\n학습 데이터 타겟 분포:\n" + str(y_train.value_counts(normalize=True)))
 
-    log_info("🔍 Optuna를 사용하여 최적 파라미터 탐색...")
+    log_info("🔍 Optuna를 사용하여 최적 파라미터 탐색... (시간 기반 Expanding CV)")
     log_info(f"   ⚙️ 탐색할 파라미터 조합: {n_iter}개")
     log_info(f"   🔄 교차 검증: 3-fold")
     log_info(f"   💻 사용할 CPU 코어: {n_jobs}")
@@ -523,6 +748,7 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
     def objective(trial):
         """Optuna objective 함수: 하이퍼파라미터 튜닝을 위한 목적 함수"""
         # 하이퍼파라미터 제안
+        model_n_jobs = -1 if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 500),
             'max_depth': trial.suggest_categorical('max_depth', max_depth_list),
@@ -533,35 +759,36 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
             'random_state': 42,
             'class_weight': 'balanced',
             'oob_score': False,  # OOB 점수 비활성화로 메모리 절약
-            'n_jobs': 1,  # 각 모델은 단일 코어 사용 (메모리 절약)
+            'n_jobs': model_n_jobs,  # RF 내부 멀티스레드 사용 (trial 병렬 대신 모델 병렬 권장)
             'warm_start': False,  # 메모리 절약
             'bootstrap': True
         }
-        
-        # 모델 생성
-        model = RandomForestClassifier(**params)
-        
-        # 교차 검증 수행 (메모리 효율적)
+
+        # 시간 기반 Expanding CV 수행 (누수 방지 + 캐시 재사용 + 스케일링 제거)
+        scores = []
         try:
-            cv_scores = cross_val_score(
-                model, 
-                X_train_scaled, 
-                y_train, 
-                cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
-                scoring='roc_auc',
-                n_jobs=1  # 단일 코어 사용 (메모리 절약)
-            )
-            mean_score = cv_scores.mean()
-            
-            # 메모리 정리
-            del model
-            gc.collect()
-            
-            return mean_score
+            for (tr_idx, va_idx, imp) in cv_cache:
+                X_tr = X_train_cv.iloc[tr_idx][features].copy()
+                y_tr_fold = y_train_cv.iloc[tr_idx].copy()
+                X_va = X_train_cv.iloc[va_idx][features].copy()
+                y_va_fold = y_train_cv.iloc[va_idx].copy()
+
+                X_tr = _sanitize_numeric_frame(X_tr)
+                X_va = _sanitize_numeric_frame(X_va)
+                X_tr.fillna(imp, inplace=True)
+                X_va.fillna(imp, inplace=True)
+
+                model = RandomForestClassifier(**params)
+                model.fit(X_tr, y_tr_fold)
+                y_va_proba = model.predict_proba(X_va)[:, 1]
+                scores.append(roc_auc_score(y_va_fold, y_va_proba))
+
+                del model, X_tr, X_va, y_tr_fold, y_va_fold, y_va_proba
+                gc.collect()
+
+            return float(np.mean(scores)) if scores else 0.0
         except Exception as e:
-            # 오류 발생 시 낮은 점수 반환
             log_warning(f"   ⚠️ Trial {trial.number} 실패: {e}")
-            del model
             gc.collect()
             return 0.0
 
@@ -582,9 +809,9 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
             study_name='random_forest_optimization'
         )
         
-        # 하이퍼파라미터 최적화 실행
-        # n_jobs 처리: -1이면 None (모든 코어 사용), 0 이하면 1, 그 외는 지정된 값
-        optuna_n_jobs = None if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
+        # ✅ 성능/안정성: trial 병렬(optuna n_jobs) 대신 RF 내부 멀티스레드를 사용
+        # (trial 병렬은 메모리/CPU oversubscription으로 오히려 느려질 수 있음)
+        optuna_n_jobs = 1
         study.optimize(
             objective, 
             n_trials=n_iter,
@@ -598,24 +825,7 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
         best_params = study.best_params.copy()
         best_score = study.best_value
         
-        # 최적 모델 생성 (전체 훈련 데이터로 학습)
-        log_info("   🔧 최적 파라미터로 최종 모델 학습 중...")
-        best_model = RandomForestClassifier(
-            n_estimators=best_params['n_estimators'],
-            max_depth=best_params['max_depth'],
-            min_samples_split=best_params['min_samples_split'],
-            min_samples_leaf=best_params['min_samples_leaf'],
-            max_samples=best_params['max_samples'],
-            max_features=best_params['max_features'],
-            random_state=42,
-            class_weight='balanced',
-            oob_score=False,
-            n_jobs=1,
-            warm_start=False,
-            bootstrap=True
-        )
-        best_model.fit(X_train_scaled, y_train)
-        log_memory_usage("최적 모델 학습 완료")
+        # 최종 모델 학습은 "최종 전처리(Train-only)" 이후에 수행합니다.
         
     except MemoryError as e:
         log_error(f"하이퍼파라미터 튜닝 중 메모리 부족: {e}")
@@ -624,6 +834,7 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
         
         # 더 작은 파라미터 범위로 재시도
         def objective_small(trial):
+            model_n_jobs = -1 if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
             params = {
                 'n_estimators': trial.suggest_int('n_estimators', 50, 200),
                 'max_depth': trial.suggest_categorical('max_depth', max_depth_list[:2]),
@@ -634,27 +845,32 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
                 'random_state': 42,
                 'class_weight': 'balanced',
                 'oob_score': False,
-                'n_jobs': 1,
+                'n_jobs': model_n_jobs,
                 'warm_start': False,
                 'bootstrap': True
             }
-            model = RandomForestClassifier(**params)
             try:
-                cv_scores = cross_val_score(
-                    model, 
-                    X_train_scaled, 
-                    y_train, 
-                    cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
-                    scoring='roc_auc',
-                    n_jobs=1
-                )
-                mean_score = cv_scores.mean()
-                del model
-                gc.collect()
-                return mean_score
+                scores = []
+                for (tr_idx, va_idx, imp) in cv_cache:
+                    X_tr = X_train_cv.iloc[tr_idx][features].copy()
+                    y_tr_fold = y_train_cv.iloc[tr_idx].copy()
+                    X_va = X_train_cv.iloc[va_idx][features].copy()
+                    y_va_fold = y_train_cv.iloc[va_idx].copy()
+
+                    X_tr = _sanitize_numeric_frame(X_tr)
+                    X_va = _sanitize_numeric_frame(X_va)
+                    X_tr.fillna(imp, inplace=True)
+                    X_va.fillna(imp, inplace=True)
+
+                    model = RandomForestClassifier(**params)
+                    model.fit(X_tr, y_tr_fold)
+                    y_va_proba = model.predict_proba(X_va)[:, 1]
+                    scores.append(roc_auc_score(y_va_fold, y_va_proba))
+                    del model, X_tr, X_va, y_tr_fold, y_va_fold, y_va_proba
+                    gc.collect()
+                return float(np.mean(scores)) if scores else 0.0
             except Exception as e:
                 log_warning(f"   ⚠️ Trial {trial.number} 실패: {e}")
-                del model
                 gc.collect()
                 return 0.0
         
@@ -674,32 +890,54 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, n_jobs, n_i
         best_params = study.best_params.copy()
         best_score = study.best_value
         
-        best_model = RandomForestClassifier(
-            n_estimators=best_params['n_estimators'],
-            max_depth=best_params['max_depth'],
-            min_samples_split=best_params['min_samples_split'],
-            min_samples_leaf=best_params['min_samples_leaf'],
-            max_samples=best_params['max_samples'],
-            max_features=best_params['max_features'],
-            random_state=42,
-            class_weight='balanced',
-            oob_score=False,
-            n_jobs=1,
-            warm_start=False,
-            bootstrap=True
-        )
-        best_model.fit(X_train_scaled, y_train)
-        log_memory_usage("재시도 후 하이퍼파라미터 튜닝 완료")
+        # 최종 모델 학습은 "최종 전처리(Train-only)" 이후에 수행합니다.
     
     except Exception as e:
         log_error(f"하이퍼파라미터 튜닝 중 오류 발생: {e}")
         raise
     
     # 최적 모델이 생성되었는지 확인
-    if best_model is None or best_params is None:
-        log_error("최적 모델 생성에 실패했습니다.")
-        raise RuntimeError("최적 모델을 생성할 수 없습니다.")
+    if best_params is None:
+        log_error("최적 파라미터 생성에 실패했습니다.")
+        raise RuntimeError("최적 파라미터를 생성할 수 없습니다.")
     
+    # ===========================
+    # 최종 학습/평가용 전처리 (Train-only)
+    # ===========================
+    log_info("\n   🔧 최종 학습/평가용 Train-only 결측치 대체 및 스케일링 적용 중...")
+    X_train_raw = _sanitize_numeric_frame(X_train_raw)
+    X_test_raw = _sanitize_numeric_frame(X_test_raw)
+    imputation_values = compute_imputation_values_train_only(X_train_raw)
+    X_train_raw.fillna(imputation_values, inplace=True)
+    X_test_raw.fillna(imputation_values, inplace=True)
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train_raw)
+    X_test_scaled = scaler.transform(X_test_raw)
+    del X_train_raw, X_test_raw
+    gc.collect()
+    log_memory_usage("최종 전처리 완료")
+
+    # 최종 모델 학습 (전처리 완료 후)
+    log_info("   🔧 최적 파라미터로 최종 모델 학습 중...")
+    model_n_jobs = -1 if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
+    best_model = RandomForestClassifier(
+        n_estimators=best_params['n_estimators'],
+        max_depth=best_params['max_depth'],
+        min_samples_split=best_params['min_samples_split'],
+        min_samples_leaf=best_params['min_samples_leaf'],
+        max_samples=best_params.get('max_samples', None),
+        max_features=best_params['max_features'],
+        random_state=42,
+        class_weight='balanced',
+        oob_score=False,
+        n_jobs=model_n_jobs,
+        warm_start=False,
+        bootstrap=True
+    )
+    best_model.fit(X_train_scaled, y_train)
+    log_memory_usage("최적 모델 학습 완료")
+
     log_info("\n--- 최적 파라미터 탐색 결과 ---")
     log_info(f"최고 점수 (ROC-AUC): {best_score:.4f}")
     log_info("최적 파라미터: " + str(best_params))
@@ -853,10 +1091,10 @@ def main():
         log_memory_usage("프로그램 시작")
 
         # 3. 메인 학습 로직 실행
-        X, y, features, imputation_values = create_training_data(years=args.years)
-        if X is not None:
+        X, y, features, imputation_values, dates = create_training_data(years=args.years)
+        if X is not None and dates is not None:
             log_info("🎯 모델 학습을 시작합니다...")
-            train_evaluate_and_save_model(X, y, features, imputation_values, args.n_jobs, args.n_iter, args.max_depth)
+            train_evaluate_and_save_model(X, y, features, imputation_values, dates, args.n_jobs, args.n_iter, args.max_depth)
             log_info("🎉 모델 학습이 성공적으로 완료되었습니다!")
         else:
             log_error("❌ 학습 데이터 생성에 실패하여 모델 학습을 중단합니다.")

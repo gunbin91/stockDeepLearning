@@ -62,12 +62,87 @@ from logger import (log_info, log_error, log_critical, log_warning, shutdown_log
 from path_manager import path_manager
 
 # --- 설정 변수 (통일된 경로 사용) ---
-TEST_START_DATE = '2024-01-01'
 TEST_END_DATE = datetime.now().strftime('%Y-%m-%d')
+# 기본은 최근 1년 (웹 팝업 기본값과 동일)
+TEST_START_DATE = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+# 250영업일(최대 롤링/룩백) 커버 목적의 안전 완충(캘린더 일수)
+WARMUP_DAYS = 400
 WEIGHTS_FILE = str(path_manager.get_weights_path())
 MODEL_FILE = str(path_manager.get_model_path())
 REPORT_FILE = str(path_manager.get_backtest_report_path())
 TOP_N_STOCKS = 5
+
+def _apply_model_prediction_to_backtest_df(
+    df: pd.DataFrame,
+    *,
+    model_file: str,
+    proba_col: str,
+    model_label: str,
+    require_feature_names_dataframe: bool = False
+) -> pd.DataFrame:
+    """
+    백테스팅 데이터프레임에 모델 예측 확률 컬럼을 추가합니다.
+    - 학습 시 저장된 features / scaler / imputation_values를 그대로 사용 (학습-추론 일관성)
+    - 결측치는 0 채우기 대신 imputation_values로 대체 (누수 방지 + 일관성)
+    """
+    if df is None or df.empty:
+        return df
+
+    if not os.path.exists(model_file):
+        log_warning(f"{model_label} 모델 파일이 없어 예측을 건너뜁니다", context={"model_file": model_file})
+        df[proba_col] = np.nan
+        return df
+
+    try:
+        model_data = joblib.load(model_file)
+        model = model_data.get('model')
+        features = model_data.get('features', [])
+        scaler = model_data.get('scaler', None)
+        imputation_values = model_data.get('imputation_values', None)
+    except Exception as e:
+        log_warning(f"{model_label} 모델 로딩 실패로 예측을 건너뜁니다", exception=e, context={"model_file": model_file})
+        df[proba_col] = np.nan
+        return df
+
+    if model is None or not features:
+        log_warning(f"{model_label} 모델/피처 정보가 비정상이라 예측을 건너뜁니다", context={"model_file": model_file})
+        df[proba_col] = np.nan
+        return df
+
+    missing_features = [f for f in features if f not in df.columns]
+    if missing_features:
+        log_warning(f"{model_label} 예측 불가: 필요한 피처 부족", context={"missing_features_count": len(missing_features)})
+        df[proba_col] = np.nan
+        return df
+
+    try:
+        X_pred = df[features].copy()
+        if imputation_values is not None:
+            X_pred.fillna(imputation_values, inplace=True)
+        else:
+            # 과거 모델/파일 호환: imputation_values가 없으면 최소한 0으로 대체
+            X_pred.fillna(0, inplace=True)
+
+        if scaler is not None:
+            X_scaled = scaler.transform(X_pred)
+            if require_feature_names_dataframe:
+                # LightGBM feature-name warning 방지
+                X_scaled = pd.DataFrame(X_scaled, columns=features)
+        else:
+            X_scaled = X_pred
+
+        df[proba_col] = model.predict_proba(X_scaled)[:, 1]
+        log_info(f"{model_label} 예측 적용 완료", context={
+            "rows": len(df),
+            "proba_col": proba_col,
+            "min": float(np.nanmin(df[proba_col])) if df[proba_col].notna().any() else None,
+            "max": float(np.nanmax(df[proba_col])) if df[proba_col].notna().any() else None
+        })
+        return df
+    except Exception as e:
+        log_warning(f"{model_label} 예측 실패", exception=e, context={"model_file": model_file})
+        df[proba_col] = np.nan
+        return df
 
 def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, buy_universe_rank, transaction_fee_rate):
     """상세 백테스팅 실행 - 강화된 에러 처리"""
@@ -483,13 +558,34 @@ def create_html_report(results, output_path=REPORT_FILE):
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(html_content)
 
-def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate):
+def run_final_backtest(
+    initial_capital,
+    max_hold_period,
+    take_profit_pct,
+    stop_loss_pct,
+    top_n,
+    buy_universe_rank,
+    transaction_fee_rate,
+    start_date: str = None,
+    end_date: str = None,
+    warmup_days: int = None
+):
     """최종 백테스팅 실행 - 강화된 에러 처리"""
     start_time = time.time()
     
     try:
+        # 기간 기본값/검증
+        start_date = start_date or TEST_START_DATE
+        end_date = end_date or TEST_END_DATE
+        warmup_days = WARMUP_DAYS if warmup_days is None else int(warmup_days)
+
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+        if start_dt > end_dt:
+            raise ValueError(f"백테스팅 기간 오류: start_date({start_date}) > end_date({end_date})")
+
         # 백테스팅 시작 보고서 (중복 제거)
-        start_analysis_report(f"백테스팅 ({TEST_START_DATE} ~ {TEST_END_DATE})")
+        start_analysis_report(f"백테스팅 ({start_dt.strftime('%Y-%m-%d')} ~ {end_dt.strftime('%Y-%m-%d')})")
         
         log_info("💰 투자 설정")
         log_info(f"   └─ 초기 자본: {initial_capital:,}원")
@@ -498,6 +594,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         log_info(f"   └─ 익절 기준: +{take_profit_pct}%")
         log_info(f"   └─ 손절 기준: -{stop_loss_pct}%")
         log_info(f"   └─ 거래 수수료: {transaction_fee_rate}%")
+        log_info(f"   └─ 백테스팅 기간: {start_dt.strftime('%Y-%m-%d')} ~ {end_dt.strftime('%Y-%m-%d')} (웜업: {warmup_days}일)")
         
         log_info("1. 최종 백테스트 시작...")
         
@@ -518,18 +615,18 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         
         # 데이터 로딩 (강화된 에러 처리)
         try:
-            backtest_start_date_with_warmup = (pd.to_datetime(TEST_START_DATE) - timedelta(days=400)).strftime('%Y-%m-%d')
+            backtest_start_date_with_warmup = (start_dt - timedelta(days=warmup_days)).strftime('%Y-%m-%d')
             log_info("백테스팅 데이터 로딩 시작", context={
                 "start_date": backtest_start_date_with_warmup,
-                "end_date": TEST_END_DATE
+                "end_date": end_dt.strftime('%Y-%m-%d')
             })
             
-            test_data = data_processor.get_preprocessed_data(backtest_start_date_with_warmup, TEST_END_DATE)
+            test_data = data_processor.get_preprocessed_data(backtest_start_date_with_warmup, end_dt.strftime('%Y-%m-%d'))
             
             if test_data is None or test_data.empty:
                 log_critical("백테스팅 데이터가 비어있습니다", context={
                     "start_date": backtest_start_date_with_warmup,
-                    "end_date": TEST_END_DATE
+                    "end_date": end_dt.strftime('%Y-%m-%d')
                 })
                 raise ValueError("백테스팅 데이터가 비어있습니다")
             
@@ -558,7 +655,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         except Exception as e:
             log_critical("백테스팅 데이터 로딩 실패", exception=e, context={
                 "start_date": backtest_start_date_with_warmup,
-                "end_date": TEST_END_DATE
+                "end_date": end_dt.strftime('%Y-%m-%d')
             })
             raise
     
@@ -571,6 +668,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             model = model_data['model']
             features = model_data['features']
             scaler = model_data['scaler']
+            rf_imputation_values = model_data.get('imputation_values', None)
             
             log_info("ML 모델 로딩 완료", context={
                 "model_type": type(model).__name__,
@@ -595,7 +693,11 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             })
             
             test_data_for_pred = test_data[features].copy()
-            test_data_for_pred.fillna(0, inplace=True)
+            # ✅ 학습/추론 일관성: 모델에 저장된 결측치 대체값 사용 (없으면 0 fallback)
+            if rf_imputation_values is not None:
+                test_data_for_pred.fillna(rf_imputation_values, inplace=True)
+            else:
+                test_data_for_pred.fillna(0, inplace=True)
             
             X_test_scaled = scaler.transform(test_data_for_pred)
             test_data['ml_pred_proba'] = model.predict_proba(X_test_scaled)[:, 1]
@@ -611,10 +713,26 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                 "data_shape": test_data.shape
             })
             raise
+
+        # LightGBM 예측 적용 (선택적 - 파일이 없으면 자동 skip)
+        try:
+            lgb_model_file = str(path_manager.get_lgb_model_path())
+            test_data = _apply_model_prediction_to_backtest_df(
+                test_data,
+                model_file=lgb_model_file,
+                proba_col='lgb_pred_proba',
+                model_label='LightGBM',
+                require_feature_names_dataframe=True
+            )
+        except Exception as e:
+            # 절대 백테스팅 전체를 멈추지 않도록 방어
+            log_warning("LightGBM 예측 적용 중 예외(무시하고 계속 진행)", exception=e)
+            if 'lgb_pred_proba' not in test_data.columns:
+                test_data['lgb_pred_proba'] = np.nan
     
         # 데이터 전처리 (강화된 에러 처리)
         try:
-            test_data = test_data[test_data['date'] >= pd.to_datetime(TEST_START_DATE)]
+            test_data = test_data[test_data['date'] >= start_dt]
             
             # 로그: 백테스팅용 데이터 상태 확인
             log_info(f"🔍 백테스팅용 데이터: {len(test_data):,}개 행")
@@ -730,6 +848,9 @@ if __name__ == '__main__':
     parser.add_argument('--top-n', type=int, default=5, help='Number of stocks to buy')
     parser.add_argument('--buy-universe', type=int, default=20, help='Rank universe to consider for buying')
     parser.add_argument('--fee', type=float, default=0.015, help='Transaction fee rate (e.g., 0.015 for 0.015%)')
+    parser.add_argument('--start-date', type=str, default=TEST_START_DATE, help='Backtest start date (YYYY-MM-DD)')
+    parser.add_argument('--end-date', type=str, default=TEST_END_DATE, help='Backtest end date (YYYY-MM-DD)')
+    parser.add_argument('--warmup-days', type=int, default=WARMUP_DAYS, help='Warmup days before start-date (calendar days)')
     args = parser.parse_args()
 
     if args.capital <= 0:
@@ -742,6 +863,9 @@ if __name__ == '__main__':
             stop_loss_pct=args.stop_loss, 
             top_n=args.top_n, 
             buy_universe_rank=args.buy_universe,
-            transaction_fee_rate=args.fee
+            transaction_fee_rate=args.fee,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            warmup_days=args.warmup_days
         )
 
