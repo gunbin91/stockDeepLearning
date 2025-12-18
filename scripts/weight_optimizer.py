@@ -58,8 +58,9 @@ TRAIN_END_DATE = '2022-12-31'
 TRAIN_START_DATE = '2020-01-01'
 
 WEIGHT_GRID = {
-    'volatility_score': np.arange(0.0, 0.21, 0.1),
-    'ml_pred_proba': np.arange(0.1, 0.81, 0.1),
+    # (2025-12) 변동성 팩터 제거: RF/LGB 2개 가중치만 최적화
+    'ml_pred_proba': np.arange(0.0, 1.01, 0.1),
+    'lgb_pred_proba': np.arange(0.0, 1.01, 0.1),
 }
 
 def get_model_and_data():

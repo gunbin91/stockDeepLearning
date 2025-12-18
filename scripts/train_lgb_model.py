@@ -3,7 +3,8 @@ LightGBM 모델 훈련 스크립트
 ===========================
 
 이 파일은 주식 상승 예측을 위한 LightGBM 모델을 훈련합니다.
-RandomForest와 동일한 학습 데이터를 사용하여 15일 후 5% 이상 상승할 확률을 예측합니다.
+RandomForest와 동일한 학습 데이터를 사용하여 아래 타겟(이진 분류)을 예측합니다:
+- 향후 10거래일 동안 -5% 이상 하락 없이, +8% 이상 상승을 한 번이라도 달성 여부
 
 주요 기능:
 - 대용량 데이터 처리 및 메모리 최적화
@@ -143,13 +144,10 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
     def objective(trial):
         """Optuna objective 함수: 하이퍼파라미터 튜닝을 위한 목적 함수"""
         # 주식 데이터에 최적화된 파라미터 범위 설정
-        # ✅ 사용자 요청: max_depth 범위를 더 공격적으로 확장
-        max_depth = trial.suggest_int('max_depth', 5, 20)
-        # num_leaves는 max_depth에 맞춰 상한을 제한 (num_leaves <= 2^max_depth)
-        max_leaves = min(255, 2 ** max_depth)
-        if max_leaves < 31:
-            max_leaves = 31
-        num_leaves = trial.suggest_int('num_leaves', 31, max_leaves)
+        # ✅ 사용자 요청 유지: max_depth 범위를 8~50으로 확장
+        max_depth = trial.suggest_int('max_depth', 8, 50)
+        # gpuStock 스타일: num_leaves를 과도하게 키우지 않도록 제한 (과적합/노이즈 암기 방지)
+        num_leaves = trial.suggest_int('num_leaves', 15, 63)
         
         # LightGBM 하이퍼파라미터 제안 (주식 예측 최적화)
         model_n_jobs = -1 if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
@@ -159,16 +157,17 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
             'boosting_type': 'gbdt',
             'num_leaves': num_leaves,
             'max_depth': max_depth,
-            # 너무 보수적이지 않게 범위 완화 (중간 성향)
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.08, log=True),
+            # gpuStock 스타일 (더 보수적)
+            'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),
             # CV에서는 early stopping을 사용하므로 충분히 크게 두고 조기 종료로 제어
-            'n_estimators': 5000,
-            'min_child_samples': trial.suggest_int('min_child_samples', 20, 200),
-            'subsample': trial.suggest_float('subsample', 0.7, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.01, 5.0, log=True),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.01, 5.0, log=True),
-            'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 4.0),
+            'n_estimators': 10000,
+            # gpuStock 스타일 (더 강한 노이즈 필터)
+            'min_child_samples': trial.suggest_int('min_child_samples', 100, 500),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10.0, log=True),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10.0, log=True),
+            'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 10.0),
             'random_state': 42,
             'n_jobs': model_n_jobs,  # LGBM 내부 멀티스레드 사용 (trial 병렬 대신 모델 병렬 권장)
             'verbose': -1  # 로그 출력 억제
@@ -188,16 +187,27 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
                 X_tr.fillna(imp, inplace=True)
                 X_va.fillna(imp, inplace=True)
 
+                # ✅ gpuStock 정합성: CV에서도 스케일링을 적용 (최종 학습/평가와 일치)
+                scaler = StandardScaler()
+                X_tr_s = scaler.fit_transform(X_tr)
+                X_va_s = scaler.transform(X_va)
+                X_tr_s = pd.DataFrame(X_tr_s, columns=features)
+                X_va_s = pd.DataFrame(X_va_s, columns=features)
+
                 model = lgb.LGBMClassifier(**params)
                 model.fit(
-                    X_tr, y_tr_fold,
-                    eval_set=[(X_va, y_va_fold)],
+                    X_tr_s, y_tr_fold,
+                    eval_set=[(X_va_s, y_va_fold)],
                     callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
                 )
-                y_va_proba = model.predict_proba(X_va)[:, 1]
+                y_va_proba = model.predict_proba(X_va_s)[:, 1]
+
+                # gpuStock 스타일: 검증 데이터에 단일 클래스만 있으면 fold 평가 skip
+                if len(np.unique(y_va_fold)) < 2:
+                    continue
                 scores.append(roc_auc_score(y_va_fold, y_va_proba))
 
-                del model, X_tr, X_va, y_tr_fold, y_va_fold, y_va_proba
+                del model, X_tr, X_va, X_tr_s, X_va_s, scaler, y_tr_fold, y_va_fold, y_va_proba
                 gc.collect()
 
             return float(np.mean(scores)) if scores else 0.0
@@ -319,11 +329,9 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
         def objective_small(trial):
             # 주식 데이터에 최적화된 파라미터 범위 설정 (축소 버전)
             # 메모리 부족 시에도 사용자의 의도를 최대한 반영하되, 범위는 약간 축소
-            max_depth = trial.suggest_int('max_depth', 5, 15)
-            max_leaves = min(127, 2 ** max_depth)
-            if max_leaves < 31:
-                max_leaves = 31
-            num_leaves = trial.suggest_int('num_leaves', 31, max_leaves)
+            max_depth = trial.suggest_int('max_depth', 8, 50)
+            # gpuStock 스타일: leaf 제한 유지
+            num_leaves = trial.suggest_int('num_leaves', 15, 63)
             
             model_n_jobs = -1 if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
             params = {
@@ -332,14 +340,14 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
                 'boosting_type': 'gbdt',
                 'num_leaves': num_leaves,
                 'max_depth': max_depth,
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.06, log=True),
+                'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),
                 'n_estimators': 4000,  # early stopping으로 제어
-                'min_child_samples': trial.suggest_int('min_child_samples', 30, 200),
-                'subsample': trial.suggest_float('subsample', 0.75, 1.0),
-                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.75, 1.0),
-                'reg_alpha': trial.suggest_float('reg_alpha', 0.05, 5.0, log=True),
-                'reg_lambda': trial.suggest_float('reg_lambda', 0.05, 5.0, log=True),
-                'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 4.0),
+                'min_child_samples': trial.suggest_int('min_child_samples', 100, 500),
+                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+                'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10.0, log=True),
+                'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10.0, log=True),
+                'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 10.0),
                 'random_state': 42,
                 'n_jobs': model_n_jobs,
                 'verbose': -1
@@ -357,15 +365,23 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
                     X_tr.fillna(imp, inplace=True)
                     X_va.fillna(imp, inplace=True)
 
+                    scaler = StandardScaler()
+                    X_tr_s = scaler.fit_transform(X_tr)
+                    X_va_s = scaler.transform(X_va)
+                    X_tr_s = pd.DataFrame(X_tr_s, columns=features)
+                    X_va_s = pd.DataFrame(X_va_s, columns=features)
+
                     model = lgb.LGBMClassifier(**params)
                     model.fit(
-                        X_tr, y_tr_fold,
-                        eval_set=[(X_va, y_va_fold)],
+                        X_tr_s, y_tr_fold,
+                        eval_set=[(X_va_s, y_va_fold)],
                         callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
                     )
-                    y_va_proba = model.predict_proba(X_va)[:, 1]
+                    y_va_proba = model.predict_proba(X_va_s)[:, 1]
+                    if len(np.unique(y_va_fold)) < 2:
+                        continue
                     scores.append(roc_auc_score(y_va_fold, y_va_proba))
-                    del model, X_tr, X_va, y_tr_fold, y_va_fold, y_va_proba
+                    del model, X_tr, X_va, X_tr_s, X_va_s, scaler, y_tr_fold, y_va_fold, y_va_proba
                     gc.collect()
                 return float(np.mean(scores)) if scores else 0.0
             except Exception as e:

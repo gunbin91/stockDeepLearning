@@ -200,7 +200,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
     print(f"🔍 백테스팅 날짜 범위: {daily_dates.min()} ~ {daily_dates.max()}")
     print(f"🔍 총 백테스팅 날짜 수: {len(daily_dates)}개")
     
-    score_cols_to_log = ['final_score', 'ml_pred_proba', 'lgb_pred_proba', 'volatility_score']
+    score_cols_to_log = ['final_score', 'ml_pred_proba', 'lgb_pred_proba']
 
     take_profit_multiplier = 1 + (take_profit_pct / 100)
     stop_loss_multiplier = 1 - (stop_loss_pct / 100)
@@ -450,7 +450,7 @@ def create_html_report(results, output_path=REPORT_FILE):
             sell_log['ml_pred_proba'] = (sell_log['ml_pred_proba'] * 100).round(2)
         if 'lgb_pred_proba' in sell_log.columns:
             sell_log['lgb_pred_proba'] = (sell_log['lgb_pred_proba'] * 100).round(2)
-        score_cols = ['final_score', 'ml_pred_proba', 'lgb_pred_proba', 'volatility_score']
+        score_cols = ['final_score', 'ml_pred_proba', 'lgb_pred_proba']
         for col in score_cols:
             if col in sell_log.columns:
                 sell_log[col] = sell_log[col].round(2)
@@ -464,7 +464,7 @@ def create_html_report(results, output_path=REPORT_FILE):
             '종목명': '종목명', 'buy_market_cap_str': '매수시점 시총',
             'buy_price': '매수가', 'sell_price': '매도가', 'buy_amount_str': '매수금액', 'profit_str': '실현손익',
             'return_str': '수익률', 'total_asset_str': '총자산', 'final_score': '최종점수',
-            'ml_pred_proba': '상승확률(RF)', 'lgb_pred_proba': '상승확률(LGB)', 'volatility_score': '변동성'
+            'ml_pred_proba': '상승확률(RF)', 'lgb_pred_proba': '상승확률(LGB)'
         }
         display_columns = list(rename_map.keys())
         sell_log = sell_log[[col for col in display_columns if col in sell_log.columns]].rename(columns=rename_map)
@@ -684,51 +684,59 @@ def run_final_backtest(
             log_critical("ML 모델 로딩 실패", exception=e, context={"model_file": MODEL_FILE})
             raise
         
-        # ML 예측 적용 (강화된 에러 처리)
-        try:
-            print("  - 테스트 데이터에 ML 예측 적용 중...")
-            log_info("ML 예측 적용 시작", context={
-                "data_rows": len(test_data),
-                "features": features
-            })
-            
-            test_data_for_pred = test_data[features].copy()
-            # ✅ 학습/추론 일관성: 모델에 저장된 결측치 대체값 사용 (없으면 0 fallback)
-            if rf_imputation_values is not None:
-                test_data_for_pred.fillna(rf_imputation_values, inplace=True)
-            else:
-                test_data_for_pred.fillna(0, inplace=True)
-            
-            X_test_scaled = scaler.transform(test_data_for_pred)
-            test_data['ml_pred_proba'] = model.predict_proba(X_test_scaled)[:, 1]
-            
-            log_info("ML 예측 적용 완료", context={
-                "predictions_count": len(test_data['ml_pred_proba']),
-                "prediction_range": f"{test_data['ml_pred_proba'].min():.3f} ~ {test_data['ml_pred_proba'].max():.3f}"
-            })
-            
-        except Exception as e:
-            log_critical("ML 예측 적용 실패", exception=e, context={
-                "features": features,
-                "data_shape": test_data.shape
-            })
-            raise
+        # ML 예측 적용 (가중치가 0이면 예측 로직 자체를 패스)
+        if float(optimal_weights.get('ml_pred_proba', 0.5)) <= 0:
+            log_info("ML 가중치가 0이라 RandomForest 예측을 건너뜁니다.")
+            test_data['ml_pred_proba'] = np.nan
+        else:
+            try:
+                print("  - 테스트 데이터에 ML 예측 적용 중...")
+                log_info("ML 예측 적용 시작", context={
+                    "data_rows": len(test_data),
+                    "features": features
+                })
+                
+                test_data_for_pred = test_data[features].copy()
+                # ✅ 학습/추론 일관성: 모델에 저장된 결측치 대체값 사용 (없으면 0 fallback)
+                if rf_imputation_values is not None:
+                    test_data_for_pred.fillna(rf_imputation_values, inplace=True)
+                else:
+                    test_data_for_pred.fillna(0, inplace=True)
+                
+                X_test_scaled = scaler.transform(test_data_for_pred)
+                test_data['ml_pred_proba'] = model.predict_proba(X_test_scaled)[:, 1]
+                
+                log_info("ML 예측 적용 완료", context={
+                    "predictions_count": len(test_data['ml_pred_proba']),
+                    "prediction_range": f"{test_data['ml_pred_proba'].min():.3f} ~ {test_data['ml_pred_proba'].max():.3f}"
+                })
+                
+            except Exception as e:
+                log_critical("ML 예측 적용 실패", exception=e, context={
+                    "features": features,
+                    "data_shape": test_data.shape
+                })
+                raise
 
-        # LightGBM 예측 적용 (선택적 - 파일이 없으면 자동 skip)
-        try:
-            lgb_model_file = str(path_manager.get_lgb_model_path())
-            test_data = _apply_model_prediction_to_backtest_df(
-                test_data,
-                model_file=lgb_model_file,
-                proba_col='lgb_pred_proba',
-                model_label='LightGBM',
-                require_feature_names_dataframe=True
-            )
-        except Exception as e:
-            # 절대 백테스팅 전체를 멈추지 않도록 방어
-            log_warning("LightGBM 예측 적용 중 예외(무시하고 계속 진행)", exception=e)
-            if 'lgb_pred_proba' not in test_data.columns:
-                test_data['lgb_pred_proba'] = np.nan
+        # LightGBM 예측 적용 (가중치가 0이면 예측 로직 자체를 패스)
+        if float(optimal_weights.get('lgb_pred_proba', 0.5)) <= 0:
+            log_info("LGB 가중치가 0이라 LightGBM 예측을 건너뜁니다.")
+            test_data['lgb_pred_proba'] = np.nan
+        else:
+            try:
+                lgb_model_file = str(path_manager.get_lgb_model_path())
+                test_data = _apply_model_prediction_to_backtest_df(
+                    test_data,
+                    model_file=lgb_model_file,
+                    proba_col='lgb_pred_proba',
+                    model_label='LightGBM',
+                    require_feature_names_dataframe=True
+                )
+            except Exception as e:
+                # 절대 백테스팅 전체를 멈추지 않도록 방어
+                log_warning("LightGBM 예측 적용 중 예외(무시하고 계속 진행)", exception=e)
+                if 'lgb_pred_proba' not in test_data.columns:
+                    test_data['lgb_pred_proba'] = np.nan
     
         # 데이터 전처리 (강화된 에러 처리)
         try:

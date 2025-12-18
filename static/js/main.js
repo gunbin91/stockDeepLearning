@@ -190,7 +190,7 @@ $(document).ready(function() {
         });
         
         // 가중치 입력 시 합계 계산
-        $('#weight_volatility_backtest, #weight_ml_backtest, #weight_lgb_backtest').on('input', function() {
+        $('#weight_ml_backtest, #weight_lgb_backtest').on('input', function() {
             updateWeightsSumBacktest();
         });
         
@@ -208,7 +208,6 @@ $(document).ready(function() {
                 if (response.success) {
                     const weights = response.weights;
                     // 소수점을 퍼센트로 변환 (0.10 -> 10.0)
-                    $('#weight_volatility_backtest').val((weights.volatility_score * 100).toFixed(1));
                     $('#weight_ml_backtest').val((weights.ml_pred_proba * 100).toFixed(1));
                     $('#weight_lgb_backtest').val((weights.lgb_pred_proba * 100).toFixed(1));
                     updateWeightsSumBacktest();
@@ -223,10 +222,13 @@ $(document).ready(function() {
     }
     
     function updateWeightsSumBacktest() {
-        const volatility = parseFloat($('#weight_volatility_backtest').val()) || 0;
         const ml = parseFloat($('#weight_ml_backtest').val()) || 0;
         const lgb = parseFloat($('#weight_lgb_backtest').val()) || 0;
-        const sum = volatility + ml + lgb;
+        const sum = ml + lgb;
+
+        // 슬라이더 값 배지 업데이트
+        if ($('#weight_ml_backtest_value').length) $('#weight_ml_backtest_value').text(ml.toFixed(1) + '%');
+        if ($('#weight_lgb_backtest_value').length) $('#weight_lgb_backtest_value').text(lgb.toFixed(1) + '%');
         
         $('#weights_sum_backtest').text(sum.toFixed(1));
         
@@ -240,15 +242,23 @@ $(document).ready(function() {
     }
     
     function saveWeightsBacktest() {
-        const volatility = parseFloat($('#weight_volatility_backtest').val()) || 0;
         const ml = parseFloat($('#weight_ml_backtest').val()) || 0;
         const lgb = parseFloat($('#weight_lgb_backtest').val()) || 0;
+        const sum = ml + lgb;
+
+        if (sum <= 0) {
+            showToast('가중치 합계가 0%입니다. 최소 하나는 0%보다 커야 합니다.', 'warning');
+            return;
+        }
+        
+        // 100이 아니면 정규화
+        const mlNorm = (ml / sum) * 100.0;
+        const lgbNorm = (lgb / sum) * 100.0;
         
         // 퍼센트를 소수점으로 변환 (10.0 -> 0.10)
         const weights = {
-            volatility_score: volatility / 100,
-            ml_pred_proba: ml / 100,
-            lgb_pred_proba: lgb / 100
+            ml_pred_proba: mlNorm / 100,
+            lgb_pred_proba: lgbNorm / 100
         };
         
         $.ajax({
@@ -299,7 +309,7 @@ $(document).ready(function() {
                     { targets: [2], width: '10%' },     // 종목코드
                     { targets: [3, 4], width: '12%', className: 'text-end' },  // 현재가, 등락율
                     { targets: [5], width: '12%', className: 'text-end' },      // 기준일가
-                    { targets: [6, 7, 8], width: '10%', className: 'text-end' }, // 최종점수, 상승확률, 변동성
+                    { targets: [6, 7, 8], width: '10%', className: 'text-end' }, // 최종점수, 상승확률(RF/LGB)
                     { targets: [9], width: '11%', className: 'text-end' }       // 시가총액
                 ],
                 responsive: true,
@@ -1018,7 +1028,7 @@ $(document).ready(function() {
         });
         
         // 가중치 입력 시 합계 계산
-        $('#weight_volatility, #weight_ml, #weight_lgb').on('input', function() {
+        $('#weight_ml, #weight_lgb').on('input', function() {
             updateWeightsSum();
         });
         
@@ -1036,7 +1046,6 @@ $(document).ready(function() {
                 if (response.success) {
                     const weights = response.weights;
                     // 소수점을 퍼센트로 변환 (0.10 -> 10.0)
-                    $('#weight_volatility').val((weights.volatility_score * 100).toFixed(1));
                     $('#weight_ml').val((weights.ml_pred_proba * 100).toFixed(1));
                     $('#weight_lgb').val((weights.lgb_pred_proba * 100).toFixed(1));
                     updateWeightsSum();
@@ -1051,10 +1060,13 @@ $(document).ready(function() {
     }
     
     function updateWeightsSum() {
-        const volatility = parseFloat($('#weight_volatility').val()) || 0;
         const ml = parseFloat($('#weight_ml').val()) || 0;
         const lgb = parseFloat($('#weight_lgb').val()) || 0;
-        const sum = volatility + ml + lgb;
+        const sum = ml + lgb;
+
+        // 슬라이더 값 배지 업데이트
+        if ($('#weight_ml_value').length) $('#weight_ml_value').text(ml.toFixed(1) + '%');
+        if ($('#weight_lgb_value').length) $('#weight_lgb_value').text(lgb.toFixed(1) + '%');
         
         $('#weights_sum').text(sum.toFixed(1));
         
@@ -1068,15 +1080,23 @@ $(document).ready(function() {
     }
     
     function saveWeights() {
-        const volatility = parseFloat($('#weight_volatility').val()) || 0;
         const ml = parseFloat($('#weight_ml').val()) || 0;
         const lgb = parseFloat($('#weight_lgb').val()) || 0;
+        const sum = ml + lgb;
+
+        if (sum <= 0) {
+            showToast('가중치 합계가 0%입니다. 최소 하나는 0%보다 커야 합니다.', 'warning');
+            return;
+        }
+        
+        // 100이 아니면 정규화
+        const mlNorm = (ml / sum) * 100.0;
+        const lgbNorm = (lgb / sum) * 100.0;
         
         // 퍼센트를 소수점으로 변환 (10.0 -> 0.10)
         const weights = {
-            volatility_score: volatility / 100,
-            ml_pred_proba: ml / 100,
-            lgb_pred_proba: lgb / 100
+            ml_pred_proba: mlNorm / 100,
+            lgb_pred_proba: lgbNorm / 100
         };
         
         $.ajax({

@@ -41,9 +41,9 @@ def calculate_final_score(df):
 
     # 기본 가중치 설정 (최적화된 가중치 파일이 없을 경우 사용)
     factor_weights = {
-        'volatility_score': 0.10,    # 변동성 점수 10%
-        'ml_pred_proba': 0.45,        # RandomForest 예측 확률 45%
-        'lgb_pred_proba': 0.45,       # LightGBM 예측 확률 45%
+        # (2025-12) 변동성 팩터는 더 이상 사용하지 않음
+        'ml_pred_proba': 0.50,        # RandomForest 예측 확률
+        'lgb_pred_proba': 0.50,       # LightGBM 예측 확률
     }
 
     # 최적화된 가중치 파일이 있으면 불러오기
@@ -51,14 +51,30 @@ def calculate_final_score(df):
     optimal_weights_path = os.path.join(script_dir, 'data', 'optimal_weights.json')
 
     if os.path.exists(optimal_weights_path):
-        with open(optimal_weights_path, 'r') as f:
+        with open(optimal_weights_path, 'r', encoding='utf-8') as f:
             loaded_weights = json.load(f)
-            factor_weights.update(loaded_weights)
+            # 구버전 파일에 있을 수 있는 키(예: volatility_score)는 무시하고,
+            # 현재 프로젝트에서 사용하는 키만 반영합니다.
+            for k in list(factor_weights.keys()):
+                if k in loaded_weights:
+                    factor_weights[k] = loaded_weights[k]
         log_info("[OK] 최적화된 가중치 적용")
     else:
         log_info("[INFO] 기본 가중치 사용")
 
-    active_factors = {k: v for k, v in factor_weights.items() if v > 0 and k in final_df.columns}
+    # 활성 팩터: 가중치 > 0 이면서 컬럼 존재 + 유효값(결측 아닌 값)이 최소 1개라도 있는 경우만 사용
+    active_factors = {}
+    for k, v in factor_weights.items():
+        if v <= 0:
+            continue
+        if k not in final_df.columns:
+            continue
+        try:
+            if not final_df[k].notna().any():
+                continue
+        except Exception:
+            continue
+        active_factors[k] = v
     log_info(f"[SEARCH] 활성 팩터: {len(active_factors)}개")
     
     if not active_factors:
@@ -75,22 +91,20 @@ def calculate_final_score(df):
             source_series = final_df[factor] * 100
         else:
             source_series = final_df[factor]
-            
-        min_val = source_series.min()
-        max_val = source_series.max()
-        
-        if (max_val - min_val) > 0:
-            cached_norms[factor] = {
-                'min': min_val,
-                'max': max_val,
-                'range': max_val - min_val
-            }
+
+        # 전부 결측이면 안전한 기본값
+        non_na = source_series.dropna()
+        if non_na.empty:
+            cached_norms[factor] = {'min': 0, 'max': 1, 'range': 1}
+            continue
+
+        min_val = non_na.min()
+        max_val = non_na.max()
+
+        if pd.notna(min_val) and pd.notna(max_val) and (max_val - min_val) > 0:
+            cached_norms[factor] = {'min': min_val, 'max': max_val, 'range': max_val - min_val}
         else:
-            cached_norms[factor] = {
-                'min': 0,
-                'max': 1,
-                'range': 1
-            }
+            cached_norms[factor] = {'min': 0, 'max': 1, 'range': 1}
     
     # =================================================================
     # 벡터화된 정규화 계산 (성능 최적화)

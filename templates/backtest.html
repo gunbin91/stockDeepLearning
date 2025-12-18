@@ -189,24 +189,13 @@
                 </div>
                 
                 <div class="mb-3">
-                    <label for="weight_volatility_backtest" class="form-label">
-                        변동성 점수 (volatility_score)
-                    </label>
-                    <div class="input-group">
-                        <input type="number" class="form-control" id="weight_volatility_backtest" 
-                               min="0" max="100" step="0.1" value="10.0">
-                        <span class="input-group-text">%</span>
-                    </div>
-                </div>
-                
-                <div class="mb-3">
                     <label for="weight_ml_backtest" class="form-label">
                         RandomForest 상승확률 (ml_pred_proba)
                     </label>
-                    <div class="input-group">
-                        <input type="number" class="form-control" id="weight_ml_backtest" 
-                               min="0" max="100" step="0.1" value="45.0">
-                        <span class="input-group-text">%</span>
+                    <div class="d-flex align-items-center gap-2">
+                        <input type="range" class="form-range flex-grow-1" id="weight_ml_backtest"
+                               min="0" max="100" step="0.1" value="50.0">
+                        <span class="badge bg-secondary" id="weight_ml_backtest_value">50.0%</span>
                     </div>
                 </div>
                 
@@ -214,10 +203,10 @@
                     <label for="weight_lgb_backtest" class="form-label">
                         LightGBM 상승확률 (lgb_pred_proba)
                     </label>
-                    <div class="input-group">
-                        <input type="number" class="form-control" id="weight_lgb_backtest" 
-                               min="0" max="100" step="0.1" value="45.0">
-                        <span class="input-group-text">%</span>
+                    <div class="d-flex align-items-center gap-2">
+                        <input type="range" class="form-range flex-grow-1" id="weight_lgb_backtest"
+                               min="0" max="100" step="0.1" value="50.0">
+                        <span class="badge bg-secondary" id="weight_lgb_backtest_value">50.0%</span>
                     </div>
                 </div>
                 

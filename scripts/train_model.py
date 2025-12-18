@@ -3,7 +3,8 @@
 ========================
 
 이 파일은 주식 상승 예측을 위한 머신러닝 모델을 훈련합니다.
-RandomForest 알고리즘을 사용하여 15일 후 5% 이상 상승할 확률을 예측합니다.
+RandomForest 알고리즘을 사용하여 아래 타겟(이진 분류)을 예측합니다:
+- 향후 10거래일 동안 -5% 이상 하락 없이, +8% 이상 상승을 한 번이라도 달성 여부
 
 주요 기능:
 - 대용량 데이터 처리 및 메모리 최적화
@@ -35,6 +36,7 @@ from optuna.samplers import TPESampler
 from sklearn.utils import resample
 from sklearn.inspection import permutation_importance
 from typing import List, Tuple, Optional, Dict
+import ast
 
 # Windows 환경에서 로케일 설정 (FinanceDataReader 내부 오류 방지)
 if platform.system() == 'Windows':
@@ -526,18 +528,102 @@ def create_training_data(years=None):
     """
     training_data_path = path_manager.get_training_data_path()
     
-    # 학습에 사용할 피처 정의 (전역으로 사용)
-    features = [
-        'PBR', 'log_mktcap', '이익수익률', 'BPS',
-        '수익률(1M)', '수익률(3M)', '52주_신고가_비율',
-        'ADX_14',
-        '변동성(1W)', '변동성(1M)', '변동성(3M)', 'ATRr_14', 'BBW_20_2', 'BB_Position',
-        'disparity_120', 'disparity_240',
-        '거래대금_MA5', '거래대금_MA20', 'OBV',
-        'KOSPI_pct_1d', 'KOSPI_pct_5d', 'USDKRW_pct_1d', 'USDKRW_pct_5d',
-        'VIX_pct_1d', 'VIX_pct_5d'
-    ]
+    # 학습에 사용할 피처 정의
+    # - "정답 소스"를 gpuStock의 실제 학습 스크립트에서 자동 추출하여(가능하면) 동기화합니다.
+    # - 사용자가 gpuStock을 최신 버전으로 교체하더라도, 루트(CPU) 학습 피처가 자동 반영되도록 합니다.
+    def _extract_features_from_gpustock() -> Optional[List[str]]:
+        try:
+            gpustock_train = path_manager.project_root / 'gpuStock' / 'scripts' / 'train_gpu_main.py'
+            if not gpustock_train.exists():
+                return None
+            src = gpustock_train.read_text(encoding='utf-8', errors='replace')
+            tree = ast.parse(src)
+
+            feature_lists: List[List[str]] = []
+
+            class FeatureVisitor(ast.NodeVisitor):
+                def visit_Assign(self, node: ast.Assign):
+                    try:
+                        for t in node.targets:
+                            if isinstance(t, ast.Name) and t.id == 'features' and isinstance(node.value, ast.List):
+                                vals: List[str] = []
+                                ok = True
+                                for elt in node.value.elts:
+                                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                                        vals.append(elt.value)
+                                    elif isinstance(elt, ast.Str):
+                                        vals.append(elt.s)
+                                    else:
+                                        ok = False
+                                        break
+                                if ok and vals:
+                                    feature_lists.append(vals)
+                    except Exception:
+                        pass
+                    self.generic_visit(node)
+
+            FeatureVisitor().visit(tree)
+            if not feature_lists:
+                return None
+
+            # 파일 내에 features가 여러 번 정의될 수 있으므로 "마지막 정의"를 우선 사용
+            return feature_lists[-1]
+        except Exception:
+            return None
+
+    def get_training_features() -> List[str]:
+        # fallback (현재 repo의 gpuStock 기준으로 맞춰둔 리스트)
+        default = [
+            'log_mktcap',
+            '52주_신고가_비율',
+            'ADX_14',
+            'disparity_120',
+            'disparity_240',
+            'disparity_20',
+            'KOSPI_disparity_20',
+            'Trend_Pullback_Score',
+            'Position_Range_60',
+            'MA20_Slope',
+            'MA120_Slope',
+            'MA240_Slope',
+            'KOSPI_MA20_Slope',
+            'RVOL',
+            'RVOL(1W)',
+            '시총 회전율(1W)',
+            '시총 회전율(3M)',
+            'RSI_Signal_Oscillator',
+            'ATRr_5',
+            'ATRr_20',
+            'Log_Return_20',
+            'HV_Volatility_20',
+            'HV_Volatility_60',
+            'HV_Volatility_5',
+            'VWAP_Disparity_5',
+            'Max_Drawdown_20',
+        ]
+        extracted = _extract_features_from_gpustock()
+        if extracted:
+            log_info(f"✅ gpuStock 학습 피처 자동 동기화: {len(extracted)}개")
+            return extracted
+        log_warning("⚠️ gpuStock 학습 피처 자동 추출 실패(기본 리스트 사용)")
+        return default
+
+    features = get_training_features()
     target = 'target'
+
+    # ======================================================================
+    # 타겟 정의(버전) 메타데이터
+    # - target 컬럼명은 동일해도 "계산식"이 바뀌면 기존 training_data.parquet이 오염될 수 있으므로
+    #   메타파일로 변경을 감지해 자동 재생성합니다.
+    # ======================================================================
+    TARGET_SPEC = {
+        "name": "10d_drawdown_floor_-5pct_and_any_hit_+8pct",
+        "horizon_trading_days": 10,
+        "min_ratio_floor": 0.95,  # future_min / now >= 0.95
+        "max_ratio_hit": 1.08,    # future_max / now >= 1.08
+        "notes": "향후 10거래일 동안 -5% 이상 하락 없이, +8% 이상 상승 1회라도",
+    }
+    training_meta_path = training_data_path.with_suffix('.meta.json')
     
     # 학습 데이터 파일이 있는지 확인
     if training_data_path.exists():
@@ -545,7 +631,37 @@ def create_training_data(years=None):
         final_df = load_training_data_from_file(training_data_path)
         
         if final_df is not None and not final_df.empty:
-            log_info("✅ 기존 학습 데이터 파일을 사용합니다.")
+            # 구버전 캐시(피처 세트 변경/타겟 변경)면 자동으로 재생성
+            required_cols = set(features + [target, 'date'])
+            missing_cols = [c for c in required_cols if c not in final_df.columns]
+            if missing_cols:
+                log_warning(f"⚠️ 기존 학습 데이터 파일이 현재 피처/타겟과 호환되지 않습니다. 누락 컬럼: {missing_cols[:10]}{'...' if len(missing_cols) > 10 else ''}")
+                log_info("   🔄 학습 데이터 파일을 새로 수집/생성합니다.")
+                final_df = None
+            else:
+                # 타겟 정의/피처 정의가 바뀌었는지 메타로 추가 검증
+                meta_ok = True
+                try:
+                    if training_meta_path.exists():
+                        with open(training_meta_path, 'r', encoding='utf-8') as f:
+                            meta = json.load(f)
+                        if meta.get('target_spec') != TARGET_SPEC:
+                            meta_ok = False
+                            log_warning("⚠️ 기존 학습 데이터 메타의 타겟 정의가 현재 설정과 다릅니다. 재생성합니다.")
+                        if meta.get('features') != features:
+                            meta_ok = False
+                            log_warning("⚠️ 기존 학습 데이터 메타의 피처 리스트가 현재 설정과 다릅니다. 재생성합니다.")
+                    else:
+                        meta_ok = False
+                        log_warning("⚠️ 기존 학습 데이터 메타 파일이 없습니다. 안전을 위해 재생성합니다.")
+                except Exception as e:
+                    meta_ok = False
+                    log_warning(f"⚠️ 학습 데이터 메타 검증 실패: {e}. 안전을 위해 재생성합니다.")
+
+                if meta_ok:
+                    log_info("✅ 기존 학습 데이터 파일을 사용합니다.")
+                else:
+                    final_df = None
         else:
             log_warning("⚠️ 기존 학습 데이터 파일이 유효하지 않습니다. 새로 수집합니다.")
             final_df = None
@@ -611,6 +727,18 @@ def create_training_data(years=None):
         if save_training_data_to_file(final_df_to_save, training_data_path):
             log_info("✅ 학습 데이터 파일이 생성되었습니다. 다음 실행부터는 이 파일을 사용합니다.")
             log_info(f"   📊 저장된 컬럼: {len(available_columns)}개 (학습에 필요한 컬럼만 저장)")
+            # 메타 저장 (타겟 정의/피처 정의 변경 감지용)
+            try:
+                meta = {
+                    "created_at": datetime.now().isoformat(),
+                    "features": features,
+                    "target_column": target,
+                    "target_spec": TARGET_SPEC,
+                }
+                with open(training_meta_path, 'w', encoding='utf-8') as f:
+                    json.dump(meta, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                log_warning(f"⚠️ 학습 데이터 메타 저장 실패(무시하고 진행): {e}")
         else:
             log_warning("⚠️ 학습 데이터 파일 저장에 실패했지만 계속 진행합니다.")
 

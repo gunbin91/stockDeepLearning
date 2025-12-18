@@ -213,7 +213,6 @@ def load_cached_analysis_result():
             rename_map = { 
                 '현재가': '현재가(원)', 
                 '시가총액': '시가총액(억)',  
-                'volatility_score': '변동성(점)', 
                 'ml_pred_proba': '상승확률(RF)(%)', 
                 'lgb_pred_proba': '상승확률(LGB)(%)',
                 'final_score': '최종점수(점)', 
@@ -224,7 +223,7 @@ def load_cached_analysis_result():
             display_columns = [ 
                 '최종순위', '종목명', '종목코드', '현재가(원)_formatted', '등락율(%)', 
                 '기준일가(원)', '최종점수(점)', '상승확률(RF)(%)', '상승확률(LGB)(%)', 
-                '변동성(점)', '시가총액(억)'
+                '시가총액(억)'
             ]
             
             result_df = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(원)_formatted': '현재가(원)'})
@@ -1024,18 +1023,20 @@ def get_weights():
         
         # 기본 가중치
         default_weights = {
-            'volatility_score': 0.10,
-            'ml_pred_proba': 0.45,
-            'lgb_pred_proba': 0.45
+            # (2025-12) 변동성 팩터는 제거되었음. ML 2개만 유지.
+            'ml_pred_proba': 0.50,
+            'lgb_pred_proba': 0.50
         }
         
         if os.path.exists(weights_path):
             with open(weights_path, 'r', encoding='utf-8') as f:
                 loaded_weights = json.load(f)
                 # 기본 가중치와 병합 (누락된 키는 기본값 사용)
+                # 구버전 키(예: volatility_score)는 무시
                 for key in default_weights:
                     if key not in loaded_weights:
                         loaded_weights[key] = default_weights[key]
+                loaded_weights = {k: loaded_weights[k] for k in default_weights.keys()}
                 return jsonify({
                     'success': True,
                     'weights': loaded_weights,
@@ -1059,7 +1060,7 @@ def save_weights():
         weights = data.get('weights', {})
         
         # 필수 키 확인
-        required_keys = ['volatility_score', 'ml_pred_proba', 'lgb_pred_proba']
+        required_keys = ['ml_pred_proba', 'lgb_pred_proba']
         for key in required_keys:
             if key not in weights:
                 return jsonify({'success': False, 'error': f'{key} 가중치가 필요합니다.'}), 400
@@ -1068,6 +1069,17 @@ def save_weights():
         for key, value in weights.items():
             if value < 0:
                 return jsonify({'success': False, 'error': f'{key} 가중치는 0 이상이어야 합니다.'}), 400
+
+        # 현재 프로젝트에서 사용하는 키만 유지 (구버전 키 제거)
+        weights = {k: float(weights[k]) for k in required_keys}
+
+        # 합계가 0이면 의미가 없으므로 방지
+        total = sum(weights.values())
+        if total <= 0:
+            return jsonify({'success': False, 'error': '가중치 합계가 0입니다. 최소 하나는 0보다 커야 합니다.'}), 400
+
+        # 합계가 1이 되도록 정규화 (클라이언트가 %로 저장하더라도 서버에서 안전하게 정규화)
+        weights = {k: v / total for k, v in weights.items()}
         
         # 가중치 파일 저장
         weights_path = path_manager.get_weights_path()

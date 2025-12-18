@@ -142,7 +142,7 @@ def calculate_final_score(df):
 
 ### 🧠 **머신러닝 모델**
 - **모델**: RandomForestClassifier
-- **타겟**: 15거래일 내 5% 이상 상승 여부 (Binary Classification)
+- **타겟**: **향후 10거래일 동안 -5% 이상 하락 없이, +8% 이상 상승을 한 번이라도 달성 여부** (Binary Classification)
 - **피처**: 30+ 기술적/재무적/거시경제적 지표
 - **최적화**: RandomizedSearchCV로 하이퍼파라미터 튜닝
 

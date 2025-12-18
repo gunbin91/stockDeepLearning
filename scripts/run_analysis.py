@@ -170,6 +170,24 @@ def run_analysis(analysis_date_str):
             log_error(f"팩터 점수 계산 중 오류: {e}")
             raise AnalysisError(f"팩터 점수 계산 중 오류: {e}", step="factor_scoring")
 
+        # 가중치 로드 (가중치가 0이면 해당 모델 예측 로직은 패스)
+        weights_path = str(path_manager.get_weights_path())
+        weights = {'ml_pred_proba': 0.5, 'lgb_pred_proba': 0.5}
+        try:
+            if os.path.exists(weights_path):
+                with open(weights_path, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    if 'ml_pred_proba' in loaded:
+                        weights['ml_pred_proba'] = float(loaded['ml_pred_proba'])
+                    if 'lgb_pred_proba' in loaded:
+                        weights['lgb_pred_proba'] = float(loaded['lgb_pred_proba'])
+        except Exception as e:
+            log_warning(f"가중치 파일 로드 실패(기본값 사용): {e}")
+
+        do_rf = weights.get('ml_pred_proba', 0) > 0
+        do_lgb = weights.get('lgb_pred_proba', 0) > 0
+
         log_info("머신러닝 모델 예측 중...")
         try:
             # 메모리 정리
@@ -179,7 +197,12 @@ def run_analysis(analysis_date_str):
             
             # RandomForest 모델 예측 시도
             log_info("   🤖 RandomForest ML 모델 로딩 중...")
-            ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
+            if do_rf:
+                ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
+            else:
+                log_info("   ⏭️ RandomForest 가중치가 0이라 예측을 건너뜁니다.")
+                ml_predicted_df = feature_df[['종목코드']].copy()
+                ml_predicted_df['ml_pred_proba'] = float('nan')
             
             if ml_predicted_df is None:
                 error_msg = "RandomForest 머신러닝 모델 예측 결과가 None입니다."
@@ -213,7 +236,12 @@ def run_analysis(analysis_date_str):
             
             # LightGBM 모델 예측 시도 (모델이 없어도 계속 진행)
             log_info("   🤖 LightGBM ML 모델 로딩 중...")
-            lgb_predicted_df = ml_model.predict_with_lgb_model(feature_df)
+            if do_lgb:
+                lgb_predicted_df = ml_model.predict_with_lgb_model(feature_df)
+            else:
+                log_info("   ⏭️ LightGBM 가중치가 0이라 예측을 건너뜁니다.")
+                lgb_predicted_df = feature_df[['종목코드']].copy()
+                lgb_predicted_df['lgb_pred_proba'] = float('nan')
             
             if lgb_predicted_df is not None and not lgb_predicted_df.empty:
                 log_info(f"   ✅ LightGBM ML 모델 예측 완료: {len(lgb_predicted_df):,}개 종목")

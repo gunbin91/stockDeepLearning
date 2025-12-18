@@ -49,6 +49,44 @@ from logger import log_info, log_critical, log_error, log_warning, log_progress
 PROJECT_ROOT = str(path_manager.project_root)
 DATA_DIR = str(path_manager.data_dir)
 
+# =================================================================
+# 유틸리티 함수: 정규화된 선형회귀기울기 계산 (gpuStock 피처 호환)
+# =================================================================
+def calculate_normalized_linear_regression_slope(series: pd.Series, window: int = 5) -> pd.Series:
+    """
+    정규화된 선형회귀 기울기(%)를 계산합니다.
+    - window 길이의 선형회귀 slope를 구한 뒤, 현재 값으로 나누고 100을 곱합니다.
+    - MA120/MA240/KOSPI_MA20 기울기 피처 계산에 사용합니다.
+    """
+    if series is None or len(series) < window:
+        return pd.Series([np.nan] * (len(series) if series is not None else 0), index=(series.index if series is not None else None))
+
+    values = series.values
+    n = len(values)
+    slopes = np.full(n, np.nan, dtype=np.float64)
+
+    x = np.arange(window, dtype=np.float64)
+    x_mean = x.mean()
+    x_centered = x - x_mean
+    x_centered_sq_sum = np.sum(x_centered ** 2)
+    if x_centered_sq_sum == 0:
+        return pd.Series(slopes, index=series.index)
+
+    for i in range(window - 1, n):
+        y = values[i - window + 1:i + 1]
+        current_value = values[i]
+
+        if current_value == 0 or np.isnan(current_value) or np.isnan(y).any():
+            continue
+
+        y_mean = np.nanmean(y)
+        y_centered = y - y_mean
+        numerator = np.sum(x_centered * y_centered)
+        abs_slope = numerator / x_centered_sq_sum
+        slopes[i] = (abs_slope / current_value) * 100
+
+    return pd.Series(slopes, index=series.index)
+
 def fetch_stock_list():
     """
     주식 목록 수집 함수
@@ -330,6 +368,20 @@ def _fetch_macro_data(start_date, end_date):
             for col in macro_df.columns:
                 macro_df[f'{col}_pct_1d'] = macro_df[col].pct_change(1)
                 macro_df[f'{col}_pct_5d'] = macro_df[col].pct_change(5)
+
+            # gpuStock 피처 호환: KOSPI_disparity_20, KOSPI_MA20_Slope
+            try:
+                if 'KOSPI' in macro_df.columns:
+                    kospi_close = macro_df['KOSPI']
+                    kospi_ma20 = kospi_close.rolling(window=20).mean()
+                    macro_df['KOSPI_disparity_20'] = (kospi_close / kospi_ma20) * 100
+                    kospi_std_20 = kospi_close.rolling(window=20).std()
+                    kospi_mean_20 = kospi_close.rolling(window=20).mean()
+                    macro_df['KOSPI_변동성(1M)'] = kospi_std_20 / kospi_mean_20
+                    macro_df['KOSPI_MA20_Slope'] = calculate_normalized_linear_regression_slope(kospi_ma20, window=5)
+            except Exception as e:
+                log_warning(f"gpuStock 거시 피처 계산 실패: {e}")
+
             macro_df.reset_index(inplace=True)
             macro_df.rename(columns={'index': 'date'}, inplace=True)
             log_info("✅ 거시경제 데이터 수집 완료.")
@@ -414,7 +466,7 @@ def merge_and_calculate_features(args):
     2. 재무 데이터 병합
     3. 기술적 지표 계산 (ATR, OBV, ADX, 볼린저 밴드 등)
     4. 수익률 및 변동성 계산
-    5. 타겟 변수 생성 (15일 후 5% 상승 여부)
+    5. 타겟 변수 생성 (향후 10거래일: -5% 이상 하락 없이, +8% 이상 상승 1회라도)
     
     Args:
         args: (ticker, df, df_marcap_ticker, df_financial_ticker) 튜플
@@ -539,19 +591,25 @@ def merge_and_calculate_features(args):
             pass
         gc.collect()
         
-        # 수익률 계산
+        # 수익률 계산 (기존 유지)
         df['수익률(1M)'] = df['종가'].pct_change(20)
         df['수익률(3M)'] = df['종가'].pct_change(60)
         
-        # 변동성 계산
+        # 변동성 계산 (기존 유지: 점수 계산/기존 호환)
         df['변동성(1W)'] = df['종가'].rolling(5).std() / df['종가'].rolling(5).mean()
         df['변동성(1M)'] = df['종가'].rolling(20).std() / df['종가'].rolling(20).mean()
         df['변동성(3M)'] = df['종가'].rolling(60).std() / df['종가'].rolling(60).mean()
+
+        # =================================================================
+        # 최신 gpuStock 피처(정확한 컬럼명/계산식) 동기화
+        # =================================================================
         
         # 거래대금 계산
         df['거래대금'] = df['종가'] * df['거래량']
         df['거래대금_MA5'] = df['거래대금'].rolling(5).mean()
         df['거래대금_MA20'] = df['거래대금'].rolling(20).mean()
+
+        # (참고) 최신 gpuStock은 거래대금_log 계열을 학습 피처로 사용하지 않음
         
         # 재무데이터 관련 지표 (백업 프로젝트와 동일)
         if 'PER' in df.columns and not df['PER'].isnull().all():
@@ -565,21 +623,255 @@ def merge_and_calculate_features(args):
         if 'PBR' not in df.columns or df['PBR'].isnull().all():
             df['PBR'] = df['종가'] / (df['시가총액'] / df['거래량'])  # 간단한 PBR 계산
         
-        # 핵심 피처 추가
-        # 1. log_mktcap (시가총액 로그 변환)
-        df['log_mktcap'] = np.log(df['시가총액'])
+        # =================================================================
+        # gpuStock 피처 세트 추가(기존 컬럼은 유지하고 "추가"만 함)
+        # =================================================================
+
+        # 1) ATRr_5/20/60 (ATR / 종가 * 100)
+        try:
+            atr_5 = df.ta.atr(high='고가', low='저가', close='종가', length=5)
+            atr_20 = df.ta.atr(high='고가', low='저가', close='종가', length=20)
+            atr_60 = df.ta.atr(high='고가', low='저가', close='종가', length=60)
+            df['ATRr_5'] = (atr_5 / df['종가']) * 100 if atr_5 is not None else np.nan
+            df['ATRr_20'] = (atr_20 / df['종가']) * 100 if atr_20 is not None else np.nan
+            df['ATRr_60'] = (atr_60 / df['종가']) * 100 if atr_60 is not None else np.nan
+        except Exception as e:
+            log_warning(f"ATRr_5/20/60 계산 실패 ({ticker}): {e}")
+            df['ATRr_5'] = np.nan
+            df['ATRr_20'] = np.nan
+            df['ATRr_60'] = np.nan
+
+        # 2) RVOL (거래량 / 20일 평균 거래량)
+        try:
+            vol_ma20 = df['거래량'].rolling(window=20).mean()
+            df['RVOL'] = (df['거래량'] / vol_ma20).replace([np.inf, -np.inf], np.nan)
+        except Exception as e:
+            log_warning(f"RVOL 계산 실패 ({ticker}): {e}")
+            df['RVOL'] = np.nan
+
+        # 3) 시총 회전율 (거래대금 롤링평균 / 시가총액 * 100)
+        try:
+            traded_value_ma5 = df['거래대금'].rolling(window=5).mean()
+            traded_value_ma60 = df['거래대금'].rolling(window=60).mean()
+            df['시총 회전율(1W)'] = (traded_value_ma5 / df['시가총액'] * 100).replace([np.inf, -np.inf], np.nan)
+            df['시총 회전율(3M)'] = (traded_value_ma60 / df['시가총액'] * 100).replace([np.inf, -np.inf], np.nan)
+        except Exception as e:
+            log_warning(f"시총 회전율 계산 실패 ({ticker}): {e}")
+            df['시총 회전율(1W)'] = np.nan
+            df['시총 회전율(3M)'] = np.nan
+
+        # 4) RSI_Signal_Oscillator (RSI_14 - RSI_14.rolling(9).mean())
+        try:
+            rsi_14 = df.ta.rsi(close='종가', length=14)
+            if rsi_14 is not None and len(rsi_14) >= 9:
+                rsi_14_ma9 = rsi_14.rolling(window=9).mean()
+                df['RSI_Signal_Oscillator'] = rsi_14 - rsi_14_ma9
+            else:
+                df['RSI_Signal_Oscillator'] = np.nan
+        except Exception as e:
+            log_warning(f"RSI_Signal_Oscillator 계산 실패 ({ticker}): {e}")
+            df['RSI_Signal_Oscillator'] = np.nan
+
+        # 5) Z_Score_20
+        try:
+            mean_20 = df['종가'].rolling(window=20).mean()
+            std_20 = df['종가'].rolling(window=20).std()
+            df['Z_Score_20'] = (df['종가'] - mean_20) / std_20
+        except Exception as e:
+            log_warning(f"Z_Score_20 계산 실패 ({ticker}): {e}")
+            df['Z_Score_20'] = np.nan
+
+        # 6) Position_Range_60 (Donchian 위치)
+        try:
+            high_60 = df['고가'].rolling(window=60).max()
+            low_60 = df['저가'].rolling(window=60).min()
+            range_60 = high_60 - low_60
+            df['Position_Range_60'] = np.where(range_60 != 0, (df['종가'] - low_60) / range_60, 0.5)
+            df['Position_Range_60'] = pd.Series(df['Position_Range_60'], index=df.index).clip(0, 1)
+        except Exception as e:
+            log_warning(f"Position_Range_60 계산 실패 ({ticker}): {e}")
+            df['Position_Range_60'] = np.nan
+
+        # 7) Eff_Ratio_10
+        try:
+            change = df['종가'].diff(10).abs()
+            volatility = df['종가'].diff(1).abs().rolling(10).sum()
+            df['Eff_Ratio_10'] = (change / (volatility + 1e-9)).replace([np.inf, -np.inf], np.nan)
+        except Exception as e:
+            log_warning(f"Eff_Ratio_10 계산 실패 ({ticker}): {e}")
+            df['Eff_Ratio_10'] = np.nan
+
+        # 8) log_mktcap (시가총액 로그 변환: 안전하게)
+        df['log_mktcap'] = np.nan
+        try:
+            m_mask = df['시가총액'] > 0
+            df.loc[m_mask, 'log_mktcap'] = np.log(df.loc[m_mask, '시가총액'])
+        except Exception:
+            pass
+
+        # 9) PBR_log
+        df['PBR_log'] = np.nan
+        try:
+            if 'PBR' in df.columns:
+                pbr_mask = df['PBR'] > 0
+                df.loc[pbr_mask, 'PBR_log'] = np.log(df.loc[pbr_mask, 'PBR'])
+        except Exception:
+            pass
+
+        # 10) MA120_Slope / MA240_Slope
+        try:
+            ma120 = df['종가'].rolling(window=120).mean()
+            df['MA120_Slope'] = calculate_normalized_linear_regression_slope(ma120, window=5)
+        except Exception as e:
+            log_warning(f"MA120_Slope 계산 실패 ({ticker}): {e}")
+            df['MA120_Slope'] = np.nan
+        try:
+            ma240 = df['종가'].rolling(window=240).mean()
+            df['MA240_Slope'] = calculate_normalized_linear_regression_slope(ma240, window=5)
+        except Exception as e:
+            log_warning(f"MA240_Slope 계산 실패 ({ticker}): {e}")
+            df['MA240_Slope'] = np.nan
         
-        # 2. 이격도 계산 (120일, 240일)
+        # 2. 이격도 계산 (gpuStock: 120/240 + disparity_20 추가)
         for p in [120, 240]:
             ma = df['종가'].rolling(window=p).mean()
             df[f'disparity_{p}'] = (df['종가'] / ma) * 100
+        try:
+            ma20 = df['종가'].rolling(window=20).mean()
+            df['disparity_20'] = (df['종가'] / ma20) * 100
+        except Exception as e:
+            log_warning(f"disparity_20 계산 실패 ({ticker}): {e}")
+            df['disparity_20'] = np.nan
+
+        # 2-1) MA20_Slope (20일 이동평균선 기울기)
+        try:
+            ma20 = df['종가'].rolling(window=20).mean()
+            df['MA20_Slope'] = calculate_normalized_linear_regression_slope(ma20, window=5)
+        except Exception as e:
+            log_warning(f"MA20_Slope 계산 실패 ({ticker}): {e}")
+            df['MA20_Slope'] = np.nan
+
+        # 2-2) Trend_Pullback_Score (내부 z_score_20 + ma20_slope 기반)
+        try:
+            mean_20 = df['종가'].rolling(20).mean()
+            std_20 = df['종가'].rolling(20).std()
+            z_score_20 = (df['종가'] - mean_20) / std_20.replace(0, np.nan)
+            z_score_20 = z_score_20.fillna(0)
+
+            ma20 = df['종가'].rolling(window=20).mean()
+            ma20_slope = calculate_normalized_linear_regression_slope(ma20, window=5)
+
+            ma20_slope_clean = ma20_slope.fillna(0)
+            z_score_20_clean = z_score_20.fillna(0)
+
+            base_score = np.abs(z_score_20_clean) * ma20_slope_clean
+            condition_up_pullback = (ma20_slope_clean > 0) & (z_score_20_clean < 0)
+            condition_up_overheat = (ma20_slope_clean > 0) & (z_score_20_clean >= 0)
+            condition_down = (ma20_slope_clean <= 0)
+
+            df['Trend_Pullback_Score'] = np.where(
+                condition_up_pullback,
+                base_score * 1.0,
+                np.where(
+                    condition_up_overheat,
+                    base_score * 0.3,
+                    np.where(condition_down, base_score * 0.1, 0),
+                ),
+            )
+
+            nan_mask = ma20_slope.isna() | z_score_20.isna()
+            df.loc[nan_mask, 'Trend_Pullback_Score'] = np.nan
+        except Exception as e:
+            log_warning(f"Trend_Pullback_Score 계산 실패 ({ticker}): {e}")
+            df['Trend_Pullback_Score'] = np.nan
+
+        # 2-3) RVOL(1W): 5일 평균 거래량 / 20일 평균 거래량
+        try:
+            vol_ma5 = df['거래량'].rolling(window=5).mean()
+            vol_ma20 = df['거래량'].rolling(window=20).mean()
+            df['RVOL(1W)'] = (vol_ma5 / vol_ma20).replace([np.inf, -np.inf], np.nan)
+        except Exception as e:
+            log_warning(f"RVOL(1W) 계산 실패 ({ticker}): {e}")
+            df['RVOL(1W)'] = np.nan
+
+        # 2-4) Log_Return_20: log(종가 / 20영업일 전 종가)
+        try:
+            df['Log_Return_20'] = np.log(df['종가'] / df['종가'].shift(20))
+        except Exception as e:
+            log_warning(f"Log_Return_20 계산 실패 ({ticker}): {e}")
+            df['Log_Return_20'] = np.nan
+
+        # 2-5) HV_Volatility_5/20/60: 1일 로그수익률의 rolling std
+        try:
+            log_ret_1d = np.log(df['종가'] / df['종가'].shift(1))
+            df['HV_Volatility_5'] = log_ret_1d.rolling(window=5).std()
+            df['HV_Volatility_20'] = log_ret_1d.rolling(window=20).std()
+            df['HV_Volatility_60'] = log_ret_1d.rolling(window=60).std()
+        except Exception as e:
+            log_warning(f"HV_Volatility 계산 실패 ({ticker}): {e}")
+            df['HV_Volatility_5'] = np.nan
+            df['HV_Volatility_20'] = np.nan
+            df['HV_Volatility_60'] = np.nan
+
+        # 2-6) VWAP_Disparity_5: (종가 / 5일 VWAP - 1) * 100
+        try:
+            tp = (df['고가'] + df['저가'] + df['종가']) / 3
+            money = tp * df['거래량']
+            sum_money_5 = money.rolling(window=5).sum()
+            sum_vol_5 = df['거래량'].rolling(window=5).sum()
+            vwap_5 = sum_money_5 / (sum_vol_5 + 1e-9)
+            df['VWAP_Disparity_5'] = (df['종가'] / vwap_5 - 1) * 100
+        except Exception as e:
+            log_warning(f"VWAP_Disparity_5 계산 실패 ({ticker}): {e}")
+            df['VWAP_Disparity_5'] = np.nan
+
+        # 2-7) Max_Drawdown_20: 최근 20일 최대 낙폭(%)
+        # roll_max_20 = 고가.rolling(20).max()
+        # daily_dd_20 = (저가 / roll_max_20) - 1
+        # Max_Drawdown_20 = daily_dd_20.rolling(20).min() * 100
+        try:
+            roll_max_20 = df['고가'].rolling(window=20).max()
+            daily_dd_20 = (df['저가'] / roll_max_20) - 1
+            df['Max_Drawdown_20'] = daily_dd_20.rolling(window=20).min() * 100
+        except Exception as e:
+            log_warning(f"Max_Drawdown_20 계산 실패 ({ticker}): {e}")
+            df['Max_Drawdown_20'] = np.nan
         
         # 3. 52주 신고가 비율
         df['52주_최고가'] = df['종가'].rolling(250).max()
         df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
         
-        # target 변수 생성
-        df['target'] = (df['종가'].shift(-15) / df['종가'] > 1.05).astype(int)
+        # =================================================================
+        # 타겟 변수 생성 (요구사항)
+        # - 향후 10거래일 동안:
+        #   1) 최저 종가가 현재 종가 대비 -5% 이상 빠지지 않고 (future_min / now >= 0.95)
+        #   2) 최고 종가가 현재 종가 대비 +8% 이상을 한 번이라도 찍으면 (future_max / now >= 1.08)
+        # - 위 조건을 모두 만족하면 1, 아니면 0
+        #
+        # 주의:
+        # - "향후 10거래일"을 정확히 보장하기 위해 min_periods=10로 계산합니다.
+        # - 마지막 10거래일 구간은 미래 데이터가 부족하므로 target을 NaN으로 둡니다(학습 시 자동 제외).
+        # =================================================================
+        try:
+            future_prices = df['종가'].shift(-1)
+            future_max_10d = future_prices[::-1].rolling(window=10, min_periods=10).max()[::-1]
+            future_min_10d = future_prices[::-1].rolling(window=10, min_periods=10).min()[::-1]
+
+            cond = (future_min_10d / df['종가'] >= 0.95) & (future_max_10d / df['종가'] >= 1.08)
+            valid_mask = future_max_10d.notna() & future_min_10d.notna() & df['종가'].notna()
+            df['target'] = np.where(valid_mask, cond.astype(int), np.nan)
+        except Exception as e:
+            log_warning(f"target(10일/-5%방어/+8%상승) 생성 실패 ({ticker}): {e}")
+            try:
+                # 예외 상황에서는 min_periods=1로 완화하여 최대한 계산을 시도 (단, 마지막 구간 왜곡 가능)
+                future_prices = df['종가'].shift(-1)
+                future_max_10d = future_prices[::-1].rolling(window=10, min_periods=1).max()[::-1]
+                future_min_10d = future_prices[::-1].rolling(window=10, min_periods=1).min()[::-1]
+                cond = (future_min_10d / df['종가'] >= 0.95) & (future_max_10d / df['종가'] >= 1.08)
+                valid_mask = future_max_10d.notna() & future_min_10d.notna() & df['종가'].notna()
+                df['target'] = np.where(valid_mask, cond.astype(int), np.nan)
+            except Exception:
+                df['target'] = np.nan
         df['종목코드'] = ticker
         
         # 데이터 구조 설정
