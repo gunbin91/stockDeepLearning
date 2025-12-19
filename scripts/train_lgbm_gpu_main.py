@@ -499,18 +499,20 @@ def objective(trial, fold_data_cache, features):
         'seed': 42,
         'deterministic': True,
         # 핵심 파라미터
-        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),
-        'num_leaves': trial.suggest_int('num_leaves', 15, 63),
-        'max_depth': trial.suggest_int('max_depth', 10, 60),
-        'min_child_samples': trial.suggest_int('min_child_samples', 100, 500),
+        'learning_rate': trial.suggest_float('learning_rate', 0.003, 0.08, log=True),
+        'num_leaves': trial.suggest_int('num_leaves', 31, 255),
+        'max_depth': -1,  # 깊이 제한 없음 (num_leaves로 복잡도 제어)
+        'min_child_samples': trial.suggest_int('min_child_samples', 20, 300),
         # 정규화
-        'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10.0, log=True),
-        'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10.0, log=True),
+        'reg_alpha': trial.suggest_float('reg_alpha', 1e-3, 10.0, log=True),
+        'reg_lambda': trial.suggest_float('reg_lambda', 1e-3, 30.0, log=True),
+        'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
+        'min_child_weight': trial.suggest_float('min_child_weight', 1e-3, 10.0, log=True),
         # 샘플링
         'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
         # 불균형 처리
-        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 10.0),
+        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 50.0, log=True),
         # 기타
         'max_bin': 255,
         'n_estimators': 10000,  # 고정 (Early Stopping으로 제어)

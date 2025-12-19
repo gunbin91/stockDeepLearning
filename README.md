@@ -141,10 +141,10 @@ def calculate_final_score(df):
 - **실시간 거래일 확인**: 삼성전자(005930) 기준 실제 거래일 확인
 
 ### 🧠 **머신러닝 모델**
-- **모델**: RandomForestClassifier
-- **타겟**: 15거래일 내 5% 이상 상승 여부 (Binary Classification)
+- **모델**: RandomForestClassifier (RF), LightGBM (LGBM)
+- **타겟**: 향후 10거래일 내 *최저가가 -5% 이하로 내려가지 않고* *최고가가 +8% 이상 한 번이라도 상승* 여부 (Binary Classification)
 - **피처**: 30+ 기술적/재무적/거시경제적 지표
-- **최적화**: RandomizedSearchCV로 하이퍼파라미터 튜닝
+- **최적화**: 하이퍼파라미터 튜닝 (스크립트별 상이)
 
 ### ⚖️ **가중치 최적화 시스템**
 ```python

@@ -2368,8 +2368,8 @@ def main():
         'n_mini_batches': 1,  # Optuna trial에서 단일 모델 사용
         # 모델 목표 정보 (메타데이터)
         'target_days': 10,  # 거래일 기준
-        'target_percentage': 7,  # 퍼센트
-        'target_description': '10거래일 내 5% 이하로 떨어지지 않고 7% 이상 상승'
+        'target_percentage': 8,  # 퍼센트
+        'target_description': '10거래일 내 5% 이하로 떨어지지 않고 8% 이상 상승'
     }
 
     # --- 4. 최종 모델 훈련 및 저장 (캐시 데이터 재사용) ---

@@ -541,7 +541,13 @@ def create_json_report(results, output_path=None):
     if not trade_log_all.empty:
         # 백테스팅용 주식 목록 (캐시 없이 최신 데이터 사용)
         stock_list = data_processor.fetch_stock_list()
-        trade_log_all = pd.merge(trade_log_all, stock_list, left_on='ticker', right_on='종목코드', how='left')
+        if stock_list is not None and not stock_list.empty:
+            trade_log_all = pd.merge(trade_log_all, stock_list, left_on='ticker', right_on='종목코드', how='left')
+        else:
+            # 주식 목록 수집 실패 시 종목명 컬럼만 추가 (NaN으로)
+            log_warning("주식 목록 수집 실패: 종목명 없이 리포트 생성 (종목코드만 표시)")
+            if '종목명' not in trade_log_all.columns:
+                trade_log_all['종목명'] = None
         
         # 날짜순 정렬
         if 'trade_date' in trade_log_all.columns:

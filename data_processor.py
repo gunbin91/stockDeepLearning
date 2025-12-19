@@ -1039,12 +1039,14 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         df['52주_최고가'] = df['종가'].rolling(250).max()
         df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
         
-        # target 변수 생성 (10일 내 5% 이하로 떨어지지 않고 7% 이상 상승)
-        # 10일 후부터 역방향으로 10일 윈도우의 최소값과 최대값 계산
+        # target 변수 생성:
+        # - 향후 10거래일 동안 최저가가 현재가 대비 -5% 이하로 내려가지 않고 (>= 0.95)
+        # - 향후 10거래일 동안 최고가가 현재가 대비 +8% 이상 한 번이라도 상승하면 (>= 1.08)
+        # => 1, 아니면 0
         min_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).min()
         max_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).max()
-        # 조건: 최소값 >= 현재가격 * 0.95 (5% 이하로 떨어지지 않음) AND 최대값 >= 현재가격 * 1.07 (7% 이상 상승)
-        df['target'] = ((min_price_10d / df['종가'] >= 0.95) & (max_price_10d / df['종가'] > 1.07)).astype(int)
+        # 조건: 최소값 >= 현재가격 * 0.95 AND 최대값 >= 현재가격 * 1.08
+        df['target'] = ((min_price_10d / df['종가'] >= 0.95) & (max_price_10d / df['종가'] >= 1.08)).astype(int)
         
         # 중간 변수 삭제 (메모리 최적화)
         del min_price_10d, max_price_10d
