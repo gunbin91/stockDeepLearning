@@ -198,7 +198,7 @@ def run_analysis(analysis_date_str):
             # RandomForest 모델 예측 시도
             log_info("   🤖 RandomForest ML 모델 로딩 중...")
             if do_rf:
-                ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
+            ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
             else:
                 log_info("   ⏭️ RandomForest 가중치가 0이라 예측을 건너뜁니다.")
                 ml_predicted_df = feature_df[['종목코드']].copy()
@@ -237,7 +237,7 @@ def run_analysis(analysis_date_str):
             # LightGBM 모델 예측 시도 (모델이 없어도 계속 진행)
             log_info("   🤖 LightGBM ML 모델 로딩 중...")
             if do_lgb:
-                lgb_predicted_df = ml_model.predict_with_lgb_model(feature_df)
+            lgb_predicted_df = ml_model.predict_with_lgb_model(feature_df)
             else:
                 log_info("   ⏭️ LightGBM 가중치가 0이라 예측을 건너뜁니다.")
                 lgb_predicted_df = feature_df[['종목코드']].copy()

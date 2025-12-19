@@ -115,7 +115,7 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
     # ✅ Trial마다 반복되는 공통 작업 캐싱 (gpuStock 스타일)
     # - Expanding CV fold 인덱스 생성 (1회)
     # - Fold별 Train-only 중앙값(imputation) 계산 (1회)
-    # - CV에서 스케일링 제거 (LightGBM은 트리 모델이라 불필요)
+    # - (주의) 본 프로젝트는 학습/평가 정합성을 위해 CV에서도 스케일링을 적용합니다.
     # ======================================================================
     log_info("   🧠 [CACHE] 시간 기반 Expanding CV fold/결측치 대체값을 미리 계산합니다...")
     train_dates_cv = pd.to_datetime(train_dates).reset_index(drop=True)
@@ -143,11 +143,10 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
     # Optuna objective 함수 정의 (클로저로 데이터 접근)
     def objective(trial):
         """Optuna objective 함수: 하이퍼파라미터 튜닝을 위한 목적 함수"""
-        # 주식 데이터에 최적화된 파라미터 범위 설정
-        # ✅ 사용자 요청 유지: max_depth 범위를 8~50으로 확장
-        max_depth = trial.suggest_int('max_depth', 8, 50)
-        # gpuStock 스타일: num_leaves를 과도하게 키우지 않도록 제한 (과적합/노이즈 암기 방지)
-        num_leaves = trial.suggest_int('num_leaves', 15, 63)
+        # ✅ Option B: 깊이는 10~24까지 허용하되, leaf/분할/샘플링/규제를 더 강하게 조여 과적합을 억제
+        max_depth = trial.suggest_int('max_depth', 10, 24)
+        # max_depth를 크게 열수록 num_leaves는 더 낮게(상한 캡) 가져가는 것이 안정적
+        num_leaves = trial.suggest_int('num_leaves', 31, 95)
         
         # LightGBM 하이퍼파라미터 제안 (주식 예측 최적화)
         model_n_jobs = -1 if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
@@ -157,17 +156,23 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
             'boosting_type': 'gbdt',
             'num_leaves': num_leaves,
             'max_depth': max_depth,
-            # gpuStock 스타일 (더 보수적)
-            'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),
+            # 깊이를 키운 대신 learning_rate는 낮게(안정적 수렴)
+            'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.03, log=True),
             # CV에서는 early stopping을 사용하므로 충분히 크게 두고 조기 종료로 제어
             'n_estimators': 10000,
-            # gpuStock 스타일 (더 강한 노이즈 필터)
-            'min_child_samples': trial.suggest_int('min_child_samples', 100, 500),
-            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10.0, log=True),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10.0, log=True),
-            'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 10.0),
+            # ✅ 더 꽉 조이는 버전(노이즈 필터 강화)
+            'min_child_samples': trial.suggest_int('min_child_samples', 400, 1500),
+            # 분할이 의미 있을 때만 나뉘도록(깊은 트리의 과도한 분할 억제)
+            'min_split_gain': trial.suggest_float('min_split_gain', 0.05, 0.5),
+            # feature_fraction / bagging_fraction
+            'subsample': trial.suggest_float('subsample', 0.5, 0.85),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 0.85),
+            # bagging_freq
+            'subsample_freq': trial.suggest_int('subsample_freq', 1, 7),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 100.0, log=True),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 100.0, log=True),
+            # 불균형이 심한 타겟일 수 있으므로 상한을 더 넓게
+            'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 20.0),
             'random_state': 42,
             'n_jobs': model_n_jobs,  # LGBM 내부 멀티스레드 사용 (trial 병렬 대신 모델 병렬 권장)
             'verbose': -1  # 로그 출력 억제
@@ -302,8 +307,10 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
             learning_rate=best_params['learning_rate'],
             n_estimators=10000,  # 넉넉하게 설정 (Early Stopping으로 제어)
             min_child_samples=best_params['min_child_samples'],
+            min_split_gain=best_params.get('min_split_gain', 0.0),
             subsample=best_params['subsample'],
             colsample_bytree=best_params['colsample_bytree'],
+            subsample_freq=best_params.get('subsample_freq', 1),
             reg_alpha=best_params['reg_alpha'],
             reg_lambda=best_params['reg_lambda'],
             scale_pos_weight=best_params.get('scale_pos_weight', 3.0),  # 불균형 데이터 처리
@@ -329,9 +336,8 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
         def objective_small(trial):
             # 주식 데이터에 최적화된 파라미터 범위 설정 (축소 버전)
             # 메모리 부족 시에도 사용자의 의도를 최대한 반영하되, 범위는 약간 축소
-            max_depth = trial.suggest_int('max_depth', 8, 50)
-            # gpuStock 스타일: leaf 제한 유지
-            num_leaves = trial.suggest_int('num_leaves', 15, 63)
+            max_depth = trial.suggest_int('max_depth', 10, 24)
+            num_leaves = trial.suggest_int('num_leaves', 31, 95)
             
             model_n_jobs = -1 if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
             params = {
@@ -340,14 +346,16 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
                 'boosting_type': 'gbdt',
                 'num_leaves': num_leaves,
                 'max_depth': max_depth,
-                'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),
+                'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.03, log=True),
                 'n_estimators': 4000,  # early stopping으로 제어
-                'min_child_samples': trial.suggest_int('min_child_samples', 100, 500),
-                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-                'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10.0, log=True),
-                'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10.0, log=True),
-                'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 10.0),
+                'min_child_samples': trial.suggest_int('min_child_samples', 400, 1500),
+                'min_split_gain': trial.suggest_float('min_split_gain', 0.05, 0.5),
+                'subsample': trial.suggest_float('subsample', 0.5, 0.85),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 0.85),
+                'subsample_freq': trial.suggest_int('subsample_freq', 1, 7),
+                'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 100.0, log=True),
+                'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 100.0, log=True),
+                'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 20.0),
                 'random_state': 42,
                 'n_jobs': model_n_jobs,
                 'verbose': -1
@@ -448,8 +456,10 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
             learning_rate=best_params['learning_rate'],
             n_estimators=5000,  # Early Stopping으로 제어
             min_child_samples=best_params['min_child_samples'],
+            min_split_gain=best_params.get('min_split_gain', 0.0),
             subsample=best_params['subsample'],
             colsample_bytree=best_params['colsample_bytree'],
+            subsample_freq=best_params.get('subsample_freq', 1),
             reg_alpha=best_params['reg_alpha'],
             reg_lambda=best_params['reg_lambda'],
             scale_pos_weight=best_params.get('scale_pos_weight', 3.0),  # 불균형 데이터 처리
@@ -547,16 +557,18 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
     }
     
     parameter_explanations = {
-        'num_leaves': '리프 노드의 최대 개수 (15-63, 주식 데이터는 패턴이 단순해야 통하므로 31 이하 권장)',
-        'max_depth': '트리의 최대 깊이 (3-7, 10 이상 넘어가면 과거 차트 통암기 수준)',
-        'learning_rate': '학습 속도 (0.005-0.05, 주식에선 0.01 이하가 국룰, 너무 높으면 노이즈를 외워버림)',
+        'num_leaves': '리프 노드의 최대 개수 (31-95, 깊이를 열되 leaf 상한을 캡하여 과적합 억제)',
+        'max_depth': '트리의 최대 깊이 (10-24, 깊이를 열 경우 leaf/규제/샘플링/분할이 함께 강해야 안정적)',
+        'learning_rate': '학습 속도 (0.005-0.03, 낮출수록 안정적이지만 early stopping 필수)',
         'n_estimators': '부스팅 반복 횟수 (5000 이상, Early Stopping으로 제어)',
-        'min_child_samples': '리프 노드의 최소 샘플 수 (50-500, 노이즈 필터, 숫자를 높게 잡아서 소수의 우연한 패턴 무시)',
-        'subsample': '각 트리가 사용할 샘플 비율 (0.6-0.9, 과적합 방지)',
-        'colsample_bytree': '각 트리가 사용할 피처 비율 (0.6-0.9, 피처를 골고루 보게 함)',
-        'reg_alpha': 'L1 정규화 계수 (0.1-10.0, 불필요한 피처의 영향력을 0으로 만듦, 노이즈 제거)',
-        'reg_lambda': 'L2 정규화 계수 (0.1-10.0, 특정 피처가 과도하게 영향을 미치는 것을 억제)',
-        'scale_pos_weight': '정답 가중치 (2.0-5.0, 적은 수의 급등주를 놓치지 않기 위한 가중치 설정)'
+        'min_child_samples': '리프 노드의 최소 샘플 수 (400-1500, 깊은 트리의 노이즈 분할 억제)',
+        'min_split_gain': '분할 최소 이득 (0.05-0.5, 의미 없는 분할 억제)',
+        'subsample': '각 트리가 사용할 샘플 비율 (0.5-0.85, 배깅으로 일반화 성능 향상)',
+        'colsample_bytree': '각 트리가 사용할 피처 비율 (0.5-0.85, 상관 높은 피처가 많을수록 낮추면 도움)',
+        'subsample_freq': '배깅을 수행하는 주기 (1-7, 과적합 완화에 도움)',
+        'reg_alpha': 'L1 정규화 계수 (0.1-100.0, 불필요한 피처 영향 축소)',
+        'reg_lambda': 'L2 정규화 계수 (0.1-100.0, 가중치 크기 제한으로 모델 단순화)',
+        'scale_pos_weight': '양성 클래스 가중치 (1.0-20.0, 불균형이 심할수록 유리할 수 있음)'
     }
     
     # 피처 중요도 구조 생성 (3가지 방식)

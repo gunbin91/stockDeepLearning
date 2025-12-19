@@ -22,12 +22,15 @@ from datetime import datetime, timedelta
 import pandas_ta as ta
 import concurrent.futures
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from tqdm import tqdm
 import os
 import gc
 import locale
 import platform
 import multiprocessing
+import traceback
+from collections import deque
 
 # Windows 환경에서 multiprocessing 지원
 if platform.system() == 'Windows':
@@ -1119,36 +1122,135 @@ def _fetch_and_prepare_data(start_date, end_date, calculate_factor_scores=True):
     total_count = len(merge_and_calc_args)
     
     # Windows에서 ProcessPoolExecutor 사용 시 초기화 확인
-    if platform.system() == 'Windows':
+    is_windows = (platform.system() == 'Windows')
+    if is_windows:
         # Windows에서는 spawn 방식을 사용하므로 프로세스 생성 오버헤드가 큼
         log_info(f"   Windows 환경: spawn 방식 사용 (프로세스 생성 오버헤드 있음)")
         log_info(f"   데이터 전달 최적화: 각 종목별 필요한 데이터만 전달")
+
+        # ✅ 안정성 우선: Windows spawn 환경에서는 워커 수를 과도하게 키우면
+        # - IPC 파이프/큐 적체
+        # - 프로세스 생성/종료 오버헤드
+        # - 메모리 압력
+        # 로 인해 BrokenProcessPool/Timeout/통신 오류가 발생하기 쉬움
+        process_workers = min(process_workers, 6)
+        log_info(f"   Windows 안정화: 워커 수 상한 적용 → {process_workers}개")
+
+    # 폴백 기준(안전 우선)
+    max_errors_before_fallback = max(5, int(total_count * 0.01))  # 1% 또는 최소 5개
+    consecutive_errors_before_fallback = 5
+    error_count = 0
+    consecutive_errors = 0
+    use_fallback_sequential = False
+
+    # 대량 submit 방지: in-flight 제한(메모리/IPC 안정화)
+    in_flight_limit = max(10, process_workers * 2)
+    remaining = deque(merge_and_calc_args)
     
-    # 모든 작업을 먼저 제출 (병렬 실행 보장)
-    with ProcessPoolExecutor(max_workers=process_workers) as executor:
-        # 모든 작업을 한 번에 제출하여 병렬 실행 보장
-        future_to_args = {}
-        for args in merge_and_calc_args:
-            future = executor.submit(merge_and_calculate_features, args)
-            future_to_args[future] = args
-        
-        log_info(f"   총 {len(future_to_args)}개 작업 제출 완료 (병렬 처리 시작)")
-        log_info(f"   💡 작업 관리자에서 Python 프로세스가 {process_workers}개 실행되는지 확인하세요")
-        
-        # 완료된 작업부터 처리 (순서와 무관하게)
-        for future in concurrent.futures.as_completed(future_to_args):
+    # Windows spawn 환경 안정화를 위해 mp_context/max_tasks_per_child 사용
+    # - max_tasks_per_child: 워커가 일정 작업 후 재시작되어 메모리 누수/파편화 누적 완화
+    mp_ctx = multiprocessing.get_context('spawn') if is_windows else None
+    max_tasks_per_child = 100 if is_windows else None
+
+    try:
+        with ProcessPoolExecutor(
+            max_workers=process_workers,
+            mp_context=mp_ctx,
+            max_tasks_per_child=max_tasks_per_child
+        ) as executor:
+            future_to_args = {}
+
+            # 초기 in-flight 채우기
+            while remaining and len(future_to_args) < in_flight_limit:
+                args = remaining.popleft()
+                future = executor.submit(merge_and_calculate_features, args)
+                future_to_args[future] = args
+
+            log_info(f"   총 {total_count}개 작업 처리 시작 (in-flight 제한: {in_flight_limit}, 워커: {process_workers})")
+            log_info(f"   💡 작업 관리자에서 Python 프로세스가 {process_workers}개 실행되는지 확인하세요")
+
+            while future_to_args:
+                done, _ = concurrent.futures.wait(
+                    future_to_args.keys(),
+                    return_when=concurrent.futures.FIRST_COMPLETED
+                )
+
+                for future in done:
+                    args = future_to_args.pop(future, None)
+                    ticker = args[0] if args else "알 수 없음"
+                    try:
+                        result_df = future.result()
+                        if result_df is not None:
+                            all_data.append(result_df)
+                        consecutive_errors = 0
+                    except BrokenProcessPool as e:
+                        # ✅ 풀 자체가 깨진 경우: 즉시 폴백
+                        error_count += 1
+                        consecutive_errors += 1
+                        log_warning(
+                            f"   종목 {ticker} 처리 중 BrokenProcessPool 발생 → 남은 작업은 순차 폴백합니다. "
+                            f"({type(e).__name__}: {e})"
+                        )
+                        use_fallback_sequential = True
+                        # 남은 args는 remaining에 유지되며, 아래에서 순차 처리
+                        break
+                    except Exception as e:
+                        error_count += 1
+                        consecutive_errors += 1
+                        # 상세 원인 노출(Windows라도 문자열 로그는 가능)
+                        err_type = type(e).__name__
+                        err_msg = str(e)
+                        log_warning(f"   종목 {ticker} 처리 중 오류 ({err_type}: {err_msg})")
+
+                        # 에러가 반복되면 안정성 위해 폴백
+                        if (error_count >= max_errors_before_fallback) or (consecutive_errors >= consecutive_errors_before_fallback):
+                            log_warning(
+                                f"   오류 누적({error_count}/{max_errors_before_fallback}) 또는 연속 오류({consecutive_errors})가 감지되어 "
+                                f"남은 작업은 순차 폴백합니다."
+                            )
+                            use_fallback_sequential = True
+                            break
+
+                    completed_count += 1
+                    log_progress("데이터 병합 및 피처 계산", completed_count, total_count)
+                    if completed_count % 10 == 0:
+                        gc.collect()
+
+                if use_fallback_sequential:
+                    # 더 이상 병렬로 진행하지 않음
+                    break
+
+                # in-flight 보충
+                while remaining and len(future_to_args) < in_flight_limit:
+                    args = remaining.popleft()
+                    future = executor.submit(merge_and_calculate_features, args)
+                    future_to_args[future] = args
+
+    except BrokenProcessPool as e:
+        # 풀 생성/운영 중 붕괴 시 폴백
+        log_warning(f"   ProcessPoolExecutor 붕괴(BrokenProcessPool) 감지 → 순차 폴백합니다. ({e})")
+        use_fallback_sequential = True
+    except Exception as e:
+        log_warning(f"   멀티프로세싱 실행 중 예외 → 순차 폴백합니다. ({type(e).__name__}: {e})")
+        use_fallback_sequential = True
+
+    # ✅ 폴백: 남은 작업(또는 전체)을 순차 처리하여 최대한 데이터 확보
+    if use_fallback_sequential:
+        log_info("   🔄 순차 폴백 모드로 남은 종목을 처리합니다(안정성 우선).")
+        # 이미 완료된 개수는 유지, remaining에 남은 작업 처리
+        while remaining:
+            args = remaining.popleft()
+            ticker = args[0]
             try:
-                result_df = future.result()
+                result_df = merge_and_calculate_features(args)
                 if result_df is not None:
                     all_data.append(result_df)
             except Exception as e:
-                # 오류 발생 시 로그 출력 (프로세스 간 통신 제한으로 간단히 처리)
-                ticker = future_to_args[future][0] if future in future_to_args else "알 수 없음"
-                log_warning(f"   종목 {ticker} 처리 중 오류 (프로세스 간 통신 제한으로 상세 로그 생략)")
-            
+                # 순차 폴백에서도 예외는 계속 진행
+                log_warning(f"   [폴백] 종목 {ticker} 처리 중 오류 ({type(e).__name__}: {e})")
+                # 필요하면 상세 traceback도 남길 수 있음(로그 과다 방지 차원에서 1줄만)
             completed_count += 1
-            log_progress("데이터 병합 및 피처 계산", completed_count, total_count)
-            # 주기적 메모리 정리 (10개마다)
+            log_progress("데이터 병합 및 피처 계산(폴백)", completed_count, total_count)
             if completed_count % 10 == 0:
                 gc.collect()
     

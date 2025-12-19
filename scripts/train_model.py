@@ -16,6 +16,7 @@ RandomForest 알고리즘을 사용하여 아래 타겟(이진 분류)을 예측
 import pandas as pd
 import numpy as np
 import joblib
+import json
 from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, roc_auc_score

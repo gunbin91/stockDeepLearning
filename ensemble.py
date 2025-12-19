@@ -91,7 +91,7 @@ def calculate_final_score(df):
             source_series = final_df[factor] * 100
         else:
             source_series = final_df[factor]
-
+            
         # 전부 결측이면 안전한 기본값
         non_na = source_series.dropna()
         if non_na.empty:
@@ -100,7 +100,7 @@ def calculate_final_score(df):
 
         min_val = non_na.min()
         max_val = non_na.max()
-
+        
         if pd.notna(min_val) and pd.notna(max_val) and (max_val - min_val) > 0:
             cached_norms[factor] = {'min': min_val, 'max': max_val, 'range': max_val - min_val}
         else:
