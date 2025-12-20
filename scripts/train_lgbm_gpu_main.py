@@ -499,10 +499,10 @@ def objective(trial, fold_data_cache, features):
         'seed': 42,
         'deterministic': True,
         # 핵심 파라미터
-        'learning_rate': trial.suggest_float('learning_rate', 0.003, 0.08, log=True),
-        'num_leaves': trial.suggest_int('num_leaves', 31, 255),
-        'max_depth': -1,  # 깊이 제한 없음 (num_leaves로 복잡도 제어)
-        'min_child_samples': trial.suggest_int('min_child_samples', 20, 300),
+        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),
+        'num_leaves': trial.suggest_int('num_leaves', 31, 150),
+        'max_depth': trial.suggest_int('max_depth', 10, 30),
+        'min_child_samples': trial.suggest_int('min_child_samples', 50, 200),
         # 정규화
         'reg_alpha': trial.suggest_float('reg_alpha', 1e-3, 10.0, log=True),
         'reg_lambda': trial.suggest_float('reg_lambda', 1e-3, 30.0, log=True),
@@ -511,15 +511,16 @@ def objective(trial, fold_data_cache, features):
         # 샘플링
         'subsample': trial.suggest_float('subsample', 0.6, 1.0),
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-        # 불균형 처리
-        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 50.0, log=True),
+        # 불균형 처리 (언더샘플링 적용으로 scale_pos_weight 제거 또는 1.0 고정)
+        # 'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 50.0, log=True),
+        'scale_pos_weight': 1.0,  # 1:1 샘플링이므로 가중치 불필요
         # 기타
         'max_bin': 255,
         'n_estimators': 10000,  # 고정 (Early Stopping으로 제어)
     }
     
     log_info(f"   📋 파라미터: learning_rate={params['learning_rate']:.6f}, num_leaves={params['num_leaves']}, "
-             f"min_child_samples={params['min_child_samples']}, scale_pos_weight={params['scale_pos_weight']:.2f}")
+             f"max_depth={params['max_depth']}, min_child_samples={params['min_child_samples']}")
     
     fold_scores = []
     
@@ -528,14 +529,59 @@ def objective(trial, fold_data_cache, features):
         try:
             # log_info(f"   📊 Fold #{fold_idx+1} 학습 시작...")
             
+            # --- 1:1 언더샘플링 (RF와 동일하게 적용) ---
+            # 다수 클래스(0)를 소수 클래스(1) 개수에 맞춰 무작위로 줄임
+            y_train_series = pd.Series(y_train)
+            value_counts = y_train_series.value_counts()
+            
+            if len(value_counts) >= 2:
+                minority_class = value_counts.idxmin()
+                majority_class = value_counts.idxmax()
+                n_minority = value_counts[minority_class]
+                n_majority = value_counts[majority_class]
+                
+                # [로그 추가] 첫 번째 Trial의 첫 번째 Fold에서만 상세 로그 출력
+                if trial.number == 0 and fold_idx == 0:
+                     log_info(f"   📊 [Trial#0-Fold#0] 언더샘플링 전: 소수({minority_class})={n_minority:,}, 다수({majority_class})={n_majority:,}")
+
+                if n_majority > n_minority:
+                    # 인덱스 추출
+                    indices = np.arange(len(y_train))
+                    minority_indices = indices[y_train == minority_class]
+                    majority_indices = indices[y_train == majority_class]
+                    
+                    # 다수 클래스 셔플 및 샘플링 (1:1 비율)
+                    rng_sampler = np.random.RandomState(42 + fold_idx) 
+                    rng_sampler.shuffle(majority_indices)
+                    selected_majority_indices = majority_indices[:n_minority]
+                    
+                    # 합치기
+                    balanced_indices = np.concatenate([minority_indices, selected_majority_indices])
+                    balanced_indices.sort()
+                    
+                    # 데이터 교체 (DataFrame이므로 iloc 사용, y는 numpy array)
+                    X_train_resampled = X_train.iloc[balanced_indices].reset_index(drop=True)
+                    y_train_resampled = y_train[balanced_indices]
+
+                    if trial.number == 0 and fold_idx == 0:
+                        log_info(f"   ✅ [Trial#0-Fold#0] 1:1 언더샘플링 완료: 총 {len(y_train_resampled):,}행 (소수: {n_minority:,}, 다수: {len(selected_majority_indices):,})")
+                else:
+                    X_train_resampled = X_train
+                    y_train_resampled = y_train
+                    if trial.number == 0 and fold_idx == 0:
+                        log_info(f"   ℹ️ [Trial#0-Fold#0] 클래스 불균형이 심하지 않아 샘플링 건너뜀.")
+            else:
+                X_train_resampled = X_train
+                y_train_resampled = y_train
+
             # 스케일링 (StandardScaler)
             # 캐싱 시 이미 피처를 맞췄다고 가정
             scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
+            X_train_scaled = scaler.fit_transform(X_train_resampled)
             X_val_scaled = scaler.transform(X_val)
             
             # LightGBM Dataset 생성
-            train_data = lgb.Dataset(X_train_scaled, label=y_train)
+            train_data = lgb.Dataset(X_train_scaled, label=y_train_resampled)
             val_data = lgb.Dataset(X_val_scaled, label=y_val, reference=train_data)
             
             # 모델 학습 (Early Stopping 포함)
@@ -667,6 +713,54 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
     X_all = combined_train_df[available_features].copy()
     y_all = combined_train_df['target'].values
     
+    # --- 클래스 불균형 확인 및 언더샘플링 (RF와 동일하게 1:1) ---
+    sampling_start = datetime.now()
+    log_info("   📊 [DATA] 클래스 분포 확인 및 언더샘플링 준비...")
+    
+    # NumPy 배열을 DataFrame으로 변환하여 value_counts() 사용
+    y_all_series = pd.Series(y_all)
+    value_counts = y_all_series.value_counts()
+    
+    if len(value_counts) >= 2:
+        minority_class_label = value_counts.idxmin()
+        majority_class_label = value_counts.idxmax()
+        n_minority = value_counts[minority_class_label]
+        n_majority = value_counts[majority_class_label]
+        
+        log_info(f"      - 소수 클래스 ({minority_class_label}): {n_minority:,}개")
+        log_info(f"      - 다수 클래스 ({majority_class_label}): {n_majority:,}개")
+        
+        # 언더샘플링: 다수 클래스를 소수 클래스 크기만큼 랜덤 선택 (1:1 비율)
+        if n_majority > n_minority:
+            all_indices = np.arange(len(y_all))
+            
+            minority_indices = all_indices[y_all == minority_class_label]
+            majority_indices = all_indices[y_all == majority_class_label]
+            
+            log_info(f"      🔀 다수 클래스 랜덤 셔플 및 샘플링 중 (1:1 비율)...")
+            
+            # 다수 클래스 셔플
+            rng = np.random.RandomState(42)
+            majority_indices_shuffled = majority_indices.copy()
+            rng.shuffle(majority_indices_shuffled)
+            
+            # 1:1 비율로 샘플링
+            selected_majority_indices = majority_indices_shuffled[:n_minority]
+            
+            # 인덱스 결합
+            balanced_indices = np.concatenate([minority_indices, selected_majority_indices])
+            balanced_indices.sort()  # 시간 순서 유지
+            
+            # 언더샘플링된 데이터 생성
+            X_all = X_all.iloc[balanced_indices].reset_index(drop=True)
+            y_all = y_all[balanced_indices]
+            
+            log_info(f"   ✅ 언더샘플링 완료: 총 {len(X_all):,}행 ({(datetime.now() - sampling_start).total_seconds():.1f}초)")
+        else:
+            log_info("   ℹ️ 클래스 불균형이 심하지 않아 샘플링을 건너뜁니다.")
+    else:
+        log_warning("   ⚠️ 클래스가 1개만 존재합니다.")
+
     # 결측치 및 무한대 값 처리
     for col in X_all.columns:
         if X_all[col].isna().any() or np.isinf(X_all[col]).any():
