@@ -326,6 +326,72 @@ def expanding_time_series_folds(
         folds.append((train_idx, val_idx))
     return folds
 
+def expanding_time_series_folds_gpustock(
+    dates: pd.Series,
+    warmup_days: int = 250,
+    val_period_days: int = 365,
+    n_folds: int = 3
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """
+    gpuStock의 LGBM 학습과 동일한 Fold 구성 방식.
+    - 웜업(warmup_days) 기간은 학습에서 제외
+    - 검증 기간은 고정(val_period_days)이고, 마지막 n_folds개 구간을 1년 단위로 검증
+    - Train은 항상 시작점부터 누적(expanding)
+
+    Returns:
+        (train_idx_positions, val_idx_positions) 리스트. 인덱스는 '위치' 기준(0..N-1).
+    """
+    if dates is None or len(dates) == 0:
+        return []
+
+    d = pd.to_datetime(dates, errors='coerce').reset_index(drop=True)
+    if d.isna().all():
+        return []
+
+    # 날짜 비교는 시간 성분을 제거한 기준으로 수행
+    d_norm = d.dt.normalize()
+    min_date = d_norm.min()
+    max_date = d_norm.max()
+    if pd.isna(min_date) or pd.isna(max_date):
+        return []
+
+    actual_start_date = (min_date + pd.Timedelta(days=warmup_days)).normalize()
+    actual_end_date = max_date.normalize()
+    if actual_start_date >= actual_end_date:
+        return []
+
+    folds: List[Tuple[np.ndarray, np.ndarray]] = []
+    for fold_idx in range(n_folds):
+        end_offset = (n_folds - 1 - fold_idx) * val_period_days
+        val_end = (actual_end_date - pd.Timedelta(days=end_offset)).normalize()
+        val_start = (val_end - pd.Timedelta(days=val_period_days)).normalize()
+
+        train_start = actual_start_date
+        train_end = val_start
+
+        # 검증 구간이 학습 시작보다 과거로 밀리면 조정
+        if val_start < actual_start_date:
+            val_start = actual_start_date
+            val_end = (val_start + pd.Timedelta(days=val_period_days)).normalize()
+            train_end = val_start
+
+        if train_end <= train_start:
+            continue
+
+        # Train: [train_start, train_end) / Val: [val_start, val_end]
+        # (겹침 방지를 위해 train_end는 제외, val은 범위 내 포함)
+        train_mask = (d_norm >= train_start) & (d_norm < train_end)
+        val_mask = (d_norm >= val_start) & (d_norm <= val_end)
+
+        train_idx = np.where(train_mask.values)[0]
+        val_idx = np.where(val_mask.values)[0]
+        if len(train_idx) == 0 or len(val_idx) == 0:
+            continue
+
+        folds.append((train_idx, val_idx))
+
+    return folds
+
 def time_series_cv_auc(
     model_builder,
     X: pd.DataFrame,
@@ -534,7 +600,9 @@ def create_training_data(years=None):
     # - 사용자가 gpuStock을 최신 버전으로 교체하더라도, 루트(CPU) 학습 피처가 자동 반영되도록 합니다.
     def _extract_features_from_gpustock() -> Optional[List[str]]:
         try:
-            gpustock_train = path_manager.project_root / 'gpuStock' / 'scripts' / 'train_gpu_main.py'
+            gpustock_train_lgbm = path_manager.project_root / 'gpuStock' / 'scripts' / 'train_lgbm_gpu_main.py'
+            gpustock_train_rf = path_manager.project_root / 'gpuStock' / 'scripts' / 'train_gpu_main.py'
+            gpustock_train = gpustock_train_lgbm if gpustock_train_lgbm.exists() else gpustock_train_rf
             if not gpustock_train.exists():
                 return None
             src = gpustock_train.read_text(encoding='utf-8', errors='replace')
@@ -589,16 +657,15 @@ def create_training_data(years=None):
             'MA240_Slope',
             'KOSPI_MA20_Slope',
             'RVOL',
-            'RVOL(1W)',
             '시총 회전율(1W)',
             '시총 회전율(3M)',
             'RSI_Signal_Oscillator',
             'ATRr_5',
             'ATRr_20',
-            'Log_Return_20',
+            'ATRr_60',
+            'HV_Volatility_5',
             'HV_Volatility_20',
             'HV_Volatility_60',
-            'HV_Volatility_5',
             'VWAP_Disparity_5',
             'Max_Drawdown_20',
         ]
@@ -632,7 +699,7 @@ def create_training_data(years=None):
         final_df = load_training_data_from_file(training_data_path)
         
         if final_df is not None and not final_df.empty:
-            # 구버전 캐시(피처 세트 변경/타겟 변경)면 자동으로 재생성
+            # 구버전 캐시(피처 세트 변경/타겟 변경)면 자동으로 재생성 (원복: 누락 피처 자동 제외 금지)
             required_cols = set(features + [target, 'date'])
             missing_cols = [c for c in required_cols if c not in final_df.columns]
             if missing_cols:
@@ -763,7 +830,7 @@ def create_training_data(years=None):
     log_memory_usage("데이터 필터링 완료")
     check_memory_and_cleanup()
 
-    # 필요한 컬럼이 모두 있는지 확인
+    # 필요한 컬럼이 모두 있는지 확인 (원복: 누락 시 중단)
     for col in features + [target]:
         if col not in final_df.columns:
             log_error(f"오류: 필요한 컬럼 '{col}'이 데이터프레임에 없습니다.")
@@ -792,6 +859,8 @@ def create_training_data(years=None):
     required_columns = features + [target]
     final_df = final_df[required_columns]
     log_info(f"   📊 필요한 컬럼만 선택: {len(required_columns)}개 컬럼")
+
+    # (원복) 메타 갱신은 데이터 파일 생성 시점에만 수행합니다.
     
     # 데이터 타입 최적화
     X = final_df[features].astype(np.float32)  # float64 -> float32로 메모리 절약

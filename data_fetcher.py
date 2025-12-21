@@ -280,7 +280,7 @@ def _fetch_macro_data(start_date, end_date):
                 macro_df[f'{col}_pct_1d'] = macro_df[col].pct_change(1)
                 macro_df[f'{col}_pct_5d'] = macro_df[col].pct_change(5)
 
-            # gpuStock 피처 호환: KOSPI_disparity_20, KOSPI_변동성(1M), KOSPI_MA20_Slope
+            # gpuStock 피처 호환(원복): KOSPI_disparity_20, KOSPI_MA20_Slope, KOSPI_변동성(1M)
             try:
                 if 'KOSPI' in macro_df.columns:
                     kospi_close = macro_df['KOSPI']
@@ -288,10 +288,7 @@ def _fetch_macro_data(start_date, end_date):
                     macro_df['KOSPI_disparity_20'] = (kospi_close / kospi_ma20) * 100
                     kospi_std_20 = kospi_close.rolling(window=20).std()
                     kospi_mean_20 = kospi_close.rolling(window=20).mean()
-                    macro_df['KOSPI_변동성(1M)'] = kospi_std_20 / kospi_mean_20
-                    # 시계열 전체 slope는 data_processor 쪽에서 계산하지만,
-                    # 여기서는 분석용으로 동일한 값이 나오도록 시계열로 계산
-                    # (마지막 값만 사용되더라도 merge_asof 시 전체 필요)
+                    macro_df['KOSPI_변동성(1M)'] = kospi_std_20 / kospi_mean_20.replace(0, np.nan)
                     from data_processor import calculate_normalized_linear_regression_slope
                     macro_df['KOSPI_MA20_Slope'] = calculate_normalized_linear_regression_slope(kospi_ma20, window=5)
             except Exception as e:
@@ -520,7 +517,7 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             log_warning(f"Log_Return_20 계산 실패 ({ticker}): {e}")
             latest_data['Log_Return_20'] = np.nan
 
-        # HV_Volatility_5/20/60 (1일 로그수익률 rolling std)
+        # HV_Volatility_5/20/60 (1일 로그수익률 rolling std) - 원복
         try:
             log_ret_1d = np.log(df_for_indicators['종가'] / df_for_indicators['종가'].shift(1))
             latest_data['HV_Volatility_5'] = float(log_ret_1d.rolling(window=5).std().iloc[-1]) if len(log_ret_1d) >= 5 else np.nan

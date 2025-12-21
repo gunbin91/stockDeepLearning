@@ -60,7 +60,8 @@ from scripts.train_model import (
     split_by_date,
     _sanitize_numeric_frame,
     compute_imputation_values_train_only,
-    expanding_time_series_folds
+    expanding_time_series_folds,
+    expanding_time_series_folds_gpustock
 )
 
 import data_processor
@@ -188,7 +189,13 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
     y_train_cv = y_train.reset_index(drop=True)
     X_train_cv = X_train_raw.reset_index(drop=True)
 
-    fold_indices = expanding_time_series_folds(train_dates_cv, n_splits=3)
+    # gpuStock과 동일한 fold 구성: 마지막 3년을 1년 단위 검증, 웜업 250일 제외
+    fold_indices = expanding_time_series_folds_gpustock(
+        train_dates_cv,
+        warmup_days=250,
+        val_period_days=365,
+        n_folds=3
+    )
     if not fold_indices:
         log_warning("   ⚠️ Expanding CV fold 생성 실패(데이터 기간 부족). Optuna 튜닝을 중단합니다.")
         return
@@ -778,20 +785,7 @@ def main():
     parser.add_argument('--years', type=int, default=None, help='학습에 사용할 최근 N년치 데이터 (None이면 전체 데이터, 파일이 없을 때만 적용)')
     args = parser.parse_args()
     
-    # ==============================================================================
-    # ✨ 핵심 수정: 임시 폴더 생성 및 자동 삭제 로직 추가 ✨
-    # ==============================================================================
-    # 1. 통일된 경로로 임시 폴더 경로 설정
-    temp_folder_path = str(path_manager.get_temp_dir('joblib_temp'))
-
-    try:
-        # 2. 임시 폴더 생성 및 환경 변수 설정
-        os.makedirs(temp_folder_path, exist_ok=True)
-        os.environ['JOBLIB_TEMP_FOLDER'] = temp_folder_path
-        log_info(f"joblib 임시 폴더가 '{temp_folder_path}'로 설정되었습니다.")
-        log_memory_usage("프로그램 시작")
-
-    # gpuStock과 동일한 피처 리스트 (하드코딩으로 명시적 동기화)
+    # gpuStock LGBM 기준 25개 피처 리스트 (원복)
     gpu_stock_features = [
         'log_mktcap',
         '52주_신고가_비율',
@@ -820,27 +814,40 @@ def main():
         'Max_Drawdown_20',
     ]
     
-    # 3. 메인 학습 로직 실행 (공통 create_training_data 함수 사용)
-    # create_training_data가 반환하는 features 대신 gpu_stock_features를 사용하도록 덮어쓰기 고려
-    X, y, features, imputation_values, dates = create_training_data(years=args.years)
-    
-    if X is not None:
-        # gpuStock 피처만 선택 (존재하는 것만)
-        available_gpu_features = [f for f in gpu_stock_features if f in X.columns]
-        
-        if len(available_gpu_features) < len(gpu_stock_features):
-            missing = set(gpu_stock_features) - set(available_gpu_features)
-            log_warning(f"⚠️ gpuStock 피처 중 일부가 누락되었습니다: {missing}")
-        
-        # 피처 리스트 교체 및 데이터 필터링
-        features = available_gpu_features
-        X = X[features]
-        log_info(f"✅ gpuStock 동기화: {len(features)}개 피처로 학습을 진행합니다.")
+    # ==============================================================================
+    # ✨ 핵심 수정: 임시 폴더 생성 및 자동 삭제 로직 추가 ✨
+    # ==============================================================================
+    # 1. 통일된 경로로 임시 폴더 경로 설정
+    temp_folder_path = str(path_manager.get_temp_dir('joblib_temp'))
 
-    if X is not None and dates is not None:
-            log_info("🎯 LightGBM 모델 학습을 시작합니다...")
-            train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, args.n_jobs, args.n_iter)
-            log_info("🎉 LightGBM 모델 학습이 성공적으로 완료되었습니다!")
+    try:
+        # 2. 임시 폴더 생성 및 환경 변수 설정
+        os.makedirs(temp_folder_path, exist_ok=True)
+        os.environ['JOBLIB_TEMP_FOLDER'] = temp_folder_path
+        log_info(f"joblib 임시 폴더가 '{temp_folder_path}'로 설정되었습니다.")
+        log_memory_usage("프로그램 시작")
+
+        # 3. 메인 학습 로직 실행 (공통 create_training_data 함수 사용)
+        # create_training_data가 반환하는 features 대신 gpu_stock_features를 사용하도록 덮어쓰기 고려
+        X, y, features, imputation_values, dates = create_training_data(years=args.years)
+        
+        if X is not None:
+            # gpuStock 피처만 선택 (존재하는 것만)
+            available_gpu_features = [f for f in gpu_stock_features if f in X.columns]
+            
+            if len(available_gpu_features) < len(gpu_stock_features):
+                missing = set(gpu_stock_features) - set(available_gpu_features)
+                log_warning(f"⚠️ gpuStock 피처 중 일부가 누락되었습니다: {missing}")
+            
+            # 피처 리스트 교체 및 데이터 필터링
+            features = available_gpu_features
+            X = X[features]
+            log_info(f"✅ gpuStock 동기화: {len(features)}개 피처로 학습을 진행합니다.")
+
+            if dates is not None:
+                log_info("🎯 LightGBM 모델 학습을 시작합니다...")
+                train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, args.n_jobs, args.n_iter)
+                log_info("🎉 LightGBM 모델 학습이 성공적으로 완료되었습니다!")
         else:
             log_error("❌ 학습 데이터 생성에 실패하여 모델 학습을 중단합니다.")
 

@@ -372,16 +372,37 @@ def _fetch_macro_data(start_date, end_date):
                 macro_df[f'{col}_pct_1d'] = macro_df[col].pct_change(1)
                 macro_df[f'{col}_pct_5d'] = macro_df[col].pct_change(5)
 
-            # gpuStock 피처 호환: KOSPI_disparity_20, KOSPI_MA20_Slope
+            # gpuStock 피처 호환(원복): KOSPI_disparity_20, KOSPI_MA20_Slope, KOSPI_변동성(1M)
             try:
                 if 'KOSPI' in macro_df.columns:
                     kospi_close = macro_df['KOSPI']
-                    kospi_ma20 = kospi_close.rolling(window=20).mean()
-                    macro_df['KOSPI_disparity_20'] = (kospi_close / kospi_ma20) * 100
-                    kospi_std_20 = kospi_close.rolling(window=20).std()
-                    kospi_mean_20 = kospi_close.rolling(window=20).mean()
-                    macro_df['KOSPI_변동성(1M)'] = kospi_std_20 / kospi_mean_20
-                    macro_df['KOSPI_MA20_Slope'] = calculate_normalized_linear_regression_slope(kospi_ma20, window=5)
+
+                    # 1) KOSPI_disparity_20
+                    try:
+                        kospi_ma20 = kospi_close.rolling(window=20).mean()
+                        macro_df['KOSPI_disparity_20'] = (kospi_close / kospi_ma20) * 100
+                    except Exception as e:
+                        log_warning(f"KOSPI_disparity_20 계산 실패: {e}")
+                        macro_df['KOSPI_disparity_20'] = np.nan
+
+                    # 2) KOSPI_변동성(1M): std/mean (20일)
+                    try:
+                        kospi_std_20 = kospi_close.rolling(window=20).std()
+                        kospi_mean_20 = kospi_close.rolling(window=20).mean()
+                        macro_df['KOSPI_변동성(1M)'] = kospi_std_20 / kospi_mean_20.replace(0, np.nan)
+                    except Exception as e:
+                        log_warning(f"KOSPI_변동성(1M) 계산 실패: {e}")
+                        macro_df['KOSPI_변동성(1M)'] = np.nan
+
+                    # 3) KOSPI_MA20_Slope
+                    try:
+                        # 종목 MA20_Slope와 동일하게 window=5로 slope 계산
+                        from data_processor import calculate_normalized_linear_regression_slope
+                        kospi_ma20 = kospi_close.rolling(window=20).mean()
+                        macro_df['KOSPI_MA20_Slope'] = calculate_normalized_linear_regression_slope(kospi_ma20, window=5)
+                    except Exception as e:
+                        log_warning(f"KOSPI_MA20_Slope 계산 실패: {e}")
+                        macro_df['KOSPI_MA20_Slope'] = np.nan
             except Exception as e:
                 log_warning(f"gpuStock 거시 피처 계산 실패: {e}")
 
@@ -804,7 +825,7 @@ def merge_and_calculate_features(args):
             log_warning(f"Log_Return_20 계산 실패 ({ticker}): {e}")
             df['Log_Return_20'] = np.nan
 
-        # 2-5) HV_Volatility_5/20/60: 1일 로그수익률의 rolling std
+        # 2-5) HV_Volatility_5/20/60: 1일 로그수익률의 rolling std (원복)
         try:
             log_ret_1d = np.log(df['종가'] / df['종가'].shift(1))
             df['HV_Volatility_5'] = log_ret_1d.rolling(window=5).std()

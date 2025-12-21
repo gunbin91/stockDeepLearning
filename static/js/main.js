@@ -5,9 +5,73 @@ $(document).ready(function() {
     let socket = null;
     let currentAnalysis = null;
     let currentBacktest = null;
+
+    // =========================================================
+    // Toast 유틸 (Bootstrap 5)
+    // - 기존 코드에서 showToast를 다수 호출하지만 함수 정의가 누락되어
+    //   스크립트 전체가 중단되는 문제가 있었음.
+    // =========================================================
+    function showToast(message, type = 'info') {
+        try {
+            const safeMessage = (message === null || message === undefined) ? '' : String(message);
+            const typeMap = {
+                success: 'bg-success',
+                info: 'bg-info',
+                warning: 'bg-warning text-dark',
+                danger: 'bg-danger',
+                error: 'bg-danger'
+            };
+            const toastClass = typeMap[type] || 'bg-secondary';
+
+            // 컨테이너가 없으면 생성
+            let container = document.getElementById('toast_container');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'toast_container';
+                container.className = 'toast-container position-fixed top-0 end-0 p-3';
+                container.style.zIndex = '1080';
+                document.body.appendChild(container);
+            }
+
+            const toastEl = document.createElement('div');
+            toastEl.className = `toast align-items-center text-white ${toastClass} border-0`;
+            toastEl.setAttribute('role', 'alert');
+            toastEl.setAttribute('aria-live', 'assertive');
+            toastEl.setAttribute('aria-atomic', 'true');
+            toastEl.innerHTML = `
+                <div class="d-flex">
+                    <div class="toast-body">${safeMessage}</div>
+                    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+                </div>
+            `;
+            container.appendChild(toastEl);
+
+            if (window.bootstrap && typeof window.bootstrap.Toast === 'function') {
+                const toast = new bootstrap.Toast(toastEl, { delay: 3500 });
+                toast.show();
+                toastEl.addEventListener('hidden.bs.toast', function() {
+                    toastEl.remove();
+                });
+            } else {
+                // Bootstrap이 없으면 최소 동작 보장
+                console.warn('Bootstrap Toast를 사용할 수 없어 alert로 대체합니다.');
+                alert(safeMessage);
+                toastEl.remove();
+            }
+        } catch (e) {
+            console.error('showToast 실패:', e);
+        }
+    }
     
     // 초기화
-    initializeApp();
+    // 어떤 페이지/환경(예: DataTables CDN 차단, Socket.IO 미로딩 등)에서 일부 기능이 실패하더라도
+    // 전체 스크립트 실행이 중단되어(=이벤트 바인딩이 끊겨) 가중치/버튼이 먹통이 되는 것을 방지합니다.
+    try {
+        initializeApp();
+    } catch (e) {
+        console.error('initializeApp() 실행 중 오류로 초기화를 일부 건너뜁니다:', e);
+        // 초기화 실패해도 아래 바인딩(가중치 모달 등)은 계속 진행되어야 함
+    }
     
     function initializeApp() {
         // 플래그 초기화
@@ -28,6 +92,13 @@ $(document).ready(function() {
     }
     
     function connectWebSocket() {
+        // Socket.IO가 로드되지 않은 환경(광고차단/네트워크/방화벽/CDN 실패 등)에서도
+        // 나머지 UI(가중치 모달/버튼/테이블)가 동작해야 하므로 방어적으로 처리합니다.
+        if (typeof io !== 'function') {
+            console.warn('Socket.IO(io)가 로드되지 않아 WebSocket 연결을 건너뜁니다.');
+            socket = null;
+            return;
+        }
         socket = io({
             timeout: 20000,        // 연결 타임아웃 20초
             pingTimeout: 60000,    // 핑 타임아웃 60초
@@ -1061,7 +1132,7 @@ $(document).ready(function() {
                         <td class="text-end">${trade.total_asset !== null && trade.total_asset !== undefined ? formatCurrency(trade.total_asset) : 'N/A'}</td>
                         <td class="text-end">${trade.final_score !== null && trade.final_score !== undefined ? trade.final_score.toFixed(2) : 'N/A'}</td>
                         <td class="text-end">${trade.ml_pred_proba !== null && trade.ml_pred_proba !== undefined ? (trade.ml_pred_proba * 100).toFixed(2) + '%' : 'N/A'}</td>
-                        <td class="text-end">${trade.lgbm_pred_proba !== null && trade.lgbm_pred_proba !== undefined ? (trade.lgbm_pred_proba * 100).toFixed(2) + '%' : '-'}</td>
+                        <td class="text-end">${trade.lgb_pred_proba !== null && trade.lgb_pred_proba !== undefined ? (trade.lgb_pred_proba * 100).toFixed(2) + '%' : '-'}</td>
                         <td class="text-end">${trade.volatility_score !== null && trade.volatility_score !== undefined ? trade.volatility_score.toFixed(2) : 'N/A'}</td>
                     </tr>
                 `;
@@ -1312,72 +1383,172 @@ $(document).ready(function() {
     window.loadBacktestReport = loadBacktestReport;
 
     // ==============================
-    // 가중치 수정 모달 (공용)
+    // 가중치 수정 모달 (주식추천/백테스트 공용)
     // ==============================
 
-    let weightsModalInstance = null;
-
-    function openWeightsModal() {
-        const modalEl = document.getElementById('weights_modal_backtest');
-        if (!modalEl) {
-            showToast('가중치 모달을 찾을 수 없습니다.', 'warning');
-            return;
+    const WEIGHTS_UI = {
+        index: {
+            modalId: 'weights_modal',
+            mlInput: '#weight_ml',
+            lgbInput: '#weight_lgb',
+            mlBadge: '#weight_ml_value',
+            lgbBadge: '#weight_lgb_value',
+            sumText: '#weights_sum',
+            alertBox: '#weights_sum_alert',
+            alertMessage: '#weights_sum_message',
+            saveBtn: '#save_weights_btn'
+        },
+        backtest: {
+            modalId: 'weights_modal_backtest',
+            mlInput: '#weight_ml_backtest',
+            lgbInput: '#weight_lgb_backtest',
+            mlBadge: '#weight_ml_backtest_value',
+            lgbBadge: '#weight_lgb_backtest_value',
+            sumText: '#weights_sum_backtest',
+            alertBox: '#weights_sum_alert_backtest',
+            alertMessage: '#weights_sum_message_backtest',
+            saveBtn: '#save_weights_btn_backtest'
         }
+    };
 
-        if (!weightsModalInstance) {
-            weightsModalInstance = new bootstrap.Modal(modalEl);
+    function modalExists(modalId) {
+        return !!document.getElementById(modalId);
+    }
+
+    function getActiveWeightsUi() {
+        // backtest 모달이 있으면 우선, 아니면 index
+        if (modalExists(WEIGHTS_UI.backtest.modalId)) return WEIGHTS_UI.backtest;
+        if (modalExists(WEIGHTS_UI.index.modalId)) return WEIGHTS_UI.index;
+        return null;
+    }
+
+    function showWeightsAlert(ui, message) {
+        $(ui.alertBox).show();
+        $(ui.alertMessage).text(message);
+    }
+
+    function hideWeightsAlert(ui) {
+        $(ui.alertBox).hide();
+        $(ui.alertMessage).text('');
+    }
+
+    function updateWeightsSum(ui) {
+        const ml = parseFloat($(ui.mlInput).val()) || 0;
+        const lgb = parseFloat($(ui.lgbInput).val()) || 0;
+        const sum = ml + lgb;
+
+        if ($(ui.mlBadge).length) $(ui.mlBadge).text(ml.toFixed(1) + '%');
+        if ($(ui.lgbBadge).length) $(ui.lgbBadge).text(lgb.toFixed(1) + '%');
+        $(ui.sumText).text(sum.toFixed(1));
+
+        if (Math.abs(sum - 100) > 0.1) {
+            showWeightsAlert(ui, `합계가 100%가 아닙니다 (현재: ${sum.toFixed(1)}%). 저장 시 자동으로 정규화됩니다.`);
+        } else {
+            hideWeightsAlert(ui);
         }
-
-        // UI 초기화
-        hideWeightsAlert();
-        // Load values
-        loadWeightsIntoModal();
-        weightsModalInstance.show();
     }
 
-    function showWeightsAlert(message) {
-        $('#weights_sum_alert_backtest').show();
-        $('#weights_sum_message_backtest').text(message);
+    function loadWeightsIntoModal(ui) {
+        return $.get('/api/weights')
+            .then(function(data) {
+                if (!data || !data.weights) throw new Error('가중치 응답이 올바르지 않습니다.');
+                const weights = data.weights || {};
+                $(ui.mlInput).val(((weights.ml_pred_proba || 0) * 100).toFixed(1));
+                $(ui.lgbInput).val(((weights.lgb_pred_proba || 0) * 100).toFixed(1));
+                updateWeightsSum(ui);
+            })
+            .catch(function(err) {
+                const msg = err?.responseJSON?.error || err?.message || '가중치 로딩에 실패했습니다.';
+                showToast(msg, 'danger');
+            });
     }
 
-    function hideWeightsAlert() {
-        $('#weights_sum_alert_backtest').hide();
-        $('#weights_sum_message_backtest').text('');
-    }
+    function saveWeightsFromModal(ui) {
+        const mlPct = parseFloat($(ui.mlInput).val()) || 0;
+        const lgbPct = parseFloat($(ui.lgbInput).val()) || 0;
 
-    function loadWeightsIntoModal() {
-        return $.get('/api/weights').then(function(data) {
-            if (!data || !data.weights) throw new Error('가중치 응답이 올바르지 않습니다.');
+        // 서버는 합계 정규화(1.0) 하므로 % -> 소수로만 변환해서 보내면 됨
+        const payload = {
+            weights: {
+                ml_pred_proba: mlPct / 100.0,
+                lgb_pred_proba: lgbPct / 100.0
+            }
+        };
 
-            const weights = data.weights || {};
-            
-            // 소수점을 퍼센트로 변환 (0.10 -> 10.0)
-            $('#weight_ml_backtest').val((weights.ml_pred_proba * 100).toFixed(1));
-            $('#weight_lgb_backtest').val((weights.lgb_pred_proba * 100).toFixed(1));
-            
-            updateWeightsSumBacktest();
+        return $.ajax({
+            url: '/api/weights',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify(payload)
+        }).then(function(resp) {
+            if (resp && resp.success) {
+                showToast('가중치가 저장되었습니다.', 'success');
+
+                const modalEl = document.getElementById(ui.modalId);
+                const inst = modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
+                if (inst) inst.hide();
+
+                // 백테스트 페이지면 리포트가 가중치에 영향 받을 수 있으니 재로딩(있을 때만)
+                if (typeof loadBacktestReport === 'function' && $('#backtest_report').length) {
+                    loadBacktestReport();
+                }
+            } else {
+                showToast(resp?.error || '가중치 저장에 실패했습니다.', 'danger');
+            }
+        }).catch(function(xhr) {
+            const msg = xhr?.responseJSON?.error || '가중치 저장에 실패했습니다.';
+            showToast(msg, 'danger');
         });
     }
 
-    function updateWeightsSumBacktest() {
-        const ml = parseFloat($('#weight_ml_backtest').val()) || 0;
-        const lgb = parseFloat($('#weight_lgb_backtest').val()) || 0;
-        const sum = ml + lgb;
+    function bindWeightsModal(ui) {
+        // 모달 열릴 때 서버 값으로 동기화
+        $('#' + ui.modalId).on('show.bs.modal', function() {
+            hideWeightsAlert(ui);
+            loadWeightsIntoModal(ui);
+        });
 
-        // 슬라이더 값 배지 업데이트
-        if ($('#weight_ml_backtest_value').length) $('#weight_ml_backtest_value').text(ml.toFixed(1) + '%');
-        if ($('#weight_lgb_backtest_value').length) $('#weight_lgb_backtest_value').text(lgb.toFixed(1) + '%');
-        
-        $('#weights_sum_backtest').text(sum.toFixed(1));
-        
-        // 합계가 100이 아니면 경고 표시
-        if (Math.abs(sum - 100) > 0.1) {
-            showWeightsAlert(`합계가 100%가 아닙니다 (현재: ${sum.toFixed(1)}%). 저장 시 자동으로 정규화됩니다.`);
-        } else {
-            hideWeightsAlert();
-        }
+        // 슬라이더 변경 시 합계/배지 업데이트
+        $(document).on('input', ui.mlInput + ',' + ui.lgbInput, function() {
+            updateWeightsSum(ui);
+        });
+
+        // 저장 버튼
+        $(document).on('click', ui.saveBtn, function() {
+            saveWeightsFromModal(ui);
+        });
     }
 
-    // 전역으로도 노출 (디버그/재사용)
+    // 모달이 존재하는 페이지만 바인딩
+    if (modalExists(WEIGHTS_UI.index.modalId)) bindWeightsModal(WEIGHTS_UI.index);
+    if (modalExists(WEIGHTS_UI.backtest.modalId)) bindWeightsModal(WEIGHTS_UI.backtest);
+
+    // ✅ 안전장치: data-bs-toggle로 모달을 열 때도 항상 동작하도록 "직접" 이벤트를 하나 더 연결
+    // (어떤 이유로 위임 이벤트가 막혀도 슬라이더/저장이 최소 동작하게 함)
+    $('#weight_ml, #weight_lgb').on('input', function() {
+        updateWeightsSum(WEIGHTS_UI.index);
+    });
+    $('#weight_ml_backtest, #weight_lgb_backtest').on('input', function() {
+        updateWeightsSum(WEIGHTS_UI.backtest);
+    });
+    $('#save_weights_btn').on('click', function() {
+        saveWeightsFromModal(WEIGHTS_UI.index);
+    });
+    $('#save_weights_btn_backtest').on('click', function() {
+        saveWeightsFromModal(WEIGHTS_UI.backtest);
+    });
+
+    // (호환) btn-edit-weights 클릭 시 현재 페이지에 맞는 모달을 열어줌
+    function openWeightsModal() {
+        const ui = getActiveWeightsUi();
+        if (!ui) {
+            showToast('가중치 모달을 찾을 수 없습니다.', 'warning');
+            return;
+        }
+        const modalEl = document.getElementById(ui.modalId);
+        const inst = modalEl ? new bootstrap.Modal(modalEl) : null;
+        if (inst) inst.show();
+    }
+
     window.openWeightsModal = openWeightsModal;
 });

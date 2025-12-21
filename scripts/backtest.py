@@ -501,7 +501,8 @@ def create_json_report(results, output_path=None):
                 'cumulative_profit': float(row['cumulative_profit']) if 'cumulative_profit' in row and pd.notna(row['cumulative_profit']) else None,
                 'final_score': float(row['final_score']) if 'final_score' in row and pd.notna(row['final_score']) else None,
                 'ml_pred_proba': float(row['ml_pred_proba']) if 'ml_pred_proba' in row and pd.notna(row['ml_pred_proba']) else None,
-                'lgbm_pred_proba': float(row['lgbm_pred_proba']) if 'lgbm_pred_proba' in row and pd.notna(row['lgbm_pred_proba']) else None,
+                # 현재 프로젝트 표준 키: lgb_pred_proba (flask/api/weights 및 test_data 컬럼명과 정합)
+                'lgb_pred_proba': float(row['lgb_pred_proba']) if 'lgb_pred_proba' in row and pd.notna(row['lgb_pred_proba']) else None,
                 'volatility_score': float(row['volatility_score']) if 'volatility_score' in row and pd.notna(row['volatility_score']) else None
             }
             trade_log_records.append(record)
