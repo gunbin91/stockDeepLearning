@@ -39,18 +39,5 @@ pip install 'transformers[torch]' sentencepiece
 # Flask 앱 실행
 echo "AI 주식 분석 플랫폼 (Flask)을 시작합니다..."
 echo "사용 가능한 포트를 자동으로 찾아서 실행합니다..."
-echo ""
-echo "디버그 모드를 사용하시겠습니까? (개발 시 유용)"
-echo "y: 디버그 모드 ON (코드 변경 시 자동 재시작, 상세 오류 정보)"
-echo "n: 일반 모드 (안정적이고 빠름)"
-echo ""
-printf "디버그 모드를 사용하시겠습니까? (y/n): "
-read debug_choice
-
-if [[ $debug_choice == "y" || $debug_choice == "Y" ]]; then
-    echo "🔧 디버그 모드로 실행합니다..."
-    python flask_app.py --debug
-else
-    echo "🚀 일반 모드로 실행합니다..."
-    python flask_app.py
-fi
+echo "🚀 일반 모드로 실행합니다..."
+python flask_app.py

@@ -545,9 +545,9 @@ def model_analysis():
 @app.route('/backtest')
 def backtest():
     """백테스팅 페이지"""
-    # 기존 백테스팅 리포트가 있는지 확인
-    report_path = os.path.join(os.path.dirname(__file__), 'backtest_report.html')
-    has_report = os.path.exists(report_path)
+    # 기존 백테스팅 리포트가 있는지 확인 (JSON만)
+    json_report_path = str(path_manager.data_dir / 'backtest_report.json')
+    has_report = os.path.exists(json_report_path)
     
     return render_template('backtest.html', has_report=has_report)
 
@@ -970,14 +970,21 @@ def get_stock_features(ticker_code):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/static/backtest_report.html')
-def serve_backtest_report():
-    """백테스팅 리포트 정적 파일 서빙"""
-    report_path = os.path.join(os.path.dirname(__file__), 'backtest_report.html')
-    if os.path.exists(report_path):
-        return send_from_directory(os.path.dirname(report_path), 'backtest_report.html')
+@app.route('/api/backtest_report')
+def get_backtest_report():
+    """백테스팅 리포트 JSON 데이터 제공"""
+    json_report_path = str(path_manager.data_dir / 'backtest_report.json')
+    
+    if os.path.exists(json_report_path):
+        try:
+            with open(json_report_path, 'r', encoding='utf-8') as f:
+                report_data = json.load(f)
+            return jsonify(report_data)
+        except Exception as e:
+            log_error(f"백테스팅 리포트 로드 실패: {e}")
+            return jsonify({'error': '리포트를 로드할 수 없습니다.'}), 500
     else:
-        return "백테스팅 리포트를 찾을 수 없습니다.", 404
+        return jsonify({'error': '백테스팅 리포트를 찾을 수 없습니다.'}), 404
 
 @app.route('/favicon.ico')
 def favicon():

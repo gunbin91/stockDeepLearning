@@ -71,6 +71,7 @@ WEIGHTS_FILE = str(path_manager.get_weights_path())
 MODEL_FILE = str(path_manager.get_model_path())
 REPORT_FILE = str(path_manager.get_backtest_report_path())
 TOP_N_STOCKS = 5
+JSON_REPORT_FILE = str(path_manager.data_dir / 'backtest_report.json')
 
 def _apply_model_prediction_to_backtest_df(
     df: pd.DataFrame,
@@ -239,7 +240,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                             cash += sell_value
                             
                             log_entry = {
-                                'type': 'sell', 'sell_date': date, 'ticker': ticker, 
+                                'type': 'sell', 'trade_date': date, 'sell_date': date, 'ticker': ticker, 
                                 'sell_price': current_price, 'actual_sell_price': actual_sell_price, 'return': (actual_sell_price / stock_info['actual_buy_price']) - 1,
                                 'buy_date': stock_info['buy_date'], 'buy_price': stock_info['buy_price'], # 수수료 적용 전 가격
                                 'actual_buy_price': stock_info['actual_buy_price'], # 수수료 적용 후 가격
@@ -414,149 +415,142 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             "initial_capital": initial_capital, "final_asset": final_asset}
 
 
-def create_html_report(results, output_path=REPORT_FILE):
+def create_json_report(results, output_path=None):
+    """JSON 리포트 생성 함수"""
+    if output_path is None:
+        output_path = str(path_manager.data_dir / 'backtest_report.json')
+    
     if results["portfolio_history"].empty:
         print("백테스트 결과가 없어 리포트를 생성할 수 없습니다.")
         return
 
-    kospi = fdr.DataReader('KS11', start=results["portfolio_history"].index.min(), end=results["portfolio_history"].index.max())
-    portfolio_cumulative = (1 + results["portfolio_history"].pct_change().fillna(0)).cumprod()
-    kospi_cumulative = (1 + kospi['Close'].pct_change().fillna(0)).cumprod()
+    # 포트폴리오 히스토리: 실제 총자산 값(원 단위) 저장
+    portfolio_dates = [d.strftime('%Y-%m-%d') for d in results["portfolio_history"].index]
+    portfolio_values = [float(v) for v in results["portfolio_history"].values]
+    
+    # KOSPI 데이터 가져오기 (비교용 누적 수익률)
+    try:
+        kospi = fdr.DataReader('KS11', start=results["portfolio_history"].index.min(), end=results["portfolio_history"].index.max())
+        kospi_cumulative = (1 + kospi['Close'].pct_change().fillna(0)).cumprod()
+        
+        # KOSPI 초기값 기준으로 정규화 (포트폴리오와 비교 가능하도록)
+        initial_capital = float(results.get('initial_capital', 0))
+        kospi_values = [float(v * initial_capital) for v in kospi_cumulative.values]
+        kospi_dates = [d.strftime('%Y-%m-%d') for d in kospi_cumulative.index]
+    except Exception as e:
+        log_warning(f"KOSPI 데이터 로딩 실패: {e}")
+        kospi_dates = []
+        kospi_values = []
+    
+    # 거래 로그 처리
+    trade_log_all = results['trade_log'].copy()
+    trade_log_records = []
+    
+    if not trade_log_all.empty:
+        # trade_date 컬럼 보정 (없을 경우 sell_date 사용)
+        if 'trade_date' not in trade_log_all.columns and 'sell_date' in trade_log_all.columns:
+            trade_log_all['trade_date'] = trade_log_all['sell_date']
 
-    sell_log = results['trade_log'].copy()
-    if not sell_log.empty:
         # 백테스팅용 주식 목록 (캐시 없이 최신 데이터 사용)
         stock_list = data_processor.fetch_stock_list()
-        sell_log = pd.merge(sell_log, stock_list, left_on='ticker', right_on='종목코드', how='left')
-        
-        sell_log['holding_period'] = (sell_log['sell_date'] - sell_log['buy_date']).dt.days
-        
-        sell_log['buy_date_str'] = sell_log['buy_date'].dt.strftime('%Y-%m-%d')
-        sell_log['sell_date_str'] = sell_log['sell_date'].dt.strftime('%Y-%m-%d')
-        sell_log['buy_price'] = sell_log['buy_price'].apply(lambda x: f"{x:,.0f}원")
-        sell_log['sell_price'] = sell_log['sell_price'].apply(lambda x: f"{x:,.0f}원")
-        sell_log['return_str'] = sell_log['return'].apply(lambda x: f"{x:+.2%}")
-        
-        sell_log['buy_amount_str'] = sell_log['buy_amount'].apply(lambda x: f"{x:,.0f}원")
-        sell_log['profit_str'] = sell_log['profit'].apply(lambda x: f"{x:,.0f}원")
-        sell_log['total_asset_str'] = sell_log['total_asset'].apply(lambda x: f"{x:,.0f}원")
-
-        if 'buy_market_cap' in sell_log.columns:
-            sell_log['buy_market_cap_str'] = (sell_log['buy_market_cap'] / 1_0000_0000).apply(lambda x: f"{x:,.0f}억" if pd.notna(x) else 'N/A')
+        if stock_list is not None and not stock_list.empty:
+            trade_log_all = pd.merge(trade_log_all, stock_list, left_on='ticker', right_on='종목코드', how='left')
         else:
-            sell_log['buy_market_cap_str'] = 'N/A'
-
-        if 'ml_pred_proba' in sell_log.columns:
-            sell_log['ml_pred_proba'] = (sell_log['ml_pred_proba'] * 100).round(2)
-        if 'lgb_pred_proba' in sell_log.columns:
-            sell_log['lgb_pred_proba'] = (sell_log['lgb_pred_proba'] * 100).round(2)
-        score_cols = ['final_score', 'ml_pred_proba', 'lgb_pred_proba']
-        for col in score_cols:
-            if col in sell_log.columns:
-                sell_log[col] = sell_log[col].round(2)
+            # 주식 목록 수집 실패 시 종목명 컬럼만 추가 (NaN으로)
+            log_warning("주식 목록 수집 실패: 종목명 없이 리포트 생성 (종목코드만 표시)")
+            if '종목명' not in trade_log_all.columns:
+                trade_log_all['종목명'] = None
         
-        profit_numeric = results['trade_log']['profit']
-        profit_colors = ['rgba(255, 220, 220, 0.7)' if p > 0 else 'rgba(220, 220, 255, 0.7)' if p < 0 else 'white' for p in profit_numeric]
-        return_colors = ['rgba(255, 220, 220, 0.7)' if r > 0 else 'rgba(220, 220, 255, 0.7)' if r < 0 else 'white' for r in results['trade_log']['return']]
+        # 날짜순 정렬
+        if 'trade_date' in trade_log_all.columns:
+            trade_log_all = trade_log_all.sort_values('trade_date').reset_index(drop=True)
         
-        rename_map = {
-            'buy_date_str': '매수일', 'sell_date_str': '매도일', 'holding_period': '보유기간',
-            '종목명': '종목명', 'buy_market_cap_str': '매수시점 시총',
-            'buy_price': '매수가', 'sell_price': '매도가', 'buy_amount_str': '매수금액', 'profit_str': '실현손익',
-            'return_str': '수익률', 'total_asset_str': '총자산', 'final_score': '최종점수',
-            'ml_pred_proba': '상승확률(RF)', 'lgb_pred_proba': '상승확률(LGB)'
-        }
-        display_columns = list(rename_map.keys())
-        sell_log = sell_log[[col for col in display_columns if col in sell_log.columns]].rename(columns=rename_map)
+        # 누적 실현손익 계산
+        cumulative_profit = 0.0
+        if 'profit' in trade_log_all.columns:
+            # 매도 거래만 누적 실현손익 계산
+            trade_log_all['cumulative_profit'] = 0.0
+            for idx, row in trade_log_all.iterrows():
+                if row['type'] == 'sell' and pd.notna(row.get('profit')):
+                    cumulative_profit += row['profit']
+                    trade_log_all.at[idx, 'cumulative_profit'] = cumulative_profit
+                else:
+                    # 매수 거래는 이전 누적값 유지
+                    trade_log_all.at[idx, 'cumulative_profit'] = cumulative_profit
+        
+        # 거래 로그를 레코드로 변환
+        for _, row in trade_log_all.iterrows():
+            record = {
+                'type': row['type'],
+                'trade_date': row['trade_date'].strftime('%Y-%m-%d') if pd.notna(row['trade_date']) else None,
+                'ticker': row['ticker'],
+                'stock_name': row.get('종목명', 'N/A'),
+                'buy_date': row['buy_date'].strftime('%Y-%m-%d') if pd.notna(row['buy_date']) else None,
+                'sell_date': row['sell_date'].strftime('%Y-%m-%d') if pd.notna(row['sell_date']) and 'sell_date' in row else None,
+                'holding_period': int((row['sell_date'] - row['buy_date']).days) if 'sell_date' in row and pd.notna(row['sell_date']) and pd.notna(row['buy_date']) else None,
+                'buy_price': float(row['buy_price']) if pd.notna(row['buy_price']) else None,
+                'actual_buy_price': float(row['actual_buy_price']) if pd.notna(row['actual_buy_price']) else None,
+                'sell_price': float(row['sell_price']) if 'sell_price' in row and pd.notna(row['sell_price']) else None,
+                'actual_sell_price': float(row['actual_sell_price']) if 'actual_sell_price' in row and pd.notna(row['actual_sell_price']) else None,
+                'shares': int(row['shares']) if 'shares' in row and pd.notna(row['shares']) else None,
+                'buy_amount': float(row['buy_amount']) if pd.notna(row['buy_amount']) else None,
+                'profit': float(row['profit']) if 'profit' in row and pd.notna(row['profit']) else None,
+                'return': float(row['return']) if 'return' in row and pd.notna(row['return']) else None,
+                'buy_market_cap': float(row['buy_market_cap']) if 'buy_market_cap' in row and pd.notna(row['buy_market_cap']) else None,
+                'total_asset': float(row['total_asset']) if 'total_asset' in row and pd.notna(row['total_asset']) else None,
+                'cumulative_profit': float(row['cumulative_profit']) if 'cumulative_profit' in row and pd.notna(row['cumulative_profit']) else None,
+                'final_score': float(row['final_score']) if 'final_score' in row and pd.notna(row['final_score']) else None,
+                'ml_pred_proba': float(row['ml_pred_proba']) if 'ml_pred_proba' in row and pd.notna(row['ml_pred_proba']) else None,
+                'lgbm_pred_proba': float(row['lgbm_pred_proba']) if 'lgbm_pred_proba' in row and pd.notna(row['lgbm_pred_proba']) else None,
+                'volatility_score': float(row['volatility_score']) if 'volatility_score' in row and pd.notna(row['volatility_score']) else None
+            }
+            trade_log_records.append(record)
     
-    fig = make_subplots(
-        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.1,
-        row_heights=[0.45, 0.2, 0.35],
-        specs=[[{"type": "scatter"}], [{"type": "table"}], [{"type": "table"}]]
-    )
-
-    fig.add_trace(go.Scatter(x=portfolio_cumulative.index, y=portfolio_cumulative, name='포트폴리오', line=dict(color='royalblue', width=2)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=kospi_cumulative.index, y=kospi_cumulative, name='KOSPI', line=dict(color='grey', width=1, dash='dash')), row=1, col=1)
-
-    metrics_data = {
-        '지표': [
-            '초기 자본', '최종 자산', '총수익률', '연환산 수익률',
-            '최대 낙폭 (MDD)', '샤프 지수', '승률', '거래 수수료율',
-            '증권거래세율', '최대 보유 기간', '익절 목표 (%)', '손절 라인 (%)',
-            '매수 종목 수 (N)', '매수 대상 범위'
-        ],
-        '값': [
-            f"{results.get('initial_capital', 0):,.0f}원",
-            f"{results.get('final_asset', 0):,.0f}원",
-            f"{results['total_return']:.2%}", 
-            f"{results['annual_return']:.2%}", 
-            f"{results['mdd']:.2%}", 
-            f"{results['sharpe_ratio']:.2f}", 
-            f"{results.get('win_rate', 0.0):.2%}",
-            f"{results.get('transaction_fee_rate', 0.0):.3f}%",
-            f"{results.get('securities_transaction_tax_rate', 0.0):.2f}%",
-            f"{results.get('max_hold_period', 0)}일",
-            f"{results.get('take_profit_pct', 0.0):.2f}%",
-            f"{results.get('stop_loss_pct', 0.0):.2f}%",
-            f"{results.get('top_n', 0)}개",
-            f"{results.get('buy_universe_rank', 0)}위"
-        ]
+    # 리포트 데이터 구성
+    report_data = {
+        'metadata': {
+            'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'test_period': {
+                'start_date': results["portfolio_history"].index.min().strftime('%Y-%m-%d'),
+                'end_date': results["portfolio_history"].index.max().strftime('%Y-%m-%d'),
+                'total_days': len(results["portfolio_history"])
+            }
+        },
+        'performance_metrics': {
+            'initial_capital': float(results.get('initial_capital', 0)),
+            'final_asset': float(results.get('final_asset', 0)),
+            'total_return': float(results.get('total_return', 0)),
+            'annual_return': float(results.get('annual_return', 0)),
+            'sharpe_ratio': float(results.get('sharpe_ratio', 0)),
+            'mdd': float(results.get('mdd', 0)),
+            'win_rate': float(results.get('win_rate', 0))
+        },
+        'strategy_parameters': {
+            'transaction_fee_rate': float(results.get('transaction_fee_rate', 0)),
+            'securities_transaction_tax_rate': float(results.get('securities_transaction_tax_rate', SECURITIES_TRANSACTION_TAX_RATE)),
+            'max_hold_period': int(results.get('max_hold_period', 0)),
+            'take_profit_pct': float(results.get('take_profit_pct', 0)),
+            'stop_loss_pct': float(results.get('stop_loss_pct', 0)),
+            'top_n': int(results.get('top_n', 0)),
+            'buy_universe_rank': int(results.get('buy_universe_rank', 0))
+        },
+        'portfolio_history': {
+            'dates': portfolio_dates,
+            'values': portfolio_values
+        },
+        'kospi_history': {
+            'dates': kospi_dates,
+            'values': kospi_values
+        },
+        'trade_log': trade_log_records
     }
-    metrics_df_temp = pd.DataFrame(metrics_data)
-
-    # 2열씩 묶어서 4열 DataFrame 생성
-    metrics_df = pd.DataFrame({
-        '지표': metrics_df_temp['지표'].iloc[::2].reset_index(drop=True),
-        '값': metrics_df_temp['값'].iloc[::2].reset_index(drop=True),
-        '지표 ': metrics_df_temp['지표'].iloc[1::2].reset_index(drop=True),
-        '값 ': metrics_df_temp['값'].iloc[1::2].reset_index(drop=True)
-    })
-
-    fig.add_trace(go.Table(
-        header=dict(values=list(metrics_df.columns), fill_color='paleturquoise', align='left', font=dict(size=14)),
-        cells=dict(values=[metrics_df['지표'], metrics_df['값'], metrics_df['지표 '], metrics_df['값 ']], fill_color='lavender', align=['left', 'right', 'left', 'right'], font=dict(size=14))
-    ), row=2, col=1)
     
-    if not sell_log.empty:
-        col_widths = [1.5, 1.5, 0.8, 1.8, 1.2, 1.2, 1.2, 1.5, 1.2, 1, 1.5, 1, 1, 0.8, 0.8, 0.8, 0.8, 0.8]
-        final_columns = list(sell_log.columns)
-        col_widths = col_widths[:len(final_columns)]
-
-        cell_colors = []
-        for col_name in final_columns:
-            if col_name == '실현손익':
-                cell_colors.append(profit_colors)
-            elif col_name == '수익률':
-                cell_colors.append(return_colors)
-            else:
-                cell_colors.append(['white'] * len(sell_log))
-
-        fig.add_trace(go.Table(
-            header=dict(values=final_columns, fill_color='lightskyblue', align='left', font=dict(size=12)),
-            columnwidth=col_widths,
-            cells=dict(
-                values=[sell_log[k].tolist() for k in final_columns],
-                fill_color=cell_colors,
-                align=['left', 'left', 'center', 'left'] + ['right'] * (len(final_columns) - 4),
-                font=dict(size=11),
-                height=25
-            )
-        ), row=3, col=1)
-
-    fig.update_layout(
-        title_text='<b>백테스팅 성과 분석 리포트</b>', height=1600, showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        margin=dict(l=50, r=50, t=100, b=50)
-    )
-    fig.update_yaxes(title_text='누적 수익률', row=1, col=1)
-    
-    fig.add_annotation(text="<b>주요 성과 지표</b>", xref="paper", yref="paper", x=0.0, y=0.54, showarrow=False, font=dict(size=16))
-    if not sell_log.empty:
-        fig.add_annotation(text="<b>상세 매매 기록 (매도 완료 기준)</b>", xref="paper", yref="paper", x=0.0, y=0.34, showarrow=False, font=dict(size=16))
-    
-    html_content = fig.to_html(full_html=False, include_plotlyjs='cdn')
+    # JSON 파일로 저장
     with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(html_content)
+        json.dump(report_data, f, ensure_ascii=False, indent=2)
+    
+    log_info(f"JSON 리포트 생성 완료: {output_path}")
+    return report_data
 
 def run_final_backtest(
     initial_capital,
@@ -817,20 +811,22 @@ def run_final_backtest(
             })
             raise
         
-        # HTML 리포트 생성 (강화된 에러 처리)
+        # JSON 리포트 생성 (강화된 에러 처리)
         try:
-            log_info("\n4. HTML 리포트 생성 중...")
-            log_info("HTML 리포트 생성 시작", context={"report_file": REPORT_FILE})
+            log_info("\n4. JSON 리포트 생성 중...")
+            json_report_path = str(path_manager.data_dir / 'backtest_report.json')
+            log_info("JSON 리포트 생성 시작", context={"report_file": json_report_path})
             
-            create_html_report(backtest_results, output_path=REPORT_FILE)
+            create_json_report(backtest_results, output_path=json_report_path)
             
-            log_info("HTML 리포트 생성 완료", context={"report_file": REPORT_FILE})
-            log_info(f"\n✅ 백테스팅 완료. `{REPORT_FILE}` 파일이 생성되었습니다.")
+            log_info("JSON 리포트 생성 완료", context={"report_file": json_report_path})
             
         except Exception as e:
-            log_critical("HTML 리포트 생성 실패", exception=e, context={"report_file": REPORT_FILE})
+            log_critical("JSON 리포트 생성 실패", exception=e, context={"report_file": json_report_path if 'json_report_path' in locals() else "Unknown"})
             # 리포트 생성 실패해도 백테스팅 결과는 반환
-            log_info(f"\n⚠️ 백테스팅은 완료되었지만 리포트 생성에 실패했습니다: {e}")
+            log_warning(f"\n⚠️ JSON 리포트 생성에 실패했습니다: {e}")
+        
+        log_info(f"\n✅ 백테스팅 완료. JSON 리포트 파일이 생성되었습니다.")
         
         # 로거 종료
         try:
