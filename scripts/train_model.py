@@ -677,6 +677,10 @@ def create_training_data(years=None):
         return default
 
     features = get_training_features()
+    # 추가 피처(로컬 확장): 제외 조건에서 사용한 MA5 각도를 학습 피처로도 포함
+    # - gpuStock 자동 동기화 리스트는 유지하되, 로컬 프로젝트에서만 덧붙입니다.
+    if 'MA5_Angle_Deg' not in features:
+        features = features + ['MA5_Angle_Deg']
     target = 'target'
 
     # ======================================================================
@@ -685,11 +689,17 @@ def create_training_data(years=None):
     #   메타파일로 변경을 감지해 자동 재생성합니다.
     # ======================================================================
     TARGET_SPEC = {
-        "name": "10d_drawdown_floor_-5pct_and_any_hit_+8pct",
+        "name": "10d_drawdown_floor_-5pct_and_any_hit_+8pct__exclude_bearish_alignment_and_low_ma5_angle",
         "horizon_trading_days": 10,
         "min_ratio_floor": 0.95,  # future_min / now >= 0.95
         "max_ratio_hit": 1.08,    # future_max / now >= 1.08
         "notes": "향후 10거래일 동안 -5% 이상 하락 없이, +8% 이상 상승 1회라도",
+        "exclude_rule": {
+            "type": "drop_samples_by_setting_target_nan",
+            "bearish_alignment": "MA240 > MA120 > MA5",
+            "ma5_angle_definition": "angle_deg = atan(((MA5_t - MA5_{t-1}) / MA5_{t-1})) * 180/pi",
+            "ma5_angle_deg_threshold_inclusive": 10,
+        },
     }
     training_meta_path = training_data_path.with_suffix('.meta.json')
     
@@ -841,8 +851,10 @@ def create_training_data(years=None):
         log_error("❌ 심각한 오류: 'date' 컬럼이 데이터에 없습니다. 날짜 기반 분할을 수행할 수 없습니다.")
         return None, None, None, None, None
             
+    before_dropna = len(final_df)
     final_df.dropna(subset=[target], inplace=True)
-    log_info(f"3. 타겟 변수 결측치 제거 후: {len(final_df):,} 행")
+    removed = before_dropna - len(final_df)
+    log_info(f"3. 타겟 변수 결측치 제거 후: {len(final_df):,} 행 (제거: {removed:,} 행)")
     log_memory_usage("결측치 제거 완료")
 
     if final_df.empty:

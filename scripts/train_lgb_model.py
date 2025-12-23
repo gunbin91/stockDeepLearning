@@ -796,6 +796,7 @@ def main():
         'KOSPI_disparity_20',
         'Trend_Pullback_Score',
         'Position_Range_60',
+        'MA5_Angle_Deg',
         'MA20_Slope',
         'MA120_Slope',
         'MA240_Slope',

@@ -896,6 +896,39 @@ def merge_and_calculate_features(args):
                 df['target'] = np.where(valid_mask, cond.astype(int), np.nan)
             except Exception:
                 df['target'] = np.nan
+
+        # =================================================================
+        # 학습 타겟 제외 규칙 (사용자 요청)
+        # - 역배열: MA240 > MA120 > MA5
+        # - 그리고 MA5 당일 기울기(정의 A, 전일 대비 %변화 각도) <= 10도
+        # => 위 조건을 모두 만족하는 샘플은 학습 대상에서 제외(drop)하기 위해 target을 NaN 처리합니다.
+        #
+        # 정의 A:
+        #   ma5 = SMA(5)
+        #   delta = (ma5_t - ma5_{t-1}) / ma5_{t-1}
+        #   angle_deg = arctan(delta) * 180/pi
+        # =================================================================
+        try:
+            ma5 = df['종가'].rolling(window=5).mean()
+            ma120_lvl = df['종가'].rolling(window=120).mean()
+            ma240_lvl = df['종가'].rolling(window=240).mean()
+
+            ma5_prev = ma5.shift(1)
+            delta = (ma5 - ma5_prev) / ma5_prev.replace(0, np.nan)
+            ma5_angle_deg = np.degrees(np.arctan(delta.astype(float)))
+
+            # 피처로도 사용 가능하도록 컬럼으로 저장
+            df['MA5_Angle_Deg'] = ma5_angle_deg
+
+            # 실시간/백테스팅에서 최종순위 산정 시 제외 플래그 (일자별로 동적 평가)
+            df['Exclude_Rank'] = (ma240_lvl > ma120_lvl) & (ma120_lvl > ma5) & (ma5_angle_deg <= 10)
+
+            exclude_mask = (ma240_lvl > ma120_lvl) & (ma120_lvl > ma5) & (ma5_angle_deg <= 10)
+            if exclude_mask.any():
+                df.loc[exclude_mask, 'target'] = np.nan
+        except Exception:
+            # 제외 규칙 계산 실패 시에도 기존 타겟 로직은 유지
+            pass
         df['종목코드'] = ticker
         
         # 데이터 구조 설정

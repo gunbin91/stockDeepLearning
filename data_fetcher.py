@@ -464,6 +464,35 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             latest_data['MA240_Slope'] = calculate_normalized_linear_regression_slope_latest(ma240, window=5)
         except Exception:
             latest_data['MA240_Slope'] = np.nan
+
+        # 추가 피처: MA5_Angle_Deg (정의 A: MA5 전일 대비 %변화 각도)
+        # - 학습 제외조건에서 사용한 값과 동일 정의로 맞춥니다.
+        try:
+            ma5 = df_for_indicators['종가'].rolling(window=5).mean()
+            if len(ma5) >= 2 and pd.notna(ma5.iloc[-1]) and pd.notna(ma5.iloc[-2]) and ma5.iloc[-2] != 0:
+                delta = float((ma5.iloc[-1] - ma5.iloc[-2]) / ma5.iloc[-2])
+                latest_data['MA5_Angle_Deg'] = float(np.degrees(np.arctan(delta)))
+            else:
+                latest_data['MA5_Angle_Deg'] = np.nan
+        except Exception:
+            latest_data['MA5_Angle_Deg'] = np.nan
+
+        # 실시간 분석/웹/랭킹 제외 플래그 (일자별로 동적 평가)
+        # - 역배열: MA240 > MA120 > MA5
+        # - 그리고 MA5_Angle_Deg <= 10
+        try:
+            ma120_lvl = df_for_indicators['종가'].rolling(window=120).mean()
+            ma240_lvl = df_for_indicators['종가'].rolling(window=240).mean()
+            if len(ma120_lvl) and len(ma240_lvl) and len(ma5):
+                latest_data['Exclude_Rank'] = bool(
+                    (ma240_lvl.iloc[-1] > ma120_lvl.iloc[-1])
+                    and (ma120_lvl.iloc[-1] > ma5.iloc[-1])
+                    and (pd.notna(latest_data.get('MA5_Angle_Deg', np.nan)) and latest_data['MA5_Angle_Deg'] <= 10)
+                )
+            else:
+                latest_data['Exclude_Rank'] = False
+        except Exception:
+            latest_data['Exclude_Rank'] = False
         
         bbands = df_for_indicators.ta.bbands(close='종가', length=20, std=2)
         # pandas-ta 버전업에 따른 볼린저밴드 컬럼명 변경 대응
