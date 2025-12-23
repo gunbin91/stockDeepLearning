@@ -1034,6 +1034,31 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         except Exception as e:
             log_warning(f"MA240_Slope 계산 실패 ({ticker}): {e}")
             df['MA240_Slope'] = np.nan
+
+        # =================================================================
+        # 랭킹 제외 규칙 (testStock과 동일)
+        # - 역배열: MA240 > MA120 > MA5
+        # - 그리고 MA5_Angle_Deg <= 10
+        #   MA5_Angle_Deg 정의:
+        #     ma5 = SMA(5)
+        #     delta = (ma5_t - ma5_{t-1}) / ma5_{t-1}
+        #     angle_deg = arctan(delta) * 180/pi
+        # - 주의: 학습 타겟(target)은 여기서 건드리지 않습니다. (요청: 실시간/백테스팅 랭킹 제외만)
+        # =================================================================
+        try:
+            ma5 = df['종가'].rolling(window=5).mean()
+            ma120_lvl = df['종가'].rolling(window=120).mean()
+            ma240_lvl = df['종가'].rolling(window=240).mean()
+
+            ma5_prev = ma5.shift(1)
+            delta = (ma5 - ma5_prev) / ma5_prev.replace(0, np.nan)
+            df['MA5_Angle_Deg'] = np.degrees(np.arctan(delta.astype(float)))
+
+            df['Exclude_Rank'] = (ma240_lvl > ma120_lvl) & (ma120_lvl > ma5) & (df['MA5_Angle_Deg'] <= 10)
+        except Exception:
+            # 계산 실패 시에도 기존 파이프라인은 유지
+            df['MA5_Angle_Deg'] = np.nan
+            df['Exclude_Rank'] = False
         
         # 3. 52주 신고가 비율
         df['52주_최고가'] = df['종가'].rolling(250).max()

@@ -39,6 +39,26 @@ def calculate_final_score(df):
     log_step("앙상블 점수 계산", "START", {"종목수": len(df)})
     final_df = df.copy()
 
+    # =================================================================
+    # 랭킹 제외 규칙 적용 (testStock과 동일 컨셉)
+    # - 실시간 분석/백테스팅에서 "최종순위에 아예 없게" 만들기 위한 공통 처리
+    # - Exclude_Rank는 일자별/시점별로 동적으로 계산되어 들어옵니다.
+    # =================================================================
+    if 'Exclude_Rank' in final_df.columns:
+        try:
+            before = len(final_df)
+            final_df = final_df[~final_df['Exclude_Rank'].fillna(False)].copy()
+            removed = before - len(final_df)
+            if removed > 0:
+                log_info(f"[FILTER] Exclude_Rank 적용: {removed:,}개 종목 제외")
+        except Exception:
+            # 필터링 실패 시에도 점수 계산은 계속 진행
+            pass
+
+    if final_df.empty:
+        log_warning("[WARN] Exclude_Rank 적용 후 데이터가 비어있어 앙상블 점수 계산을 건너뜁니다.")
+        return final_df
+
     # 기본 가중치 설정 (최적화된 가중치 파일이 없을 경우 사용)
     factor_weights = {
         'volatility_score': 0.10,    # 변동성 점수 10%

@@ -513,6 +513,46 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             log_warning(f"MA240_Slope 계산 실패 ({ticker}): {e}")
             latest_data['MA240_Slope'] = np.nan
 
+        # =================================================================
+        # 랭킹 제외 규칙 (testStock과 동일)
+        # - 역배열: MA240 > MA120 > MA5
+        # - 그리고 MA5_Angle_Deg <= 10
+        #   MA5_Angle_Deg 정의:
+        #     ma5 = SMA(5)
+        #     delta = (ma5_t - ma5_{t-1}) / ma5_{t-1}
+        #     angle_deg = arctan(delta) * 180/pi
+        # =================================================================
+        try:
+            ma5_series = df_for_indicators['종가'].rolling(window=5).mean()
+            ma120_lvl = df_for_indicators['종가'].rolling(window=120).mean()
+            ma240_lvl = df_for_indicators['종가'].rolling(window=240).mean()
+
+            # MA5_Angle_Deg (정의 A: MA5 전일 대비 %변화 각도)
+            if len(ma5_series) >= 2 and pd.notna(ma5_series.iloc[-1]) and pd.notna(ma5_series.iloc[-2]) and ma5_series.iloc[-2] != 0:
+                delta = float((ma5_series.iloc[-1] - ma5_series.iloc[-2]) / ma5_series.iloc[-2])
+                latest_data['MA5_Angle_Deg'] = float(np.degrees(np.arctan(delta)))
+            else:
+                latest_data['MA5_Angle_Deg'] = np.nan
+
+            # Exclude_Rank (일자별/시점별 동적 평가)
+            if len(ma120_lvl) and len(ma240_lvl) and len(ma5_series):
+                ma5_last = ma5_series.iloc[-1]
+                ma120_last = ma120_lvl.iloc[-1]
+                ma240_last = ma240_lvl.iloc[-1]
+                angle = latest_data.get('MA5_Angle_Deg', np.nan)
+                latest_data['Exclude_Rank'] = bool(
+                    pd.notna(ma240_last) and pd.notna(ma120_last) and pd.notna(ma5_last)
+                    and (ma240_last > ma120_last)
+                    and (ma120_last > ma5_last)
+                    and (pd.notna(angle) and angle <= 10)
+                )
+            else:
+                latest_data['Exclude_Rank'] = False
+        except Exception:
+            # 계산 실패 시에도 파이프라인은 계속 진행 (제외는 적용하지 않음)
+            latest_data['MA5_Angle_Deg'] = latest_data.get('MA5_Angle_Deg', np.nan)
+            latest_data['Exclude_Rank'] = False
+
         latest_data['52주_신고가_비율'] = (df_for_indicators['종가'] / df_for_indicators['종가'].rolling(250).max()).iloc[-1]
         
         # Relative_Strength_20, RVOL 피처는 제거됨
