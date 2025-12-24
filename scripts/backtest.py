@@ -93,23 +93,37 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                 log_progress("일별 최종 점수 계산", i + 1, total_dates)
             try:
                 daily_data_copy = daily_data.copy()
-                
+
+                # 가중치 기반 스킵: LGBM 가중치가 0이면 예측을 수행하지 않음 (호환성: 컬럼은 NaN으로 유지)
+                lgbm_weight = 0.0
+                try:
+                    if isinstance(weights, dict):
+                        if 'lgbm_pred_proba' in weights:
+                            lgbm_weight = float(weights.get('lgbm_pred_proba', 0.0))
+                        elif 'lgb_pred_proba' in weights:
+                            lgbm_weight = float(weights.get('lgb_pred_proba', 0.0))
+                except Exception:
+                    lgbm_weight = 0.0
+
                 # LGBM 예측 추가 (lgbm_pred_proba 컬럼이 없는 경우)
                 if 'lgbm_pred_proba' not in daily_data_copy.columns:
-                    try:
-                        lgbm_predicted_df = ml_model.predict_with_lgbm_model(daily_data_copy)
-                        if not lgbm_predicted_df.empty and 'lgbm_pred_proba' in lgbm_predicted_df.columns:
-                            # LGBM 예측 결과 병합
-                            daily_data_copy = pd.merge(
-                                daily_data_copy, 
-                                lgbm_predicted_df[['종목코드', 'lgbm_pred_proba']], 
-                                on='종목코드', 
-                                how='left'
-                            )
-                    except Exception as e:
-                        # LGBM 예측 실패 시 경고만 출력하고 계속 진행
-                        log_warning(f"   ⚠️ [LGBM] 예측 실패 (날짜: {date}): {e}")
-                        # lgbm_pred_proba 컬럼을 NaN으로 추가
+                    if lgbm_weight > 0:
+                        try:
+                            lgbm_predicted_df = ml_model.predict_with_lgbm_model(daily_data_copy)
+                            if not lgbm_predicted_df.empty and 'lgbm_pred_proba' in lgbm_predicted_df.columns:
+                                # LGBM 예측 결과 병합
+                                daily_data_copy = pd.merge(
+                                    daily_data_copy,
+                                    lgbm_predicted_df[['종목코드', 'lgbm_pred_proba']],
+                                    on='종목코드',
+                                    how='left'
+                                )
+                        except Exception as e:
+                            # LGBM 예측 실패 시 경고만 출력하고 계속 진행
+                            log_warning(f"   ⚠️ [LGBM] 예측 실패 (날짜: {date}): {e}")
+                            daily_data_copy['lgbm_pred_proba'] = np.nan
+                    else:
+                        # 스킵 시에도 컬럼은 유지
                         daily_data_copy['lgbm_pred_proba'] = np.nan
                 
                 temp_df = ensemble.calculate_final_score(daily_data_copy)
@@ -692,6 +706,31 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         except Exception as e:
             log_critical("가중치 파일 로딩 실패", exception=e, context={"weights_file": WEIGHTS_FILE})
             raise
+
+        # 가중치 기반 스킵 플래그
+        def _w(key: str, default: float = 0.0) -> float:
+            try:
+                if isinstance(optimal_weights, dict):
+                    if key in optimal_weights:
+                        return float(optimal_weights.get(key, default))
+                    # 키 호환
+                    if key == 'lgbm_pred_proba' and 'lgb_pred_proba' in optimal_weights:
+                        return float(optimal_weights.get('lgb_pred_proba', default))
+            except Exception:
+                pass
+            return float(default)
+
+        do_rf = _w('ml_pred_proba', 0.5) > 0
+        do_lgbm = _w('lgbm_pred_proba', 0.5) > 0
+        do_volatility = _w('volatility_score', 0.10) > 0
+        log_info("⚙️ 가중치 기반 계산 스킵 설정", context={
+            "volatility_score": _w('volatility_score', 0.10),
+            "ml_pred_proba": _w('ml_pred_proba', 0.5),
+            "lgbm_pred_proba": _w('lgbm_pred_proba', 0.5),
+            "do_volatility": do_volatility,
+            "do_rf": do_rf,
+            "do_lgbm": do_lgbm
+        })
         
         # 데이터 로딩 (강화된 에러 처리)
         # Warmup 기간 400일 유지
@@ -707,7 +746,12 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             log_info(f"   📅 테스트 기간: {start_date} ~ {end_date}")
             log_info(f"   📅 데이터 수집 기간: {backtest_start_date_with_warmup} ~ {end_date} (Warmup 400일 포함)")
             
-            test_data = data_processor.get_preprocessed_data(backtest_start_date_with_warmup, end_date)
+            # volatility_score 가중치가 0이면, 일별 팩터 점수 계산(현재는 변동성 점수) 자체를 스킵
+            test_data = data_processor.get_preprocessed_data(
+                backtest_start_date_with_warmup,
+                end_date,
+                skip_factor_scores=(not do_volatility)
+            )
             
             # 즉시 빈 데이터 검증 (초기 수집/병합 실패 조기 발견)
             if test_data is None or test_data.empty:
@@ -828,13 +872,17 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             log_critical("ML 모델 로딩 실패", exception=e, context={"model_file": model_file_path if 'model_file_path' in locals() else "Unknown"})
             raise
         
-        # ML 예측 적용 (강화된 에러 처리)
+        # ML 예측 적용 (강화된 에러 처리) - 가중치 0이면 스킵
         try:
-            print("  - 테스트 데이터에 ML 예측 적용 중...")
-            log_info("ML 예측 적용 시작", context={
-                "data_rows": len(test_data),
-                "features": features
-            })
+            if not do_rf:
+                log_info("⏭️ RF(ml_pred_proba) 가중치가 0이라 예측을 건너뜁니다.")
+                test_data['ml_pred_proba'] = np.nan
+            else:
+                print("  - 테스트 데이터에 ML 예측 적용 중...")
+                log_info("ML 예측 적용 시작", context={
+                    "data_rows": len(test_data),
+                    "features": features
+                })
             
             # 모델이 기대하는 피처만 선택 (데이터에 있는 피처만 사용)
             # 중요: 모델이 저장된 피처 순서를 정확히 따라야 함
@@ -1037,10 +1085,10 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                 # 기타 형태는 그대로 사용
                 test_data['ml_pred_proba'] = pred_proba[:, 1] if hasattr(pred_proba, '__getitem__') else pred_proba
             
-            log_info("ML 예측 적용 완료", context={
-                "predictions_count": len(test_data['ml_pred_proba']),
-                "prediction_range": f"{test_data['ml_pred_proba'].min():.3f} ~ {test_data['ml_pred_proba'].max():.3f}"
-            })
+                log_info("ML 예측 적용 완료", context={
+                    "predictions_count": len(test_data['ml_pred_proba']),
+                    "prediction_range": f"{test_data['ml_pred_proba'].min():.3f} ~ {test_data['ml_pred_proba'].max():.3f}"
+                })
             
         except Exception as e:
             log_critical("ML 예측 적용 실패", exception=e, context={
@@ -1048,6 +1096,9 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                 "data_shape": test_data.shape
             })
             raise
+
+        # LGBM은 일자별 최종 점수 계산 단계에서 필요할 때만 붙이도록 run_detailed_backtest에서 처리합니다.
+        # (가중치 0이면 run_detailed_backtest에서 스킵)
     
         # 데이터 전처리 (강화된 에러 처리)
         try:

@@ -1075,6 +1075,23 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         
         # 중간 변수 삭제 (메모리 최적화)
         del min_price_10d, max_price_10d
+
+        # =================================================================
+        # 학습 타겟 제외 규칙 (요청사항 / testStock 동일 컨셉)
+        # - 매수시점 역배열(MA240 > MA120 > MA5) + MA5_Angle_Deg <= 10도(하방)인 샘플은
+        #   학습 데이터에서 제외(drop)하기 위해 target을 NaN 처리합니다.
+        # - 학습 스크립트(train_gpu_main.py / train_lgbm_gpu_main.py)는
+        #   full_df['target'].notna()로 먼저 필터링하므로 정상 동작합니다.
+        # =================================================================
+        try:
+            if 'Exclude_Rank' in df.columns:
+                exclude_mask = df['Exclude_Rank'].fillna(False)
+                if exclude_mask.any():
+                    df.loc[exclude_mask, 'target'] = np.nan
+        except Exception:
+            # 제외 규칙 적용 실패 시에도 기존 target은 유지
+            pass
+
         df['종목코드'] = ticker
         # 종목명 추가 (있는 경우만)
         if stock_name is not None:

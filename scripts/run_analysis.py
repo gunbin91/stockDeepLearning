@@ -58,6 +58,36 @@ from exceptions import DataFetchError, ModelPredictionError, AnalysisError
 
 from path_manager import path_manager
 
+def _load_optimal_weights_safe() -> dict:
+    """
+    가중치 파일을 안전하게 로드합니다.
+    - 파일이 없거나 깨져 있어도 기존 동작(모두 계산)을 유지하기 위해 기본값을 반환합니다.
+    """
+    # 기본값: 기존과 동일하게 모두 계산
+    weights = {
+        "volatility_score": 0.10,
+        "ml_pred_proba": 0.50,
+        "lgbm_pred_proba": 0.50,
+    }
+    try:
+        weights_path = str(path_manager.get_weights_path())
+        if os.path.exists(weights_path):
+            with open(weights_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                # 키 호환: lgb_pred_proba가 있을 수 있음
+                if "volatility_score" in loaded:
+                    weights["volatility_score"] = float(loaded["volatility_score"])
+                if "ml_pred_proba" in loaded:
+                    weights["ml_pred_proba"] = float(loaded["ml_pred_proba"])
+                if "lgbm_pred_proba" in loaded:
+                    weights["lgbm_pred_proba"] = float(loaded["lgbm_pred_proba"])
+                elif "lgb_pred_proba" in loaded:
+                    weights["lgbm_pred_proba"] = float(loaded["lgb_pred_proba"])
+    except Exception as e:
+        log_warning(f"가중치 파일 로드 실패(기본값 사용): {e}")
+    return weights
+
 def run_analysis(analysis_date_str):
     """
     주식 분석 메인 실행 함수
@@ -130,6 +160,20 @@ def run_analysis(analysis_date_str):
             log_error(error_msg)
             raise AnalysisError(error_msg, step="data_processing")
 
+        # 가중치 로드 (가중치 0인 항목은 계산을 스킵)
+        weights = _load_optimal_weights_safe()
+        do_volatility = weights.get("volatility_score", 0) > 0
+        do_rf = weights.get("ml_pred_proba", 0) > 0
+        do_lgbm = weights.get("lgbm_pred_proba", 0) > 0
+        log_info("⚙️ 가중치 기반 계산 스킵 설정", context={
+            "volatility_score": weights.get("volatility_score"),
+            "ml_pred_proba": weights.get("ml_pred_proba"),
+            "lgbm_pred_proba": weights.get("lgbm_pred_proba"),
+            "do_volatility": do_volatility,
+            "do_rf": do_rf,
+            "do_lgbm": do_lgbm
+        })
+
         actual_date_str = actual_analysis_date.strftime('%Y-%m-%d')
         log_info(f"   📅 실제 분석 기준일: {actual_date_str}")
 
@@ -148,24 +192,25 @@ def run_analysis(analysis_date_str):
             json.dump(market_condition, f, ensure_ascii=False, indent=4)
         log_info(f"   💾 시장 현황 데이터를 '{market_condition_path}'에 저장했습니다.")
 
+        # 팩터 점수(현재는 volatility_score) 계산은 가중치가 0이면 스킵
         log_info("📊 팩터별 점수 계산을 시작합니다...")
         try:
-            # 메모리 정리
             import gc
             gc.collect()
-            
-            scored_df = scoring.calculate_factor_scores(feature_df)
-            
+
+            if do_volatility:
+                scored_df = scoring.calculate_factor_scores(feature_df)
+            else:
+                log_info("   ⏭️ volatility_score 가중치가 0이라 팩터 점수 계산을 건너뜁니다.")
+                scored_df = feature_df.copy()
+
             if scored_df is None or scored_df.empty:
                 error_msg = "팩터 점수 계산 결과가 비어있습니다."
                 log_error(error_msg)
                 raise AnalysisError(error_msg, step="factor_scoring")
-                
+
             log_info(f"   ✅ 팩터 점수 계산 완료: {len(scored_df):,}개 종목")
-            
-            # 메모리 정리
             gc.collect()
-            
         except Exception as e:
             log_error(f"팩터 점수 계산 중 오류: {e}")
             raise AnalysisError(f"팩터 점수 계산 중 오류: {e}", step="factor_scoring")
@@ -177,15 +222,20 @@ def run_analysis(analysis_date_str):
             gc.collect()
             log_info("   🧹 메모리 정리 완료")
             
-            # 모델 예측 시도 (RF)
-            log_info("   🤖 [RF] 모델 로딩 및 예측 중...")
-            try:
-                ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
-            except Exception as predict_error:
-                error_type = type(predict_error).__name__
-                error_msg = str(predict_error)
-                log_error(f"   ❌ [RF] 모델 예측 실패: {error_type}: {error_msg}")
-                raise
+            # 모델 예측 시도 (RF) - 가중치가 0이면 스킵
+            if do_rf:
+                log_info("   🤖 [RF] 모델 로딩 및 예측 중...")
+                try:
+                    ml_predicted_df = ml_model.predict_with_ml_model(feature_df)
+                except Exception as predict_error:
+                    error_type = type(predict_error).__name__
+                    error_msg = str(predict_error)
+                    log_error(f"   ❌ [RF] 모델 예측 실패: {error_type}: {error_msg}")
+                    raise
+            else:
+                log_info("   ⏭️ [RF] 가중치가 0이라 예측을 건너뜁니다.")
+                ml_predicted_df = feature_df[['종목코드']].copy()
+                ml_predicted_df['ml_pred_proba'] = float('nan')
             
             if ml_predicted_df is None or ml_predicted_df.empty:
                 error_msg = "[RF] 모델 예측 결과가 비어있습니다."
@@ -194,23 +244,28 @@ def run_analysis(analysis_date_str):
 
             log_info(f"   ✅ [RF] 예측 완료: {len(ml_predicted_df):,}개 종목")
 
-            # 모델 예측 시도 (LGBM)
-            log_info("   🤖 [LGBM] 모델 로딩 및 예측 중...")
-            try:
-                lgbm_predicted_df = ml_model.predict_with_lgbm_model(feature_df)
-                if not lgbm_predicted_df.empty and 'lgbm_pred_proba' in lgbm_predicted_df.columns:
-                    log_info(f"   ✅ [LGBM] 예측 완료: {len(lgbm_predicted_df):,}개 종목")
-                else:
-                    log_warning("   ⚠️ [LGBM] 예측 결과가 비어있거나 유효하지 않습니다.")
-            except Exception as e:
-                log_warning(f"   ⚠️ [LGBM] 예측 중 오류 (건너뜀): {e}")
-                lgbm_predicted_df = pd.DataFrame()
+            # 모델 예측 시도 (LGBM) - 가중치가 0이면 스킵
+            if do_lgbm:
+                log_info("   🤖 [LGBM] 모델 로딩 및 예측 중...")
+                try:
+                    lgbm_predicted_df = ml_model.predict_with_lgbm_model(feature_df)
+                    if not lgbm_predicted_df.empty and 'lgbm_pred_proba' in lgbm_predicted_df.columns:
+                        log_info(f"   ✅ [LGBM] 예측 완료: {len(lgbm_predicted_df):,}개 종목")
+                    else:
+                        log_warning("   ⚠️ [LGBM] 예측 결과가 비어있거나 유효하지 않습니다.")
+                except Exception as e:
+                    log_warning(f"   ⚠️ [LGBM] 예측 중 오류 (건너뜀): {e}")
+                    lgbm_predicted_df = pd.DataFrame()
+            else:
+                log_info("   ⏭️ [LGBM] 가중치가 0이라 예측을 건너뜁니다.")
+                lgbm_predicted_df = feature_df[['종목코드']].copy()
+                lgbm_predicted_df['lgbm_pred_proba'] = float('nan')
 
             # 예측 결과 병합
             # RF 결과에 LGBM 결과 병합
-            if not lgbm_predicted_df.empty:
+            if lgbm_predicted_df is not None and not lgbm_predicted_df.empty:
                 ml_predicted_df = pd.merge(ml_predicted_df, lgbm_predicted_df, on='종목코드', how='left')
-                log_info(f"   📊 [통합] RF 및 LGBM 예측 결과 병합 완료")
+                log_info("   📊 [통합] RF 및 LGBM 예측 결과 병합 완료")
 
             # 예측 결과 검증
             if '종목코드' not in ml_predicted_df.columns:
@@ -222,6 +277,9 @@ def run_analysis(analysis_date_str):
                 error_msg = "예측 결과에 'ml_pred_proba' 컬럼이 없습니다."
                 log_error(f"   ❌ {error_msg}")
                 raise AnalysisError(error_msg, step="ml_prediction")
+            # lgbm_pred_proba는 가중치가 0이면 NaN으로 존재하도록 유지(호환성)
+            if 'lgbm_pred_proba' not in ml_predicted_df.columns:
+                ml_predicted_df['lgbm_pred_proba'] = float('nan')
                 
             log_info(f"   ✅ ML 모델 예측 완료: {len(ml_predicted_df):,}개 종목")
             
