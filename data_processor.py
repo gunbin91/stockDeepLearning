@@ -899,7 +899,7 @@ def merge_and_calculate_features(args):
 
         # =================================================================
         # 학습 타겟 제외 규칙 (사용자 요청)
-        # - 역배열: MA240 > MA120 > MA5
+        # - 조건: MA5 < MA120 AND MA5 < MA240 (120/240의 대소관계는 보지 않음)
         # - 그리고 MA5 당일 기울기(정의 A, 전일 대비 %변화 각도) <= 10도
         # => 위 조건을 모두 만족하는 샘플은 학습 대상에서 제외(drop)하기 위해 target을 NaN 처리합니다.
         #
@@ -921,9 +921,9 @@ def merge_and_calculate_features(args):
             df['MA5_Angle_Deg'] = ma5_angle_deg
 
             # 실시간/백테스팅에서 최종순위 산정 시 제외 플래그 (일자별로 동적 평가)
-            df['Exclude_Rank'] = (ma240_lvl > ma120_lvl) & (ma120_lvl > ma5) & (ma5_angle_deg <= 10)
+            df['Exclude_Rank'] = (ma5 < ma120_lvl) & (ma5 < ma240_lvl) & (ma5_angle_deg <= 10)
 
-            exclude_mask = (ma240_lvl > ma120_lvl) & (ma120_lvl > ma5) & (ma5_angle_deg <= 10)
+            exclude_mask = (ma5 < ma120_lvl) & (ma5 < ma240_lvl) & (ma5_angle_deg <= 10)
             if exclude_mask.any():
                 df.loc[exclude_mask, 'target'] = np.nan
         except Exception:

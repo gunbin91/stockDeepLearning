@@ -689,14 +689,14 @@ def create_training_data(years=None):
     #   메타파일로 변경을 감지해 자동 재생성합니다.
     # ======================================================================
     TARGET_SPEC = {
-        "name": "10d_drawdown_floor_-5pct_and_any_hit_+8pct__exclude_bearish_alignment_and_low_ma5_angle",
+        "name": "10d_drawdown_floor_-5pct_and_any_hit_+8pct__exclude_low_ma5_under_ma120_ma240_and_low_ma5_angle",
         "horizon_trading_days": 10,
         "min_ratio_floor": 0.95,  # future_min / now >= 0.95
         "max_ratio_hit": 1.08,    # future_max / now >= 1.08
         "notes": "향후 10거래일 동안 -5% 이상 하락 없이, +8% 이상 상승 1회라도",
         "exclude_rule": {
             "type": "drop_samples_by_setting_target_nan",
-            "bearish_alignment": "MA240 > MA120 > MA5",
+            "bearish_alignment": "MA5 < MA120 AND MA5 < MA240",
             "ma5_angle_definition": "angle_deg = atan(((MA5_t - MA5_{t-1}) / MA5_{t-1})) * 180/pi",
             "ma5_angle_deg_threshold_inclusive": 10,
         },
