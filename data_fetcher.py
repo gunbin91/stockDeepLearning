@@ -514,13 +514,19 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             latest_data['MA240_Slope'] = np.nan
 
         # =================================================================
-        # 랭킹 제외 규칙 (testStock과 동일)
-        # - 역배열: MA240 > MA120 > MA5
-        # - 그리고 MA5_Angle_Deg <= 10
-        #   MA5_Angle_Deg 정의:
-        #     ma5 = SMA(5)
-        #     delta = (ma5_t - ma5_{t-1}) / ma5_{t-1}
-        #     angle_deg = arctan(delta) * 180/pi
+        # 랭킹 제외 규칙 (요구사항 반영)
+        # - MA120/MA240의 상호 순서는 무관
+        # - MA5가 MA120, MA240 둘 다 아래에 있고,
+        # - MA5 기울기(각도)가 "하방 5도 이하"인 경우 제외
+        #
+        # 조건:
+        #   (MA120 > MA5) & (MA240 > MA5) & (MA5_Angle_Deg <= 0)
+        #
+        # MA5_Angle_Deg 정의:
+        #   ma5 = SMA(5)
+        #   delta = (ma5_t - ma5_{t-1}) / ma5_{t-1}
+        #   angle_deg = arctan(delta) * 180/pi
+        #   (상승이면 +, 하락이면 -)
         # =================================================================
         try:
             ma5_series = df_for_indicators['종가'].rolling(window=5).mean()
@@ -542,9 +548,9 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
                 angle = latest_data.get('MA5_Angle_Deg', np.nan)
                 latest_data['Exclude_Rank'] = bool(
                     pd.notna(ma240_last) and pd.notna(ma120_last) and pd.notna(ma5_last)
-                    and (ma240_last > ma120_last)
                     and (ma120_last > ma5_last)
-                    and (pd.notna(angle) and angle <= 10)
+                    and (ma240_last > ma5_last)
+                    and (pd.notna(angle) and angle <= 0)
                 )
             else:
                 latest_data['Exclude_Rank'] = False
