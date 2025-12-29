@@ -26,7 +26,9 @@ from datetime import datetime, timedelta
 import subprocess
 import re
 import time
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_from_directory
+from collections import deque
+import math
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_from_directory, g
 from flask_socketio import SocketIO, emit
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -160,6 +162,48 @@ socketio = SocketIO(app,
                    ping_timeout=60,           # 연결 유지 시간 60초
                    ping_interval=25           # 연결 확인 간격 25초
 )
+
+
+# =============================================================================
+# API 요청 접수/응답 로깅 (myKiwoom 연동 디버깅용)
+# =============================================================================
+
+@app.before_request
+def _api_request_log_before():
+    try:
+        g._req_start_ts = time.time()
+        path = request.path or ""
+        if path.startswith("/api/") or path.startswith("/v1/") or path == "/health":
+            # 너무 시끄러운 엔드포인트는 필요 시 제외 가능
+            # 요청 바디는 민감할 수 있어 "키 목록"만 로깅
+            body_keys = None
+            if request.method in ("POST", "PUT", "PATCH") and request.is_json:
+                payload = request.get_json(silent=True) or {}
+                if isinstance(payload, dict):
+                    body_keys = list(payload.keys())
+            msg = f"[API] {request.method} {path} from={request.remote_addr}"
+            if body_keys is not None:
+                msg += f" body_keys={body_keys}"
+            log_info(msg)
+    except Exception:
+        pass
+
+
+@app.after_request
+def _api_request_log_after(response):
+    try:
+        path = request.path or ""
+        if path.startswith("/api/") or path.startswith("/v1/") or path == "/health":
+            elapsed_ms = None
+            if hasattr(g, "_req_start_ts"):
+                elapsed_ms = int((time.time() - g._req_start_ts) * 1000)
+            msg = f"[API] {request.method} {path} -> {response.status_code}"
+            if elapsed_ms is not None:
+                msg += f" {elapsed_ms}ms"
+            log_info(msg)
+    except Exception:
+        pass
+    return response
 
 # Jinja2 필터 추가
 @app.template_filter('moment')
@@ -340,6 +384,229 @@ def load_cached_analysis_result():
             log_warning(f"기존 분석 결과를 불러오는 데 실패했습니다: {e}")
             return None, None, None
     return None, None, None
+
+
+# =============================================================================
+# myKiwoom 연동용 최소 REST API (health / 실시간 분석 실행)
+# =============================================================================
+
+def _load_raw_analysis_json():
+    """analysis_result.json 원본을 로드하여 myKiwoom 호환 포맷으로 변환"""
+    result_path = os.path.join(str(path_manager.data_dir), 'analysis_result.json')
+    if not os.path.exists(result_path):
+        return None
+    with open(result_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    if not isinstance(data, list) or len(data) == 0:
+        return None
+
+    # analysis_date 추출 (YYYY-MM-DD)
+    analysis_date = None
+    if isinstance(data[0], dict):
+        analysis_date = data[0].get('date')
+
+    # 정렬: 최종순위 있으면 기준, 없으면 그대로
+    try:
+        if isinstance(data[0], dict) and '최종순위' in data[0]:
+            data_sorted = sorted(data, key=lambda x: int(x.get('최종순위', 999999)))
+        else:
+            data_sorted = data
+    except Exception:
+        data_sorted = data
+
+    return {
+        'analysis_date': analysis_date or datetime.now().strftime('%Y-%m-%d'),
+        'total_stocks': len(data_sorted),
+        'top_stocks': data_sorted[:20],
+        'analysis_result': data_sorted
+    }
+
+
+def _sanitize_json_value(obj):
+    """
+    JSON 응답 안전화:
+    - NaN/Inf -> None (JSON null)
+    - dict/list/tuple 재귀 처리
+    파일 저장/분석 로직은 건드리지 않고, 응답 직전에만 적용
+    """
+    try:
+        if obj is None:
+            return None
+        if isinstance(obj, float):
+            return obj if math.isfinite(obj) else None
+        if isinstance(obj, dict):
+            return {k: _sanitize_json_value(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_sanitize_json_value(v) for v in obj]
+        if isinstance(obj, tuple):
+            return [_sanitize_json_value(v) for v in obj]
+        return obj
+    except Exception:
+        return obj
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    """myKiwoom에서 연결 테스트용"""
+    return jsonify({
+        'success': True,
+        'service': 'kiwoomDeepLearning',
+        'analysis_running': get_analysis_running(),
+        'data_dir': str(path_manager.data_dir)
+    })
+
+
+@app.route('/v1/analysis/run', methods=['POST'])
+def api_run_analysis():
+    """
+    myKiwoom 호출 시 '요청 시점에' 실시간 분석을 수행하고 결과를 반환합니다.
+    - 응답 포맷: myKiwoom/src/utils/deep_learning.py 가 기대하는 구조 유지
+      { success: bool, data: {analysis_date,total_stocks,top_stocks,analysis_result}, message?: str }
+    """
+    try:
+        if get_analysis_running():
+            return jsonify({
+                'success': False,
+                'message': '분석이 이미 실행 중입니다. 잠시 후 다시 시도해주세요.'
+            }), 409
+
+        payload = request.get_json(silent=True) or {}
+        analysis_date = payload.get('analysis_date') or datetime.now().strftime('%Y-%m-%d')
+
+        start_ts = time.time()
+        set_analysis_running(True)
+        try:
+            # 기존과 동일하게 스크립트를 실행하여 결과 파일 생성
+            script_path = os.path.join(os.path.dirname(__file__), 'scripts', 'run_analysis.py')
+            cmd = [sys.executable, script_path, '--date', str(analysis_date)]
+            log_info(f"[ANALYSIS] run start date={analysis_date} cmd={' '.join(cmd)}")
+
+            # 실시간 로그 출력: stdout/stderr를 라인 단위로 읽어 서버 로그로 전달
+            last_lines = deque(maxlen=200)
+            proc = subprocess.Popen(
+                cmd,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                bufsize=1,
+                universal_newlines=True
+            )
+
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    msg = (line or "").rstrip("\n")
+                    if msg.strip():
+                        last_lines.append(msg)
+                        log_info(f"[ANALYSIS] {msg}")
+
+            return_code = proc.wait()
+            elapsed_ms = int((time.time() - start_ts) * 1000)
+            log_info(f"[ANALYSIS] run done rc={return_code} elapsed_ms={elapsed_ms}")
+
+            if return_code != 0:
+                tail = "\n".join(list(last_lines)[-50:])
+                return jsonify({
+                    'success': False,
+                    'message': '분석 실행 실패',
+                    'error_details': {
+                        'return_code': return_code,
+                        'elapsed_ms': elapsed_ms,
+                        'tail': tail
+                    }
+                }), 500
+        finally:
+            set_analysis_running(False)
+
+        # 결과 파일이 "이번 요청 이후에" 생성된 것인지 검증 (이전 결과 오염 방지)
+        result_path = os.path.join(str(path_manager.data_dir), 'analysis_result.json')
+        if not os.path.exists(result_path):
+            return jsonify({
+                'success': False,
+                'message': '분석 결과 파일을 찾을 수 없습니다. (analysis_result.json)'
+            }), 500
+
+        try:
+            mtime = os.path.getmtime(result_path)
+            if mtime < start_ts:
+                return jsonify({
+                    'success': False,
+                    'message': '분석 결과 파일이 이번 요청에서 생성된 것으로 확인되지 않습니다. (이전 결과일 수 있음)',
+                    'error_details': {
+                        'analysis_date': analysis_date,
+                        'result_mtime': mtime,
+                        'request_start_ts': start_ts
+                    }
+                }), 500
+        except Exception as e:
+            log_warning(f"[ANALYSIS] 결과 파일 mtime 확인 실패(계속 진행): {e}")
+
+        raw = _load_raw_analysis_json()
+        if not raw:
+            return jsonify({
+                'success': False,
+                'message': '분석 결과 파일을 찾을 수 없습니다. (analysis_result.json)'
+            }), 500
+
+        # 날짜가 요청과 다른 경우도 차단 (이전 파일/다른 날짜 결과 방지)
+        if raw.get('analysis_date') and str(raw.get('analysis_date')) != str(analysis_date):
+            return jsonify({
+                'success': False,
+                'message': '분석 결과 날짜가 요청과 다릅니다. (이전 결과일 수 있음)',
+                'error_details': {
+                    'requested_analysis_date': analysis_date,
+                    'result_analysis_date': raw.get('analysis_date')
+                }
+            }), 500
+
+        # NaN/Inf 등 비표준 JSON 값 제거 (브라우저 파싱 오류 방지)
+        raw = _sanitize_json_value(raw)
+
+        elapsed_ms = int((time.time() - start_ts) * 1000)
+        return jsonify({
+            'success': True,
+            'data': raw,
+            'meta': {
+                'elapsed_ms': elapsed_ms
+            }
+        })
+
+    except Exception as e:
+        set_analysis_running(False)
+        return jsonify({
+            'success': False,
+            'message': f'분석 API 처리 중 오류: {str(e)}'
+        }), 500
+
+
+@app.route('/v1/analysis/result', methods=['GET'])
+def api_get_latest_analysis_result():
+    """
+    가장 최근 분석 결과 파일(data/analysis_result.json)을 myKiwoom 호환 포맷으로 반환
+    - 분석이 오래 걸려 /v1/analysis/run 응답을 기다리기 어려운 경우 폴링용으로 사용
+    """
+    try:
+        raw = _load_raw_analysis_json()
+        if not raw:
+            return jsonify({
+                'success': False,
+                'message': '분석 결과 파일을 찾을 수 없습니다. (analysis_result.json)',
+                'analysis_running': get_analysis_running()
+            }), 404
+
+        return jsonify({
+            'success': True,
+            'data': raw,
+            'analysis_running': get_analysis_running()
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'분석 결과 조회 중 오류: {str(e)}',
+            'analysis_running': get_analysis_running()
+        }), 500
 
 def create_stock_chart(ticker_code, stock_name):
     """지정된 종목의 상세 기술적 분석 차트를 생성합니다."""
