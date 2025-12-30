@@ -182,6 +182,21 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         final_scores_df = pd.concat(final_df_list).set_index(['date', '종목코드'])
         data = data.merge(final_scores_df[['final_score']], left_index=True, right_index=True, how='left')
         data.dropna(subset=['final_score'], inplace=True)
+        # 인덱스 정렬 보장 (pct_change 계산 및 일별 slicing 안정화)
+        data.sort_index(inplace=True)
+
+        # ============================================================
+        # (안전장치) 당일 등락율(전일 종가 대비) 계산
+        # - 상한가 근접(+29% 이상) 종목 매수 금지
+        # - 상한가 근접(+29% 이상) 보유 종목은 해당일 매도 유예 (B안)
+        # ============================================================
+        if 'daily_change_pct' not in data.columns:
+            try:
+                data['daily_change_pct'] = data.groupby(level='종목코드')['종가'].pct_change() * 100
+            except Exception as e:
+                # 등락율 계산 실패 시에도 백테스트 전체를 멈추지 않도록 방어
+                log_warning("당일 등락율 계산 실패 (필터 비활성화)", exception=e)
+                data['daily_change_pct'] = np.nan
         
         log_info("최종 점수 계산 완료", context={
             "final_scores_count": len(final_scores_df),
@@ -225,6 +240,14 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
 
                     if (date, ticker) in data.index:
                         current_price = data.loc[(date, ticker), '종가']
+                        # (B안) 상한가 근접(+29% 이상) 날에는 익절/손절/기간만료 포함 '해당일 매도 금지'
+                        try:
+                            daily_change_pct = data.loc[(date, ticker), 'daily_change_pct'] if 'daily_change_pct' in data.columns else np.nan
+                            if pd.notna(daily_change_pct) and float(daily_change_pct) >= 29.0:
+                                continue
+                        except Exception:
+                            # 등락율 확인 실패 시 매도 로직은 기존대로 진행
+                            pass
                         
                         sell_condition_price = (current_price >= stock_info['buy_price'] * take_profit_multiplier) or \
                                                (current_price <= stock_info['buy_price'] * stop_loss_multiplier)
@@ -267,6 +290,11 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                 if date in data.index.get_level_values('date'):
                     daily_data = data.loc[date]
                     daily_data_tradable = daily_data[daily_data['거래량'] > 0]
+                    # (안전장치) 상한가 근접(+29% 이상) 종목은 매수 후보에서 제외
+                    if 'daily_change_pct' in daily_data_tradable.columns:
+                        daily_data_tradable = daily_data_tradable[
+                            daily_data_tradable['daily_change_pct'].isna() | (daily_data_tradable['daily_change_pct'] < 29.0)
+                        ]
                     
                     # 로그: 9월 17일 이후 데이터 확인
                     if date >= pd.to_datetime('2025-09-17'):

@@ -590,6 +590,8 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
 
             ma20 = df_for_indicators['종가'].rolling(window=20).mean()
             ma20_slope = calculate_normalized_linear_regression_slope_latest(ma20, window=5)
+            # LightGBM 피처 요구사항: MA20_Slope (누락 시 예측 확률이 전부 NaN 처리됨)
+            latest_data['MA20_Slope'] = ma20_slope
             ma20_slope_clean = 0 if pd.isna(ma20_slope) else float(ma20_slope)
             z_last = float(z_score_20.iloc[-1]) if len(z_score_20) else 0.0
             base_score = abs(z_last) * ma20_slope_clean
