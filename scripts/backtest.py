@@ -164,6 +164,26 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                 data.drop(columns=[new_col], inplace=True)
         
         data.dropna(subset=['final_score'], inplace=True)
+
+        # ============================================================
+        # 당일 등락율(전일 종가 대비) 계산
+        # - 요구사항: 당일 등락율 +29% 이상 종목은
+        #   (1) 당일 신규 매수 금지
+        #   (2) 보유 중이면 당일 매도 조건이 충족되어도 매도 제외
+        #
+        # - 계산: (당일 종가 / 전일 종가 - 1) * 100
+        # - 전일 종가가 없으면 NaN (필터 미적용)
+        # ============================================================
+        if 'daily_return_pct' not in data.columns:
+            try:
+                # pct_change는 날짜 순 정렬이 중요
+                data = data.sort_index()
+                closes = pd.to_numeric(data['종가'], errors='coerce')
+                data['daily_return_pct'] = closes.groupby(level='종목코드').pct_change() * 100.0
+            except Exception as e:
+                # 계산 실패해도 백테스트는 계속 진행 (필터는 미적용)
+                log_warning("⚠️ 당일 등락율 계산 실패: 필터를 적용하지 않고 진행합니다.", exception=e)
+                data['daily_return_pct'] = np.nan
         
         log_info("최종 점수 계산 완료", context={
             "final_scores_count": len(final_scores_df),
@@ -234,6 +254,20 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                     if current_price is None:
                         current_price = stock_info['buy_price']
                 
+                # ============================================================
+                # 상한가(급등) 예외: 당일 등락율 +29% 이상이면 당일 매도 금지
+                # - 데이터가 없는 날에는 등락율을 판단할 수 없으므로 예외 미적용
+                # ============================================================
+                try:
+                    if (date, ticker) in data.index and 'daily_return_pct' in data.columns:
+                        pct_val = data.loc[(date, ticker), 'daily_return_pct']
+                        if pd.notna(pct_val) and float(pct_val) >= 29.0:
+                            # 당일 매도 조건이 충족되어도 매도에서 제외 (보유 유지)
+                            continue
+                except Exception:
+                    # 등락율 조회 실패 시에는 기존 로직 유지
+                    pass
+
                 # 매도 조건 확인 (current_price는 이미 위에서 None이 아닌 값으로 설정됨)
                 sell_condition_price = (current_price >= stock_info['buy_price'] * take_profit_multiplier) or \
                                        (current_price <= stock_info['buy_price'] * stop_loss_multiplier)
@@ -270,6 +304,20 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             if date in data.index.get_level_values('date'):
                 daily_data = data.loc[date]
                 daily_data_tradable = daily_data[daily_data['거래량'] > 0]
+
+                # ============================================================
+                # 상한가(급등) 필터: 당일 등락율 +29% 이상 종목은 매수 금지
+                # - 등락율이 NaN이면(전일 데이터 없음 등) 필터 미적용
+                # ============================================================
+                if 'daily_return_pct' in daily_data_tradable.columns:
+                    try:
+                        daily_data_tradable = daily_data_tradable[
+                            (daily_data_tradable['daily_return_pct'].isna()) |
+                            (daily_data_tradable['daily_return_pct'] < 29.0)
+                        ]
+                    except Exception:
+                        # 필터 실패 시 기존 로직 유지
+                        pass
                 
                 # 로그: 9월 17일 이후 데이터 확인
                 if date >= pd.to_datetime('2025-09-17'):
