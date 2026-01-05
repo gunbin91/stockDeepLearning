@@ -54,6 +54,14 @@ from path_manager import path_manager
 from logger import log_info, log_critical, log_error, log_warning, log_progress
 
 # =================================================================
+# 재무데이터(pykrx) 수집 사용 여부
+# - 현재 모델/피처 목록에서는 재무데이터(PER/PBR/ROE/EPS/BPS 등)를 사용하지 않음
+# - 불필요한 API 호출을 막기 위해 기본값은 비활성화
+# - 추후 필요 시 False로 바꾸면 재무데이터 수집 로직이 다시 활성화됨
+# =================================================================
+DISABLE_PYKRX_FINANCIAL_FETCH = True
+
+# =================================================================
 # 유틸리티 함수: 정규화된 선형회귀기울기 계산
 # =================================================================
 
@@ -1229,19 +1237,23 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     except Exception as e:
         raise ConnectionError(f"시가총액 데이터 수집 실패: {e}")
     
-    # 재무데이터 수집 추가
-    try:
-        log_info("📊 재무데이터 수집 시작...")
-        df_financial_long = _fetch_financial_data(start_date, end_date)
-        
-        if df_financial_long.empty:
-            log_warning("재무데이터 수집에 실패했지만 분석을 계속합니다.")
-        else:
-            log_info(f"✅ 재무데이터 수집 완료: {len(df_financial_long)}개 레코드")
-            
-    except Exception as e:
-        log_warning(f"재무데이터 수집 실패: {e}. 분석을 계속합니다.")
+    # 재무데이터 수집 추가 (현재는 기본 비활성화)
+    if DISABLE_PYKRX_FINANCIAL_FETCH:
+        log_info("ℹ️ 재무데이터 수집이 비활성화되어 있습니다. (DISABLE_PYKRX_FINANCIAL_FETCH=True)")
         df_financial_long = pd.DataFrame()
+    else:
+        try:
+            log_info("📊 재무데이터 수집 시작...")
+            df_financial_long = _fetch_financial_data(start_date, end_date)
+            
+            if df_financial_long.empty:
+                log_warning("재무데이터 수집에 실패했지만 분석을 계속합니다.")
+            else:
+                log_info(f"✅ 재무데이터 수집 완료: {len(df_financial_long)}개 레코드")
+                
+        except Exception as e:
+            log_warning(f"재무데이터 수집 실패: {e}. 분석을 계속합니다.")
+            df_financial_long = pd.DataFrame()
     
     all_data = []
     stock_records = stock_list.to_dict('records')

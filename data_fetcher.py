@@ -45,6 +45,14 @@ from exceptions import DataFetchError, DataValidationError
 from path_manager import path_manager
 
 # =================================================================
+# 재무데이터(pykrx) 수집 사용 여부
+# - 현재 모델/피처 목록에서는 재무데이터(PER/PBR/ROE/EPS/BPS 등)를 사용하지 않음
+# - 불필요한 API 호출/속도 저하를 막기 위해 기본값은 비활성화
+# - 추후 필요 시 False로 바꾸면 재무데이터 수집 로직이 다시 활성화됨
+# =================================================================
+DISABLE_PYKRX_FINANCIAL_FETCH = True
+
+# =================================================================
 # 유틸리티 함수: 정규화된 선형회귀기울기 계산 (최신 값만)
 # =================================================================
 
@@ -144,6 +152,11 @@ def get_fs_data_from_pit(stock_list, selected_analysis_date, use_cache=True):
     Returns:
         pandas.DataFrame: 재무 데이터가 포함된 데이터프레임
     """
+    # 재무데이터 비활성화 모드: 빈 DF 반환 (파이프라인은 계속 진행)
+    if DISABLE_PYKRX_FINANCIAL_FETCH:
+        log_info("ℹ️ 재무데이터 수집이 비활성화되어 있습니다. (DISABLE_PYKRX_FINANCIAL_FETCH=True)")
+        return pd.DataFrame()
+
     # 항상 실시간 재무데이터 수집 (캐시 사용 안함)
     log_step("실시간 재무데이터 수집", "START", {"모드": "실시간 수집"})
     return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
@@ -376,8 +389,10 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         
         df_for_indicators = df_price_full[df_price_full.index <= actual_analysis_date].copy()
         
-        fs_data = latest_fs_df[latest_fs_df['종목코드'] == ticker]
-        if fs_data.empty or fs_data[['PER', 'PBR']].isnull().values.any(): return None, None
+        # 재무데이터는 현재 피처/학습 파이프라인에서 사용하지 않으므로 "필수" 조건으로 두지 않음
+        fs_data = pd.DataFrame()
+        if (latest_fs_df is not None) and (not latest_fs_df.empty) and ('종목코드' in latest_fs_df.columns):
+            fs_data = latest_fs_df[latest_fs_df['종목코드'] == ticker]
         
         latest_data = {} 
 
@@ -433,7 +448,14 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             latest_data['시총 회전율(3M)'] = np.nan
         
         latest_data['log_mktcap'] = np.log(reference_date_price * shares) if (reference_date_price * shares) > 0 else np.nan
-        latest_data['이익수익률'] = 1 / fs_data['PER'].values[0] if fs_data['PER'].values[0] != 0 else np.nan
+        # 이익수익률(=1/PER)은 재무데이터가 있을 때만 계산 (없으면 NaN)
+        try:
+            if (not fs_data.empty) and ('PER' in fs_data.columns) and pd.notna(fs_data['PER'].values[0]) and fs_data['PER'].values[0] != 0:
+                latest_data['이익수익률'] = 1 / fs_data['PER'].values[0]
+            else:
+                latest_data['이익수익률'] = np.nan
+        except Exception:
+            latest_data['이익수익률'] = np.nan
 
         latest_data['수익률(1M)'] = df_for_indicators['종가'].pct_change(20).iloc[-1]
         latest_data['수익률(3M)'] = df_for_indicators['종가'].pct_change(60).iloc[-1]
@@ -601,7 +623,9 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             if feature in df_for_indicators.columns:
                  latest_data[feature] = df_for_indicators[feature].iloc[-1]
 
-        latest_data.update(fs_data.iloc[0].to_dict())
+        # 재무데이터가 있을 때만 병합 (없으면 아무 것도 추가하지 않음)
+        if fs_data is not None and not fs_data.empty:
+            latest_data.update(fs_data.iloc[0].to_dict())
         
         # PBR_log 계산 (PBR 로그 변환) - 2024년 12월 제거
         # if 'PBR' in latest_data and pd.notna(latest_data['PBR']) and latest_data['PBR'] > 0:
@@ -775,10 +799,8 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     start_date_for_fetch = (today - timedelta(days=450)).strftime('%Y-%m-%d')
 
     latest_fs_df = get_fs_data_from_pit(stock_list, selected_analysis_date, use_cache)
-    
-    if latest_fs_df.empty or latest_fs_df.dropna().empty:
-        log_warning("사용 가능한 재무 데이터가 없어 분석을 중단합니다.")
-        return pd.DataFrame(), None
+    # 재무데이터는 현재 피처/학습 파이프라인에서 사용하지 않으므로
+    # 빈 DF라도 분석을 중단하지 않음
 
     if selected_analysis_date.date() < today.date():
         log_info(f"과거 분석(기준일={selected_analysis_date.strftime('%Y-%m-%d')}): 기준일의 시가총액 데이터를 수집합니다.")
