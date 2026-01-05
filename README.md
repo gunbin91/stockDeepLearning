@@ -33,7 +33,6 @@ stockDeepLearning/
 │
 ├── 🚀 실행 스크립트
 │   ├── scripts/
-│   │   ├── build_db_pykrx.py     # 재무 데이터베이스 구축
 │   │   ├── train_gpu_main.py     # GPU 머신러닝 모델 학습
 │   │   ├── weight_optimizer.py    # 가중치 최적화
 │   │   ├── backtest.py            # 백테스팅 실행
@@ -70,7 +69,7 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
 ```python
 def process_single_ticker_data(stock_info, start_date, end_date, df_marcap_long, pbar_lock):
     # 기술적 지표 계산
-    df['수익률(1M)'] = df['종가'].pct_change(20)
+    # (정리) 수익률(1M/3M) 피처는 현재 파이프라인에서 사용하지 않음
     df['변동성(1M)'] = df['종가'].rolling(20).std() / df['종가'].rolling(20).mean()
     df.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
     df.ta.obv(close='종가', volume='거래량', append=True)

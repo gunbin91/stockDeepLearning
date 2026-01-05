@@ -57,36 +57,22 @@
     </div>
     <div class="card-body">
         <div class="row">
-            <div class="col-md-4">
+            <div class="col-md-6">
                 <div class="card bg-light">
                     <div class="card-body text-center">
-                        <h6 class="card-title">KOSPI</h6>
-                        <h4 class="text-primary">{{ "{:,.2f}".format(market_condition.get('KOSPI', 0)) }}</h4>
-                        <small class="text-{{ 'success' if market_condition.get('KOSPI_pct_1d', 0) > 0 else 'danger' }}">
-                            {{ "{:+.2%}".format(market_condition.get('KOSPI_pct_1d', 0)) }}
+                        <h6 class="card-title">NASDAQ Composite (IXIC)</h6>
+                        <h4 class="text-primary">{{ "{:,.2f}".format(market_condition.get('IXIC', 0)) }}</h4>
+                        <small class="text-{{ 'success' if market_condition.get('IXIC_pct_1d', 0) > 0 else 'danger' }}">
+                            {{ "{:+.2%}".format(market_condition.get('IXIC_pct_1d', 0)) }}
                         </small>
                     </div>
                 </div>
             </div>
-            <div class="col-md-4">
-                <div class="card bg-light">
-                    <div class="card-body text-center">
-                        <h6 class="card-title">USD/KRW 환율</h6>
-                        <h4 class="text-primary">{{ "{:,.2f}".format(market_condition.get('USDKRW', 0)) }} 원</h4>
-                        <small class="text-{{ 'success' if market_condition.get('USDKRW_pct_1d', 0) > 0 else 'danger' }}">
-                            {{ "{:+.2%}".format(market_condition.get('USDKRW_pct_1d', 0)) }}
-                        </small>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-4">
+            <div class="col-md-6">
                 <div class="card bg-light">
                     <div class="card-body text-center">
                         <h6 class="card-title">VIX (변동성 지수)</h6>
                         <h4 class="text-primary">{{ "{:,.2f}".format(market_condition.get('VIX', 0)) }}</h4>
-                        <small class="text-{{ 'danger' if market_condition.get('VIX_pct_1d', 0) > 0 else 'success' }}">
-                            {{ "{:+.2%}".format(market_condition.get('VIX_pct_1d', 0)) }}
-                        </small>
                     </div>
                 </div>
             </div>
@@ -114,14 +100,14 @@
                         <th>최종순위</th>
                         <th>종목명</th>
                         <th>종목코드</th>
-                        <th>현재가(원)</th>
+                        <th>현재가(USD)</th>
                         <th>등락율(%)</th>
-                        <th>기준일가(원)</th>
+                        <th>기준일가(USD)</th>
                         <th>최종점수(점)</th>
                         <th>RF상승확률(%)</th>
                         <th>LGBM상승확률(%)</th>
                         <th>변동성(점)</th>
-                        <th>시가총액(억)</th>
+                        <th>시가총액(십만달러)</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -130,11 +116,32 @@
                         <td>{{ row['최종순위'] }}</td>
                         <td>{{ row['종목명'] }}</td>
                         <td>{{ row['종목코드'] }}</td>
-                        <td class="price-cell">{{ row['현재가(원)']|safe }}</td>
+                        <td class="price-cell">{{ row['현재가(USD)']|safe }}</td>
                         <td class="change-cell">{{ row['등락율(%)'] }}</td>
-                        <td>{{ "{:,.0f}".format(row['기준일가(원)']) }}</td>
-                        <td>{{ "{:.2f}".format(row['최종점수(점)']) }}</td>
-                        <td>{{ "{:.2f}".format(row['상승확률(%)']) }}</td>
+                        <td>
+                            {% set v = row['기준일가(USD)'] %}
+                            {% if v is not none and not (v != v) %}
+                                {{ "{:,.2f}".format(v) }}
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% set v = row['최종점수(점)'] %}
+                            {% if v is not none and not (v != v) %}
+                                {{ "{:.2f}".format(v) }}
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% set v = row['상승확률(%)'] %}
+                            {% if v is not none and not (v != v) %}
+                                {{ "{:.2f}".format(v) }}
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        </td>
                         <td>
                             {% if 'lgbm_pred_proba' in row.index and row['lgbm_pred_proba'] is not none and not (row['lgbm_pred_proba'] != row['lgbm_pred_proba']) %}
                                 {{ "{:.2f}".format(row['lgbm_pred_proba']) }}
@@ -143,7 +150,14 @@
                             {% endif %}
                         </td>
                         <td>{% if '변동성(점)' in row.index %}{{ "{:.2f}".format(row['변동성(점)']) }}{% else %}0.00{% endif %}</td>
-                        <td>{{ "{:,.0f}".format(row['시가총액(억)']) }}</td>
+                        <td>
+                            {% set v = row['시가총액(십만달러)'] %}
+                            {% if v is not none and not (v != v) %}
+                                {{ "{:,.0f}".format(v) }}
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>

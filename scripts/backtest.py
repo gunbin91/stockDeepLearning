@@ -39,8 +39,10 @@ if platform.system() == 'Windows':
         # 로케일 설정 실패 시 기본값 유지
         pass
 
-# 증권거래세율 (0.15%)
-SECURITIES_TRANSACTION_TAX_RATE = 0.15
+# NASDAQ 전용 프로젝트:
+# - 미국 주식에는 국내 증권거래세(0.15%) 규칙을 적용하지 않습니다.
+# - 거래세는 0으로 고정합니다. (수수료는 transaction_fee_rate로만 반영)
+SECURITIES_TRANSACTION_TAX_RATE = 0.0
 
 # stdout/stderr를 UTF-8로 설정
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
@@ -165,25 +167,9 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         
         data.dropna(subset=['final_score'], inplace=True)
 
-        # ============================================================
-        # 당일 등락율(전일 종가 대비) 계산
-        # - 요구사항: 당일 등락율 +29% 이상 종목은
-        #   (1) 당일 신규 매수 금지
-        #   (2) 보유 중이면 당일 매도 조건이 충족되어도 매도 제외
-        #
-        # - 계산: (당일 종가 / 전일 종가 - 1) * 100
-        # - 전일 종가가 없으면 NaN (필터 미적용)
-        # ============================================================
-        if 'daily_return_pct' not in data.columns:
-            try:
-                # pct_change는 날짜 순 정렬이 중요
-                data = data.sort_index()
-                closes = pd.to_numeric(data['종가'], errors='coerce')
-                data['daily_return_pct'] = closes.groupby(level='종목코드').pct_change() * 100.0
-            except Exception as e:
-                # 계산 실패해도 백테스트는 계속 진행 (필터는 미적용)
-                log_warning("⚠️ 당일 등락율 계산 실패: 필터를 적용하지 않고 진행합니다.", exception=e)
-                data['daily_return_pct'] = np.nan
+        # NASDAQ 전용:
+        # - 한국 시장 상한가(+29%) 기반의 매수/매도 제한 규칙은 적용하지 않습니다.
+        # - 따라서 daily_return_pct 계산/필터도 제거합니다.
         
         log_info("최종 점수 계산 완료", context={
             "final_scores_count": len(final_scores_df),
@@ -219,10 +205,10 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                 portfolio_value_before = sum(info['buy_price'] * info['shares'] for info in portfolio.values())
                 log_info(f"백테스팅 진행 상황", context={
                     "date": date.strftime('%Y-%m-%d'),
-                    "cash": f"{cash:,.0f}원",
+                    "cash": f"${cash:,.2f}",
                     "portfolio_count": len(portfolio),
-                    "portfolio_value_estimate": f"{portfolio_value_before:,.0f}원",
-                    "total_asset_estimate": f"{cash + portfolio_value_before:,.0f}원"
+                    "portfolio_value_estimate": f"${portfolio_value_before:,.2f}",
+                    "total_asset_estimate": f"${cash + portfolio_value_before:,.2f}"
                 })
         except:
             pass  # 디버깅 로그 실패는 무시
@@ -254,19 +240,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                     if current_price is None:
                         current_price = stock_info['buy_price']
                 
-                # ============================================================
-                # 상한가(급등) 예외: 당일 등락율 +29% 이상이면 당일 매도 금지
-                # - 데이터가 없는 날에는 등락율을 판단할 수 없으므로 예외 미적용
-                # ============================================================
-                try:
-                    if (date, ticker) in data.index and 'daily_return_pct' in data.columns:
-                        pct_val = data.loc[(date, ticker), 'daily_return_pct']
-                        if pd.notna(pct_val) and float(pct_val) >= 29.0:
-                            # 당일 매도 조건이 충족되어도 매도에서 제외 (보유 유지)
-                            continue
-                except Exception:
-                    # 등락율 조회 실패 시에는 기존 로직 유지
-                    pass
+                # NASDAQ 전용: 상한가(+29%) 예외 로직 제거
 
                 # 매도 조건 확인 (current_price는 이미 위에서 None이 아닌 값으로 설정됨)
                 sell_condition_price = (current_price >= stock_info['buy_price'] * take_profit_multiplier) or \
@@ -276,7 +250,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                 if sell_condition_price or is_holding_period_expired:
                     buy_amount = stock_info['actual_buy_price'] * stock_info['shares']
                     
-                    # 매도 시 수수료 및 세금 적용
+                    # 매도 시 수수료 적용 (거래세는 0)
                     actual_sell_price = current_price * (1 - (transaction_fee_rate + SECURITIES_TRANSACTION_TAX_RATE) / 100)
                     sell_value = actual_sell_price * stock_info['shares']
                     
@@ -305,19 +279,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                 daily_data = data.loc[date]
                 daily_data_tradable = daily_data[daily_data['거래량'] > 0]
 
-                # ============================================================
-                # 상한가(급등) 필터: 당일 등락율 +29% 이상 종목은 매수 금지
-                # - 등락율이 NaN이면(전일 데이터 없음 등) 필터 미적용
-                # ============================================================
-                if 'daily_return_pct' in daily_data_tradable.columns:
-                    try:
-                        daily_data_tradable = daily_data_tradable[
-                            (daily_data_tradable['daily_return_pct'].isna()) |
-                            (daily_data_tradable['daily_return_pct'] < 29.0)
-                        ]
-                    except Exception:
-                        # 필터 실패 시 기존 로직 유지
-                        pass
+                # NASDAQ 전용: 상한가(+29%) 매수 금지 필터 제거
                 
                 # 로그: 9월 17일 이후 데이터 확인
                 if date >= pd.to_datetime('2025-09-17'):
@@ -433,12 +395,12 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             
         # 로그: 9월 17일 이후 포트폴리오 상태
         if date >= pd.to_datetime('2025-09-17'):
-            print(f"🔍 {date.strftime('%Y-%m-%d')} 포트폴리오: 보유종목 {len(portfolio)}개, 현금 {cash:,.0f}원, 총자산 {total_asset:,.0f}원")
+            print(f"🔍 {date.strftime('%Y-%m-%d')} 포트폴리오: 보유종목 {len(portfolio)}개, 현금 ${cash:,.2f}, 총자산 ${total_asset:,.2f}")
             
     portfolio_ts = pd.Series(portfolio_history, index=daily_dates)
     
     # 로그: 백테스팅 완료 후 최종 상태
-    print(f"🔍 백테스팅 완료: 총 거래일 {len(portfolio_ts)}개, 최종 자산 {portfolio_ts.iloc[-1]:,.0f}원")
+    print(f"🔍 백테스팅 완료: 총 거래일 {len(portfolio_ts)}개, 최종 자산 ${portfolio_ts.iloc[-1]:,.2f}")
     print(f"🔍 마지막 거래일: {portfolio_ts.index[-1].strftime('%Y-%m-%d')}")
     
     # 정합성 검증
@@ -473,13 +435,13 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         # (포트폴리오 가치는 매수가 기준이므로 수수료 차감 후 현금 + 포트폴리오 가치)
         expected_first_asset = initial_capital - estimated_fee
         
-        # 허용 오차: 수수료 계산의 부동소수점 오차 및 반올림 오차 고려 (1% 또는 최소 100원)
-        tolerance = max(estimated_fee * 0.01, 100.0) if estimated_fee > 0 else 100.0
+        # 허용 오차: 수수료 계산의 부동소수점 오차 및 반올림 오차 고려 (1% 또는 최소 $1)
+        tolerance = max(estimated_fee * 0.01, 1.0) if estimated_fee > 0 else 1.0
         
         if abs(first_asset - expected_first_asset) > tolerance:
             validation_errors.append(
-                f"초기 자본 불일치: 예상 {expected_first_asset:,.0f}원 (초기자본 {initial_capital:,.0f}원 - 수수료 {estimated_fee:,.0f}원), "
-                f"실제 {first_asset:,.0f}원 (차이: {abs(first_asset - expected_first_asset):,.0f}원)"
+                f"초기 자본 불일치: 예상 ${expected_first_asset:,.2f} (초기자본 ${initial_capital:,.2f} - 수수료 ${estimated_fee:,.2f}), "
+                f"실제 ${first_asset:,.2f} (차이: ${abs(first_asset - expected_first_asset):,.2f})"
             )
     
     # 2. 거래 로그 정합성 검증 (trade_log_df 생성 전에 임시로 생성)
@@ -492,12 +454,12 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         # 매수 금액 합계 검증
         if not buy_trades.empty and 'buy_amount' in buy_trades.columns:
             total_buy_amount = buy_trades['buy_amount'].sum()
-            log_info(f"총 매수 금액: {total_buy_amount:,.0f}원")
+            log_info(f"총 매수 금액: ${total_buy_amount:,.2f}")
         
         # 매도 금액 합계 검증
         if not sell_trades.empty and 'profit' in sell_trades.columns:
             total_profit = sell_trades['profit'].sum()
-            log_info(f"총 실현 손익: {total_profit:,.0f}원")
+            log_info(f"총 실현 손익: ${total_profit:,.2f}")
         
         # 매수/매도 쌍 검증 (매수한 종목이 모두 매도되었는지)
         buy_tickers = set(buy_trades['ticker'].unique())
@@ -514,8 +476,8 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             elif trade['type'] == 'sell':
                 final_cash_estimate += trade.get('buy_amount', 0) + trade.get('profit', 0)
         
-        log_info(f"거래 로그 기반 추정 현금: {final_cash_estimate:,.0f}원")
-        log_info(f"실제 최종 자산: {portfolio_ts.iloc[-1]:,.0f}원")
+        log_info(f"거래 로그 기반 추정 현금: ${final_cash_estimate:,.2f}")
+        log_info(f"실제 최종 자산: ${portfolio_ts.iloc[-1]:,.2f}")
     
     # 3. 포트폴리오 히스토리 연속성 검증
     if len(portfolio_ts) > 1:
@@ -578,23 +540,23 @@ def create_json_report(results, output_path=None):
         print("백테스트 결과가 없어 리포트를 생성할 수 없습니다.")
         return
 
-    # 포트폴리오 히스토리: 실제 총자산 값(원 단위) 저장
+    # 포트폴리오 히스토리: 실제 총자산 값(USD) 저장
     portfolio_dates = [d.strftime('%Y-%m-%d') for d in results["portfolio_history"].index]
     portfolio_values = [float(v) for v in results["portfolio_history"].values]
     
-    # KOSPI 데이터 가져오기 (비교용 누적 수익률)
+    # NASDAQ Composite(IXIC) 데이터 가져오기 (비교용 누적 수익률)
     try:
-        kospi = fdr.DataReader('KS11', start=results["portfolio_history"].index.min(), end=results["portfolio_history"].index.max())
-        kospi_cumulative = (1 + kospi['Close'].pct_change().fillna(0)).cumprod()
+        ixic = fdr.DataReader('IXIC', start=results["portfolio_history"].index.min(), end=results["portfolio_history"].index.max())
+        ixic_cumulative = (1 + ixic['Close'].pct_change().fillna(0)).cumprod()
         
-        # KOSPI 초기값 기준으로 정규화 (포트폴리오와 비교 가능하도록)
+        # IXIC 초기값 기준으로 정규화 (포트폴리오와 비교 가능하도록)
         initial_capital = float(results.get('initial_capital', 0))
-        kospi_values = [float(v * initial_capital) for v in kospi_cumulative.values]
-        kospi_dates = [d.strftime('%Y-%m-%d') for d in kospi_cumulative.index]
+        ixic_values = [float(v * initial_capital) for v in ixic_cumulative.values]
+        ixic_dates = [d.strftime('%Y-%m-%d') for d in ixic_cumulative.index]
     except Exception as e:
-        log_warning(f"KOSPI 데이터 로딩 실패: {e}")
-        kospi_dates = []
-        kospi_values = []
+        log_warning(f"IXIC 데이터 로딩 실패: {e}")
+        ixic_dates = []
+        ixic_values = []
     
     # 거래 로그 처리
     trade_log_all = results['trade_log'].copy()
@@ -688,9 +650,9 @@ def create_json_report(results, output_path=None):
             'dates': portfolio_dates,
             'values': portfolio_values
         },
-        'kospi_history': {
-            'dates': kospi_dates,
-            'values': kospi_values
+        'ixic_history': {
+            'dates': ixic_dates,
+            'values': ixic_values
         },
         'trade_log': trade_log_records
     }
@@ -730,7 +692,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         start_analysis_report(f"백테스팅 ({start_date} ~ {end_date})")
         
         log_info("💰 투자 설정")
-        log_info(f"   └─ 초기 자본: {initial_capital:,}원")
+        log_info(f"   └─ 초기 자본: ${initial_capital:,.2f}")
         log_info(f"   └─ 매수 종목 수: {top_n}개")
         log_info(f"   └─ 최대 보유 기간: {max_hold_period}일")
         log_info(f"   └─ 익절 기준: +{take_profit_pct}%")
@@ -1189,7 +1151,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         
         # 백테스팅 실행 (강화된 에러 처리)
         try:
-            log_info(f"\n3. 최종 백테스팅 시뮬레이션 실행 중... (초기 자본: {initial_capital:,.0f}원)")
+            log_info(f"\n3. 최종 백테스팅 시뮬레이션 실행 중... (초기 자본: ${initial_capital:,.2f})")
             log_info("백테스팅 시뮬레이션 시작", context={
                 "initial_capital": initial_capital,
                 "data_rows": len(test_data)

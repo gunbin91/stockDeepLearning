@@ -442,9 +442,8 @@ $(document).ready(function() {
     }
     
     function showStockDetails(ticker, name) {
-        // 종목코드를 문자열로 변환하고 6자리로 패딩 (호환성 개선)
-        const tickerStr = String(ticker);
-        const paddedTicker = tickerStr.length < 6 ? ('000000' + tickerStr).slice(-6) : tickerStr;
+        // NASDAQ 티커는 그대로 사용
+        const tickerStr = String(ticker).trim();
         
         // 차트 섹션 표시
         $('#chart_title').text(`📈 [${name}] 상세 차트`);
@@ -458,7 +457,7 @@ $(document).ready(function() {
         $('#stock_chart').html('<div class="text-center"><i class="fas fa-spinner fa-spin fa-2x"></i><br>차트를 불러오는 중...</div>');
         
         // 차트 데이터 요청
-        $.get(`/api/stock_chart/${paddedTicker}`)
+        $.get(`/api/stock_chart/${encodeURIComponent(tickerStr)}`)
             .done(function(data) {
                 if (data.chart) {
                     try {
@@ -470,7 +469,7 @@ $(document).ready(function() {
                             displayModeBar: true,
                             modeBarButtonsToRemove: ['pan2d', 'lasso2d', 'select2d']
                         });
-                        console.log('차트 렌더링 완료:', paddedTicker);
+                        console.log('차트 렌더링 완료:', tickerStr);
                     } catch (error) {
                         console.error('차트 렌더링 오류:', error);
                         $('#stock_chart').html('<div class="alert alert-warning">차트 데이터 형식 오류</div>');
@@ -485,7 +484,7 @@ $(document).ready(function() {
             });
         
         // 피처 데이터 요청
-        $.get(`/api/stock_features/${paddedTicker}`)
+        $.get(`/api/stock_features/${encodeURIComponent(tickerStr)}`)
             .done(function(data) {
                 if (data.features) {
                     const tbody = $('#features_tbody');
@@ -1013,7 +1012,7 @@ $(document).ready(function() {
                                                 <th>실현손익</th>
                                                 <th>누적 실현손익</th>
                                                 <th>매수금액</th>
-                                                <th>시가총액</th>
+                                                <th>시가총액(십만달러)</th>
                                                 <th>총자산</th>
                                                 <th>최종점수</th>
                                                 <th>RF상승확률</th>
@@ -1024,18 +1023,13 @@ $(document).ready(function() {
                                         <tbody>
             `;
             
-            // 시가총액 포맷팅 함수
+            // 시가총액 포맷팅 함수 (십만달러 단위, 소수점 없음 / 값은 숫자만)
             function formatMarketCap(value) {
                 if (value === null || value === undefined || isNaN(value)) return 'N/A';
-                if (value >= 1000000000000) {
-                    return (value / 1000000000000).toFixed(2) + '조';
-                } else if (value >= 100000000) {
-                    return (value / 100000000).toFixed(2) + '억';
-                } else if (value >= 10000) {
-                    return (value / 10000).toFixed(2) + '만';
-                } else {
-                    return formatCurrency(value);
-                }
+                const v = value / 100000; // 십만달러(USD 100,000) 단위
+                return new Intl.NumberFormat('en-US', {
+                    maximumFractionDigits: 0
+                }).format(v);
             }
             
             data.trade_log.forEach(function(trade) {
@@ -1139,8 +1133,8 @@ $(document).ready(function() {
     function renderBacktestChart(data) {
         const portfolioDates = data.portfolio_history.dates || [];
         const portfolioValues = data.portfolio_history.values || [];
-        const kospiDates = data.kospi_history.dates || [];
-        const kospiValues = data.kospi_history.values || [];
+        const ixicDates = (data.ixic_history && data.ixic_history.dates) ? data.ixic_history.dates : [];
+        const ixicValues = (data.ixic_history && data.ixic_history.values) ? data.ixic_history.values : [];
         const tradeLog = data.trade_log || [];
         
         // 누적 실현손익 계산 (날짜별)
@@ -1176,34 +1170,30 @@ $(document).ready(function() {
         });
         
         const traces = [];
-        
-        // 누적 실현손익 추적선 (억원 단위)
+
+        // 누적 실현손익 추적선 (USD, 축약 없이)
         if (portfolioDates.length > 0 && cumulativeProfitValues.length > 0) {
-            const cumulativeProfitInHundredMillion = cumulativeProfitValues.map(function(val) {
-                return val / 100000000; // 억원 단위로 변환
-            });
-            
             traces.push({
                 x: portfolioDates,
-                y: cumulativeProfitInHundredMillion,
+                y: cumulativeProfitValues,
                 name: '누적 실현손익',
                 type: 'scatter',
                 mode: 'lines',
                 line: { color: 'royalblue', width: 2 }
             });
         }
-        
-        // KOSPI 추적선 (초기 자본 기준 정규화된 값, 억원 단위)
-        if (kospiDates.length > 0 && kospiValues.length > 0 && data.performance_metrics && data.performance_metrics.initial_capital) {
+
+        // IXIC 추적선 (초기 자본 기준 정규화된 값, USD)
+        if (ixicDates.length > 0 && ixicValues.length > 0 && data.performance_metrics && data.performance_metrics.initial_capital) {
             const initialCapital = data.performance_metrics.initial_capital;
-            const kospiInHundredMillion = kospiValues.map(function(val) {
-                return (val - initialCapital) / 100000000; // 초기 자본 대비 변화를 억원 단위로
+            const ixicDelta = ixicValues.map(function(val) {
+                return (val - initialCapital);
             });
-            
+
             traces.push({
-                x: kospiDates,
-                y: kospiInHundredMillion,
-                name: 'KOSPI (초기자본 대비)',
+                x: ixicDates,
+                y: ixicDelta,
+                name: 'IXIC (초기자본 대비)',
                 type: 'scatter',
                 mode: 'lines',
                 line: { color: 'grey', width: 1, dash: 'dash' }
@@ -1251,11 +1241,11 @@ $(document).ready(function() {
             }
         }
         
-        // 호버 템플릿에 날짜 포맷 적용
+        // 호버 템플릿에 날짜/금액 포맷 적용 (USD)
         traces.forEach(function(trace) {
             if (trace.x && trace.x.length > 0) {
                 trace.hovertemplate = '<b>%{customdata}</b><br>' +
-                    trace.name + ': %{y:,.2f}억원<br>' +
+                    trace.name + ': $%{y:,.2f}<br>' +
                     '<extra></extra>';
                 trace.customdata = trace.x.map(formatDate);
             }
@@ -1276,8 +1266,9 @@ $(document).ready(function() {
                 tickangle: -45
             },
             yaxis: {
-                title: '누적 실현손익 (억원)',
-                tickformat: ',.2f'
+                title: '누적 실현손익 (USD)',
+                tickprefix: '$',
+                tickformat: ',.0f'
             },
             hovermode: 'x unified',
             legend: {
@@ -1297,8 +1288,14 @@ $(document).ready(function() {
     }
     
     function formatCurrency(value) {
+        // USD 풀표기 (축약 없음)
         if (value === null || value === undefined || isNaN(value)) return 'N/A';
-        return new Intl.NumberFormat('ko-KR', { style: 'currency', currency: 'KRW' }).format(value);
+        return new Intl.NumberFormat('en-US', {
+            style: 'currency',
+            currency: 'USD',
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        }).format(value);
     }
     
     function formatPercent(value) {

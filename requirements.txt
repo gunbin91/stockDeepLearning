@@ -1,7 +1,6 @@
 pandas>=2.2.0
 numpy>=2.0.0
 scikit-learn>=1.4.0
-pykrx>=1.0.0
 openpyxl==3.1.2
 requests==2.31.0
 beautifulsoup4==4.12.2
@@ -9,6 +8,7 @@ lxml
 html5lib==1.1
 pandas-ta==0.4.67b0
 finance-datareader
+yfinance>=0.2.36
 psutil>=5.9.0
 setuptools==80.0.0
 

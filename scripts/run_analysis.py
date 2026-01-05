@@ -149,7 +149,8 @@ def run_analysis(analysis_date_str):
         feature_df_for_json = feature_df_for_json.where(pd.notna(feature_df_for_json), None)
         
         if '종목코드' in feature_df_for_json.columns:
-            feature_df_for_json['종목코드'] = feature_df_for_json['종목코드'].astype(str).str.zfill(6)
+            # NASDAQ 티커는 그대로 사용
+            feature_df_for_json['종목코드'] = feature_df_for_json['종목코드'].astype(str).str.strip()
             
         feature_df_path = os.path.join(str(path_manager.data_dir), 'cached_features.json')
         feature_df_for_json.to_json(feature_df_path, orient='records', force_ascii=False, indent=4)
@@ -179,7 +180,7 @@ def run_analysis(analysis_date_str):
 
         # 시장 현황 데이터 저장
         log_info("📊 시장 현황 데이터 처리 중...")
-        macro_cols = ['KOSPI', 'KOSPI_pct_1d', 'USDKRW', 'USDKRW_pct_1d', 'VIX', 'VIX_pct_1d']
+        macro_cols = ['IXIC', 'IXIC_pct_1d', 'IXIC_disparity_20', 'IXIC_MA20_Slope', 'VIX']
         market_condition = {}
         if all(col in feature_df.columns for col in macro_cols):
             market_condition = feature_df.iloc[0][macro_cols].to_dict()
@@ -345,9 +346,9 @@ def run_analysis(analysis_date_str):
             if '종목코드' not in final_ranked_df.columns:
                 final_ranked_df.reset_index(inplace=True)
             
-            # 종목코드 6자리 패딩 보장
-            final_ranked_df['종목코드'] = final_ranked_df['종목코드'].astype(str).str.zfill(6)
-            stock_list_df['종목코드'] = stock_list_df['종목코드'].astype(str).str.zfill(6)
+            # NASDAQ 티커는 그대로 사용 (KRX 6자리 패딩 제거)
+            final_ranked_df['종목코드'] = final_ranked_df['종목코드'].astype(str).str.strip()
+            stock_list_df['종목코드'] = stock_list_df['종목코드'].astype(str).str.strip()
             
             final_df_with_names = pd.merge(final_ranked_df, stock_list_df[['종목코드', '종목명']].drop_duplicates(), on='종목코드', how='left')
             log_info(f"   📊 종목명 병합 완료: {len(final_df_with_names):,}개 종목")
@@ -363,9 +364,17 @@ def run_analysis(analysis_date_str):
                 final_df_with_names.drop(columns=['종목명_x', '종목명_y'], inplace=True)
 
             log_info("   💰 가격 정보 병합 중...")
-            price_map = feature_df.set_index('종목코드')[['현재가', '기준일가']].to_dict(orient='index')
+            # 키 정합성: feature_df/결과df 모두 티커 strip
+            feature_df_local = feature_df.copy()
+            if '종목코드' in feature_df_local.columns:
+                feature_df_local['종목코드'] = feature_df_local['종목코드'].astype(str).str.strip()
+            final_df_with_names['종목코드'] = final_df_with_names['종목코드'].astype(str).str.strip()
+
+            price_map = feature_df_local.set_index('종목코드')[['현재가', '기준일가', '전날종가', '시가총액']].to_dict(orient='index')
             final_df_with_names['현재가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('현재가'))
             final_df_with_names['기준일가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('기준일가'))
+            final_df_with_names['전날종가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('전날종가'))
+            final_df_with_names['시가총액'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('시가총액'))
 
             # 최종 데이터프레임에 분석 기준일 컬럼 추가
             final_df_with_names['date'] = actual_analysis_date

@@ -301,13 +301,22 @@ def cleanup_backtest_process():
 
 def format_price_with_change(row):
     """가격과 등락율을 함께 포맷팅"""
-    price = f"{int(row['현재가']):,}"
-    change_percent = row['등락율']
+    current_price = row.get('현재가')
+    if current_price is None or pd.isna(current_price):
+        return "N/A"
+
+    # NASDAQ 전용: USD 기준으로 표시 (소수 2자리)
+    try:
+        price = f"{float(current_price):,.2f}"
+    except Exception:
+        return "N/A"
+
+    change_percent = row.get('등락율')
     if pd.isna(change_percent): 
-        return f"{price}원"
+        return f"${price}"
     sign = '+' if change_percent > 0 else ''
     formatted_change = f"{sign}{change_percent:.2f}%"
-    return f"{price}원<br>({formatted_change})"
+    return f"${price}<br>({formatted_change})"
 
 def format_change_rate(change_percent):
     """등락율 포맷팅"""
@@ -335,10 +344,15 @@ def load_cached_analysis_result():
 
             # 데이터프레임 후처리
             display_df = final_df.copy()
+
+            # 숫자 컬럼 정리 (NaN/문자 혼합 대비)
+            for col in ['현재가', '기준일가', '전날종가', 'final_score', 'ml_pred_proba', 'lgbm_pred_proba', 'volatility_score', '시가총액']:
+                if col in display_df.columns:
+                    display_df[col] = pd.to_numeric(display_df[col], errors='coerce')
             
-            # 종목코드 6자리 패딩 보장
+            # NASDAQ 티커는 그대로 사용
             if '종목코드' in display_df.columns:
-                display_df['종목코드'] = display_df['종목코드'].astype(str).str.zfill(6)
+                display_df['종목코드'] = display_df['종목코드'].astype(str).str.strip()
             
             if 'ml_pred_proba' in display_df.columns:
                 display_df['ml_pred_proba'] = display_df['ml_pred_proba'] * 100
@@ -357,27 +371,39 @@ def load_cached_analysis_result():
             if 'volatility_score' not in display_df.columns:
                 display_df['volatility_score'] = 50.0
             
-            display_df['등락율'] = ((display_df['현재가'] - display_df['기준일가']) / display_df['기준일가']) * 100
-            display_df['현재가(원)_formatted'] = display_df.apply(format_price_with_change, axis=1)
+            # 등락율 계산 (0 나누기/NaN 방어)
+            if '현재가' in display_df.columns and '기준일가' in display_df.columns:
+                denom = display_df['기준일가'].replace(0, np.nan)
+                display_df['등락율'] = ((display_df['현재가'] - display_df['기준일가']) / denom) * 100
+            else:
+                display_df['등락율'] = np.nan
+            display_df['현재가(USD)_formatted'] = display_df.apply(format_price_with_change, axis=1)
             
             # 전날 종가 대비 등락율 계산 (증권사 표준 방식)
             if '전날종가' in display_df.columns:
-                display_df['전날종가대비등락율'] = ((display_df['현재가'] - display_df['전날종가']) / display_df['전날종가']) * 100
+                denom_prev = display_df['전날종가'].replace(0, np.nan)
+                display_df['전날종가대비등락율'] = ((display_df['현재가'] - display_df['전날종가']) / denom_prev) * 100
                 display_df['등락율(%)'] = display_df['전날종가대비등락율'].apply(format_change_rate)
             else:
                 # 전날종가 데이터가 없는 경우 기존 로직 사용 (분석기준일 대비)
                 display_df['등락율(%)'] = display_df['등락율'].apply(format_change_rate)
 
-            rename_map = { '현재가': '현재가(원)', '시가총액': '시가총액(억)',  'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(원)'}
+            # NASDAQ: 시가총액은 USD 기준으로 저장됨. 화면에는 십만달러(USD 100,000) 단위로 표시.
+            if '시가총액' in display_df.columns:
+                display_df['시가총액'] = pd.to_numeric(display_df['시가총액'], errors='coerce')
+                display_df['시가총액'] = display_df['시가총액'] / 100000
+
+            # NASDAQ 전용: 통화/단위 표기를 USD로 통일
+            rename_map = { '현재가': '현재가(USD)', '시가총액': '시가총액(십만달러)',  'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(USD)'}
             display_df.rename(columns=rename_map, inplace=True)
             
-            display_columns = [ '최종순위', '종목명', '종목코드', '현재가(원)_formatted', '등락율(%)', '기준일가(원)', '최종점수(점)', '상승확률(%)', '변동성(점)', '시가총액(억)']
+            display_columns = [ '최종순위', '종목명', '종목코드', '현재가(USD)_formatted', '등락율(%)', '기준일가(USD)', '최종점수(점)', '상승확률(%)', '변동성(점)', '시가총액(십만달러)']
             
             # lgbm_pred_proba가 있으면 컬럼 목록에 추가 (이름은 그대로 유지)
             if 'lgbm_pred_proba' in display_df.columns:
                 display_columns.append('lgbm_pred_proba')
             
-            result_df = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(원)_formatted': '현재가(원)'})
+            result_df = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(USD)_formatted': '현재가(USD)'})
             
             return result_df, market_condition, analysis_date
         except Exception as e:
@@ -405,10 +431,22 @@ def _load_raw_analysis_json():
     if isinstance(data[0], dict):
         analysis_date = data[0].get('date')
 
-    # 정렬: 최종순위 있으면 기준, 없으면 그대로
+    # 정렬: 최종순위 있으면 기준, 없으면 그대로 (NaN/문자 혼합 방어)
     try:
         if isinstance(data[0], dict) and '최종순위' in data[0]:
-            data_sorted = sorted(data, key=lambda x: int(x.get('최종순위', 999999)))
+            def _safe_rank(item: dict) -> int:
+                try:
+                    v = item.get('최종순위', None)
+                    if v is None:
+                        return 999999
+                    fv = float(v)
+                    if not math.isfinite(fv):
+                        return 999999
+                    return int(fv)
+                except Exception:
+                    return 999999
+
+            data_sorted = sorted(data, key=_safe_rank)
         else:
             data_sorted = data
     except Exception:
@@ -611,25 +649,19 @@ def api_get_latest_analysis_result():
 def create_stock_chart(ticker_code, stock_name):
     """지정된 종목의 상세 기술적 분석 차트를 생성합니다."""
     try:
-        # Ensure ticker_code is a 6-digit string (이미 패딩된 경우 중복 패딩 방지)
-        padded_ticker_code = str(ticker_code).zfill(6)
+        # NASDAQ 티커는 그대로 사용
+        normalized_ticker_code = str(ticker_code).strip()
 
         # 데이터는 2년치를 불러와서 장기 이동평균선 계산에 사용
         end_date = datetime.now()
         start_date = end_date - timedelta(days=2*365)
         
-        # 하이브리드 방식으로 주가 데이터 수집 (Yahoo Finance → KRX → NAVER)
+        # NASDAQ 일봉 데이터 수집 (티커 그대로)
         df = None
         try:
-            df = fdr.DataReader(padded_ticker_code, start_date, end_date)
+            df = fdr.DataReader(normalized_ticker_code, start_date, end_date)
         except:
-            try:
-                df = fdr.DataReader(f'KRX:{padded_ticker_code}', start_date, end_date)
-            except:
-                try:
-                    df = fdr.DataReader(f'NAVER:{padded_ticker_code}', start_date, end_date)
-                except:
-                    df = None
+            df = None
         
         if df is None or df.empty:
             return None
@@ -734,7 +766,7 @@ def create_stock_chart(ticker_code, stock_name):
         
         # Y축 설정 개선
         fig.update_yaxes(
-            title_text="가격 (원)", 
+            title_text="가격 (USD)", 
             row=1, col=1,
             title_font=dict(size=12),
             tickfont=dict(size=10),
@@ -1028,6 +1060,10 @@ def start_analysis():
                 last_log_time = time.time()
                 process_timeout = 7200  # 2시간 타임아웃
                 no_output_timeout = 600  # 10분간 출력이 없으면 타임아웃
+                # 완료 이벤트가 안 오는 문제 방지:
+                # - 분석 스크립트가 "성공 로그"까지 출력했지만 프로세스가 종료되지 않는 경우(잔여 스레드 등)
+                # - 이 경우 팝업이 닫히지 않으므로, 성공 문구를 감지하면 선제적으로 완료 이벤트를 emit
+                emitted_complete = False
                 
                 # 프로세스 상태 모니터링을 위한 변수
                 process_start_time = time.time()
@@ -1123,6 +1159,12 @@ def start_analysis():
                             
                             # WebSocket으로 로그 전송 (터미널과 동시)
                             socketio.emit('analysis_log', {'message': message})
+
+                            # 성공 문구 감지 시: 프로세스 종료를 기다리지 않고 완료 이벤트를 먼저 전송
+                            # (클라이언트 팝업이 영원히 안 닫히는 현상 방지)
+                            if (not emitted_complete) and ("주식 분석이 성공적으로 완료되었습니다" in processed_line):
+                                emitted_complete = True
+                                socketio.emit('analysis_complete', {'success': True})
                         else:
                             # 더 이상 읽을 데이터가 없으면 잠시 대기
                             socketio.sleep(0.1)
@@ -1146,7 +1188,9 @@ def start_analysis():
                     return
                 
                 if return_code == 0:
-                    socketio.emit('analysis_complete', {'success': True})
+                    # 이미 성공 문구로 완료 이벤트를 보냈을 수 있음
+                    if not emitted_complete:
+                        socketio.emit('analysis_complete', {'success': True})
                 else:
                     error_msg = f'분석 실행 중 오류가 발생했습니다. (종료 코드: {return_code})'
                     socketio.emit('analysis_complete', {'success': False, 'error': error_msg})
@@ -1408,15 +1452,27 @@ def get_stock_chart(ticker_code):
     try:
         # 종목명 가져오기 (종목코드 정규화)
         stock_list_df = data_fetcher.fetch_stock_list()
-        normalized_ticker = str(ticker_code).zfill(6)
-        stock_info = stock_list_df[stock_list_df['종목코드'] == normalized_ticker]
-        if stock_info.empty:
-            return jsonify({'error': '종목을 찾을 수 없습니다.'}), 404
-        
-        stock_name = stock_info.iloc[0]['종목명']
+        normalized_ticker = str(ticker_code).strip()
+        # 기존 파일 호환: run_analysis에서 zfill(6)로 저장된 티커(예: 00TRSG)도 들어올 수 있음
+        candidates = [normalized_ticker]
+        if normalized_ticker.lstrip('0') and normalized_ticker.lstrip('0') != normalized_ticker:
+            candidates.append(normalized_ticker.lstrip('0'))
+
+        stock_name = None
+        resolved_ticker = normalized_ticker
+        for cand in candidates:
+            stock_info = stock_list_df[stock_list_df['종목코드'].astype(str).str.strip() == cand]
+            if not stock_info.empty:
+                stock_name = stock_info.iloc[0].get('종목명')
+                resolved_ticker = cand
+                break
+
+        if not stock_name:
+            # 종목명 조회 실패해도 차트 생성 시도 (티커 그대로 사용)
+            stock_name = resolved_ticker
         
         # 차트 생성
-        fig = create_stock_chart(normalized_ticker, stock_name)
+        fig = create_stock_chart(resolved_ticker, stock_name)
         if fig is None:
             return jsonify({'error': '차트를 생성할 수 없습니다.'}), 500
         
@@ -1436,7 +1492,13 @@ def get_stock_features(ticker_code):
             return jsonify({'error': '피처 데이터를 찾을 수 없습니다.'}), 404
         
         cached_features_df = pd.read_json(cached_features_path, orient='records', dtype={'종목코드': str})
-        selected_stock_features = cached_features_df[cached_features_df['종목코드'] == str(ticker_code).zfill(6)]
+        normalized_ticker = str(ticker_code).strip()
+        candidates = [normalized_ticker]
+        if normalized_ticker.lstrip('0') and normalized_ticker.lstrip('0') != normalized_ticker:
+            candidates.append(normalized_ticker.lstrip('0'))
+
+        norm_series = cached_features_df['종목코드'].astype(str).str.strip()
+        selected_stock_features = cached_features_df[norm_series.isin(candidates)]
         
         if selected_stock_features.empty:
             return jsonify({'error': '해당 종목의 피처 데이터를 찾을 수 없습니다.'}), 404
@@ -1449,7 +1511,7 @@ def get_stock_features(ticker_code):
             'disparity_120',     # 120일 이격도
             'disparity_240',     # 240일 이격도
             'disparity_20',      # 20일 이격도
-            'KOSPI_disparity_20',  # KOSPI 20일 이격도
+            'IXIC_disparity_20',  # IXIC 20일 이격도 (NASDAQ 지수)
             # 추가된 피처
             'Trend_Pullback_Score',
             'Position_Range_60',
@@ -1458,7 +1520,7 @@ def get_stock_features(ticker_code):
             'MA20_Slope',   # 20일 이동평균선 기울기
             'MA120_Slope',   # 120일 이동평균선 기울기
             'MA240_Slope',   # 240일 이동평균선 기울기
-            'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
+            'IXIC_MA20_Slope',  # IXIC 20일 이동평균선 기울기 (NASDAQ 지수)
             # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
             # 새로 추가된 피처
             'RVOL',  # 상대 거래량 (Relative Volume)
@@ -1629,7 +1691,7 @@ def calculate_feature_correlation():
             'ADX_14',
             'disparity_120',  # 120일 이격도
             'disparity_240',  # 240일 이격도
-            'KOSPI_disparity_20',  # KOSPI 20일 이격도
+            'IXIC_disparity_20',  # IXIC 20일 이격도 (NASDAQ 지수)
             # 추가된 피처
             'Z_Score_20',
             'Position_Range_60',
@@ -1638,7 +1700,7 @@ def calculate_feature_correlation():
             'MA20_Slope',  # 20일 이동평균선 기울기
             'MA120_Slope',  # 120일 이동평균선 기울기
             'MA240_Slope',  # 240일 이동평균선 기울기
-            'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
+            'IXIC_MA20_Slope',  # IXIC 20일 이동평균선 기울기 (NASDAQ 지수)
             'Ichi_Kijun_Gap',        # 일목 기준선 괴리율
             'Ichi_Cloud_Score',      # 일목 구름대 돌파 점수
             'Ichi_TK_Cross_Power',   # 일목 전환-기준선 크로스 파워

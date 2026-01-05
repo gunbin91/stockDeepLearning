@@ -1,12 +1,12 @@
 """
-주식 데이터 수집 모듈
-====================
+주식 데이터 수집 모듈 (NASDAQ 전용)
+=================================
 
-이 파일은 주식 분석에 필요한 모든 데이터를 수집합니다.
-- 종목 목록 수집 (KOSPI, KOSDAQ)
-- 재무 데이터 수집 (PER, PBR, ROE 등)
+이 파일은 NASDAQ 주식 분석에 필요한 데이터를 수집합니다.
+- 종목 목록 수집 (NASDAQ)
+- (재무 데이터) NASDAQ 버전은 외부 재무 API 없이 파이프라인 호환 컬럼을 NaN으로 채움
 - 주가 데이터 수집 (가격, 거래량, 기술적 지표)
-- 거시경제 데이터 수집 (KOSPI 지수, 환율, VIX 등)
+- 거시경제 데이터 수집 (IXIC, VIX)
 
 주요 기능:
 - 실시간 데이터 수집
@@ -17,7 +17,6 @@
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
-from pykrx import stock
 import pandas_ta as ta
 import concurrent.futures
 from tqdm import tqdm
@@ -27,6 +26,9 @@ import time
 import gc
 import locale
 import platform
+from functools import lru_cache
+import json
+import urllib.request
 
 # Windows 환경에서 로케일 설정 (FinanceDataReader 내부 오류 방지)
 if platform.system() == 'Windows':
@@ -44,6 +46,116 @@ from exceptions import DataFetchError, DataValidationError
 
 from path_manager import path_manager
 
+# =================================================================
+# NASDAQ 시가총액 통일 소스: NASDAQ Screener API
+# - Yahoo(yfinance)는 환경에 따라 401(Unauthorized/crumb)로 막힐 수 있어 기본 경로에서 배제
+# - 한 번 호출로 다수 심볼의 marketCap(USD)을 가져올 수 있어 대량 티커에도 안정적
+# =================================================================
+@lru_cache(maxsize=1)
+def _get_nasdaq_screener_marketcap_map() -> dict:
+    """
+    NASDAQ Screener API에서 symbol -> marketCap(USD) 매핑을 가져옵니다.
+    Returns:
+        dict: { 'AAPL': 4004539426530.0, ... }
+    """
+    url = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.nasdaq.com/",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read()
+    data = json.loads(raw.decode("utf-8", "replace"))
+    rows = (data.get("data") or {}).get("rows") or []
+
+    def _to_float_marketcap(v):
+        if v is None:
+            return np.nan
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v).strip()
+        if not s or s.upper() in ("N/A", "NA", "NULL", "NONE", "-"):
+            return np.nan
+        s = s.replace("$", "").replace(",", "")
+        try:
+            return float(s)
+        except Exception:
+            return np.nan
+
+    m = {}
+    for r in rows:
+        sym = str(r.get("symbol") or "").strip()
+        if not sym:
+            continue
+        mc = _to_float_marketcap(r.get("marketCap"))
+        if np.isfinite(mc) and mc > 0:
+            m[sym] = mc
+    return m
+
+# =================================================================
+# 실시간 시가총액/상장주식수 조회 (NASDAQ): yfinance 사용 (파일 캐시 없음)
+# =================================================================
+
+@lru_cache(maxsize=10000)
+def _get_realtime_marketcap_and_shares_yf(ticker: str):
+    """
+    yfinance로 실시간 marketCap / sharesOutstanding을 조회합니다.
+    - 파일 캐시는 사용하지 않음(요청대로)
+    - 동일 실행 내 중복 호출만 LRU로 줄임(네트워크 폭발 방지)
+
+    Returns:
+        (marketcap_usd, shares_outstanding)  둘 다 실패하면 (np.nan, np.nan)
+    """
+    try:
+        import yfinance as yf
+    except Exception:
+        return (np.nan, np.nan)
+
+    t = str(ticker).strip()
+    # Yahoo Finance 티커 관례 보정:
+    # - 클래스주/특수 티커는 '.' 대신 '-'를 사용하는 경우가 많음 (예: BRK.B -> BRK-B)
+    t = t.replace(".", "-")
+    if not t:
+        return (np.nan, np.nan)
+
+    marketcap = np.nan
+    shares = np.nan
+    try:
+        tk = yf.Ticker(t)
+
+        # 1) fast_info 우선 (가볍고 빠름)
+        try:
+            fi = getattr(tk, "fast_info", None)
+            if fi:
+                # yfinance 버전에 따라 key명이 다를 수 있어 방어적으로 처리
+                mc = fi.get("market_cap") or fi.get("marketCap")
+                sh = fi.get("shares") or fi.get("sharesOutstanding")
+                if mc is not None and np.isfinite(float(mc)) and float(mc) > 0:
+                    marketcap = float(mc)
+                if sh is not None and np.isfinite(float(sh)) and float(sh) > 0:
+                    shares = float(sh)
+        except Exception:
+            pass
+
+        # 2) info fallback (무겁지만 더 많은 티커에서 동작)
+        if not (np.isfinite(marketcap) or np.isfinite(shares)):
+            try:
+                info = tk.get_info()
+                mc = info.get("marketCap")
+                sh = info.get("sharesOutstanding")
+                if mc is not None and np.isfinite(float(mc)) and float(mc) > 0:
+                    marketcap = float(mc)
+                if sh is not None and np.isfinite(float(sh)) and float(sh) > 0:
+                    shares = float(sh)
+            except Exception:
+                pass
+
+        return (marketcap, shares)
+    except Exception:
+        return (np.nan, np.nan)
 # =================================================================
 # 유틸리티 함수: 정규화된 선형회귀기울기 계산 (최신 값만)
 # =================================================================
@@ -105,13 +217,19 @@ def get_actual_trading_date(selected_analysis_date):
     Returns:
         datetime.date: 실제 거래일
     """
-    today = datetime.now().date()
+    # NASDAQ 전용: 로컬/WSL 시간대가 KST여도 일자 판단이 흔들리지 않도록 뉴욕 시간 기준 사용
+    try:
+        from zoneinfo import ZoneInfo
+        ny_now = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        ny_now = datetime.utcnow()
+    today = ny_now.date()
     selected_date = selected_analysis_date.date()
     
-    # 삼성전자(005930)로 실제 거래일 확인
+    # AAPL로 실제 거래일 확인 (NASDAQ/US 기준)
     try:
-        sample_fetch_start = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
-        sample_df = fdr.DataReader('005930', sample_fetch_start, datetime.now().strftime('%Y-%m-%d'))
+        sample_fetch_start = (ny_now - timedelta(days=10)).strftime('%Y-%m-%d')
+        sample_df = fdr.DataReader('AAPL', sample_fetch_start, ny_now.strftime('%Y-%m-%d'))
         if not sample_df.empty:
             sample_analysis_date_ts = pd.Timestamp(selected_analysis_date)
             sample_temp = sample_df[sample_df.index <= sample_analysis_date_ts]
@@ -149,99 +267,85 @@ def get_fs_data_from_pit(stock_list, selected_analysis_date, use_cache=True):
     return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
 
 def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
-    """실시간 재무데이터 수집"""
+    """실시간 재무데이터 수집 (NASDAQ 버전: 외부 재무 API 미사용, NaN 채움)"""
     try:
-        log_info("📊 재무데이터 수집 중...")
-        
-        # 실제 거래일 확인
-        actual_trading_date = get_actual_trading_date(selected_analysis_date)
-        analysis_date_str = actual_trading_date.strftime('%Y%m%d')
-        
-        log_info(f"📅 거래일 기준 재무데이터 수집: {actual_trading_date} ({analysis_date_str})")
-        
-        # pykrx API로 재무데이터 수집
-        df_fundamental = stock.get_market_fundamental(analysis_date_str, market="ALL")
-        
-        if df_fundamental.empty:
-            log_warning("재무데이터를 가져올 수 없습니다. 재시도합니다.")
-            return _get_historical_financial_data(stock_list, selected_analysis_date)
-        
-        # 데이터 정제
-        if 'PBR' in df_fundamental.columns:
-            df_fundamental = df_fundamental[df_fundamental['PBR'] > 0]
-        
-        if df_fundamental.empty:
-            log_warning("유효한 재무데이터가 없습니다. 재시도합니다.")
-            return _get_historical_financial_data(stock_list, selected_analysis_date)
-        
-        # 컬럼명 정리
-        df_fundamental.reset_index(inplace=True)
-        df_fundamental.rename(columns={'티커': '종목코드'}, inplace=True)
-        df_fundamental['date'] = pd.to_datetime(analysis_date_str, format='%Y%m%d')
-        
-        # 요청된 종목만 필터링
-        requested_tickers = set(stock_list['종목코드'].astype(str))
-        df_fundamental = df_fundamental[df_fundamental['종목코드'].astype(str).isin(requested_tickers)]
-        
-        # stock_list와 병합
-        result_df = pd.merge(stock_list[['종목코드']], df_fundamental, on='종목코드', how='left')
-        
-        log_success(f"재무데이터 수집 완료: {len(result_df.dropna())}개 종목")
+        log_info("📊 재무데이터 수집: NASDAQ 버전은 재무 데이터 없이 진행합니다(PER/PBR 등은 NaN).")
+
+        if stock_list is None or stock_list.empty:
+            return pd.DataFrame()
+
+        result_df = stock_list[['종목코드']].copy()
+        # 학습/분석 파이프라인 호환 컬럼 (필요시 추가)
+        for col in ['PER', 'PBR', 'ROE', 'EPS', 'BPS', 'DIV', 'DPS']:
+            result_df[col] = np.nan
+        result_df['date'] = pd.to_datetime(get_actual_trading_date(selected_analysis_date))
+
         return result_df
-        
     except Exception as e:
         log_error(f"재무데이터 수집 실패: {e}")
-        log_info("재무데이터 수집을 재시도합니다.")
-        return _fetch_realtime_financial_data(stock_list, selected_analysis_date)
+        # NASDAQ 버전에서는 재시도 루프를 돌지 않고 빈 데이터로 폴백
+        if stock_list is None or stock_list.empty:
+            return pd.DataFrame()
+        result_df = stock_list[['종목코드']].copy()
+        for col in ['PER', 'PBR', 'ROE', 'EPS', 'BPS', 'DIV', 'DPS']:
+            result_df[col] = np.nan
+        result_df['date'] = pd.to_datetime(get_actual_trading_date(selected_analysis_date))
+        return result_df
 
 
 
 def _get_stock_list_from_marcap(analysis_date=None):
-    """KRX-MARCAP에서 주식 목록 가져오기 (통일된 함수)"""
+    """NASDAQ 주식 목록 가져오기 (통일된 함수)"""
     try:
-        if analysis_date:
-            # 과거 날짜용
-            date_str = analysis_date.strftime('%Y%m%d')
-            log_info(f"FinanceDataReader를 통해 {date_str} 기준 종목 시가총액 정보 수집 (KRX-MARCAP)...")
-            df_marcap = fdr.StockListing('KRX-MARCAP', date_str)
+        # FinanceDataReader가 NASDAQ 심볼 리스트를 제공 (티커 그대로)
+        log_info("FinanceDataReader를 통해 NASDAQ 종목 리스트 수집 (NASDAQ)...")
+        df_list = fdr.StockListing('NASDAQ')
+        if df_list is None or df_list.empty:
+            raise DataFetchError("NASDAQ 종목 리스트가 비어있습니다.", source="FinanceDataReader")
+
+        # FDR 버전에 따라 컬럼명이 다를 수 있어 방어적으로 처리
+        symbol_col = 'Symbol' if 'Symbol' in df_list.columns else ('Code' if 'Code' in df_list.columns else None)
+        name_col = 'Name' if 'Name' in df_list.columns else ('Security Name' if 'Security Name' in df_list.columns else None)
+        if symbol_col is None:
+            raise DataFetchError(f"NASDAQ 리스트에서 심볼 컬럼을 찾을 수 없습니다. columns={list(df_list.columns)}", source="FinanceDataReader")
+        if name_col is None:
+            # 종목명 컬럼이 없는 경우에도 파이프라인은 동작하도록 심볼을 이름으로 사용
+            name_col = symbol_col
+
+        stock_list = df_list[[symbol_col, name_col]].copy()
+        stock_list.rename(columns={symbol_col: '종목코드', name_col: '종목명'}, inplace=True)
+        stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.strip()
+        stock_list['종목명'] = stock_list['종목명'].astype(str).str.strip()
+
+        # 시가총액/상장주식수는 NASDAQ 리스트에서 제공되지 않을 수 있음 → 통일된 소스로 보강
+        if 'MarketCap' in df_list.columns:
+            stock_list['시가총액_기준일'] = pd.to_numeric(df_list['MarketCap'], errors='coerce')
+        elif 'Marcap' in df_list.columns:
+            stock_list['시가총액_기준일'] = pd.to_numeric(df_list['Marcap'], errors='coerce')
         else:
-            # 현재 날짜용
-            log_info("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보 수집 (KRX-MARCAP)...")
-            df_marcap = fdr.StockListing('KRX-MARCAP')
-        
-        # 스팩, 리츠 제외
-        df_marcap = df_marcap[~df_marcap['Name'].str.contains('스팩|리츠', na=False)].copy()
-        
-        # KONEX 제외 (KOSPI, KOSDAQ만 포함)
-        if 'Market' in df_marcap.columns:
-            df_marcap = df_marcap[df_marcap['Market'].isin(['KOSPI', 'KOSDAQ'])].copy()
-            log_info(f"KONEX 제외 후 종목 수: {len(df_marcap)}개")
-        
-        # 상장주식수가 있는 경우만 필터링
-        if 'Stocks' in df_marcap.columns:
-            df_marcap = df_marcap[df_marcap['Stocks'] > 0]
-        
-        # 시가총액 100억 미만 제외 (100억 = 10,000,000,000원)
-        if 'Marcap' in df_marcap.columns:
-            min_marcap = 10_000_000_000  # 100억원
-            before_count = len(df_marcap)
-            df_marcap = df_marcap[df_marcap['Marcap'] >= min_marcap].copy()
-            excluded_count = before_count - len(df_marcap)
-            if excluded_count > 0:
-                log_info(f"시가총액 100억 미만 종목 {excluded_count}개 제외")
-        
-        # 컬럼명 정리 및 종목코드 6자리 패딩
-        stock_list = df_marcap[['Code', 'Name', 'Stocks']].copy()
-        stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명', 'Stocks': '상장주식수'}, inplace=True)
-        
-        # 종목코드를 6자리로 패딩
-        stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.zfill(6)
-        
-        log_info(f"총 {len(stock_list)}개 종목을 찾았습니다.")
+            stock_list['시가총액_기준일'] = np.nan
+
+        stock_list['상장주식수'] = np.nan
+
+        # NASDAQ 시총 통일: Screener API marketCap으로 NaN만 보강
+        try:
+            missing_mask = stock_list['시가총액_기준일'].isna() | (pd.to_numeric(stock_list['시가총액_기준일'], errors='coerce') <= 0)
+            if missing_mask.any():
+                screener_map = _get_nasdaq_screener_marketcap_map()
+                # 티커 관례 보정: '.' -> '-' (예: BRK.B -> BRK-B)
+                tickers = stock_list.loc[missing_mask, '종목코드'].astype(str).str.strip()
+                mapped = tickers.map(screener_map)
+                mapped2 = tickers.str.replace('.', '-', regex=False).map(screener_map)
+                combined = mapped.combine_first(mapped2)
+                stock_list.loc[missing_mask, '시가총액_기준일'] = combined.values
+        except Exception as e:
+            log_warning(f"NASDAQ Screener 시가총액 보강 실패(무시하고 진행): {e}")
+
+        log_info(f"총 {len(stock_list)}개 NASDAQ 종목을 찾았습니다.")
         return stock_list
         
     except Exception as e:
-        error_msg = f"FinanceDataReader API 통신 실패 (KRX-MARCAP): {e}"
+        error_msg = f"FinanceDataReader API 통신 실패 (NASDAQ StockListing): {e}"
         log_error(error_msg)
         raise DataFetchError(error_msg, source="FinanceDataReader")
 
@@ -264,24 +368,13 @@ def _fetch_macro_data(start_date, end_date):
         macro_data = {}
         
         try:
-            kospi = fdr.DataReader('KS11', start_date_str, end_date_str)
-            if not kospi.empty:
-                # 날짜 인덱스를 안전하게 처리 (format='mixed' 사용)
-                kospi_copy = kospi.copy()
-                kospi_copy.index = pd.to_datetime(kospi_copy.index, format='mixed', errors='coerce')
-                macro_data['KOSPI'] = kospi_copy['Close']
+            ixic = fdr.DataReader('IXIC', start_date_str, end_date_str)
+            if not ixic.empty:
+                ixic_copy = ixic.copy()
+                ixic_copy.index = pd.to_datetime(ixic_copy.index, format='mixed', errors='coerce')
+                macro_data['IXIC'] = ixic_copy['Close']
         except Exception as e:
-            log_warning(f"KOSPI 데이터 수집 실패: {e}")
-        
-        try:
-            usdkrw = fdr.DataReader('USD/KRW', start_date_str, end_date_str)
-            if not usdkrw.empty:
-                # 날짜 인덱스를 안전하게 처리 (format='mixed' 사용)
-                usdkrw_copy = usdkrw.copy()
-                usdkrw_copy.index = pd.to_datetime(usdkrw_copy.index, format='mixed', errors='coerce')
-                macro_data['USDKRW'] = usdkrw_copy['Close']
-        except Exception as e:
-            log_warning(f"USD/KRW 데이터 수집 실패: {e}")
+            log_warning(f"IXIC 데이터 수집 실패: {e}")
         
         try:
             vix = fdr.DataReader('^VIX', start_date_str, end_date_str)
@@ -295,26 +388,24 @@ def _fetch_macro_data(start_date, end_date):
             
         if macro_data:
             macro_df = pd.concat(macro_data.values(), axis=1, keys=macro_data.keys()).ffill()
-            # pct_1d는 KOSPI, USDKRW만 생성 (VIX는 생성하지 않음)
-            if 'KOSPI' in macro_df.columns:
-                macro_df['KOSPI_pct_1d'] = macro_df['KOSPI'].pct_change(1)
-            if 'USDKRW' in macro_df.columns:
-                macro_df['USDKRW_pct_1d'] = macro_df['USDKRW'].pct_change(1)
+            # pct_1d는 IXIC만 생성 (VIX는 생성하지 않음)
+            if 'IXIC' in macro_df.columns:
+                macro_df['IXIC_pct_1d'] = macro_df['IXIC'].pct_change(1)
             if 'VIX' in macro_df.columns:
                 # VIX_pct_1d는 생성하지 않음 (삭제 요청)
                 pass
             
-            # KOSPI 변동성 및 이격도 계산 (종목 데이터와 동일한 방식)
-            if 'KOSPI' in macro_df.columns:
-                kospi_close = macro_df['KOSPI']
+            # IXIC 이격도 및 MA20_Slope 계산
+            if 'IXIC' in macro_df.columns:
+                ixic_close = macro_df['IXIC']
                 
                 # 이격도 계산 (종목 데이터와 동일한 방식)
                 # 이격도 = (현재가 / 이동평균) * 100
                 for period in [20]:
-                    ma = kospi_close.rolling(window=period).mean()
-                    macro_df[f'KOSPI_disparity_{period}'] = (kospi_close / ma) * 100
+                    ma = ixic_close.rolling(window=period).mean()
+                    macro_df[f'IXIC_disparity_{period}'] = (ixic_close / ma) * 100
                 
-                # KOSPI 변동성 1M 계산 (20일 기준) - 2024년 12월 제거
+                # (NASDAQ 전용) 국내 지표 계산은 사용하지 않음
                 # try:
                 #     kospi_std_20 = kospi_close.rolling(window=20).std()
                 #     kospi_mean_20 = kospi_close.rolling(window=20).mean()
@@ -323,18 +414,15 @@ def _fetch_macro_data(start_date, end_date):
                 #     log_warning(f"KOSPI 변동성(1M) 계산 실패: {e}")
                 #     macro_df['KOSPI_변동성(1M)'] = np.nan
                 
-                # KOSPI_MA20_Slope 계산 (KOSPI 20일 이동평균선 기울기)
+                # IXIC_MA20_Slope 계산 (IXIC 20일 이동평균선 기울기)
                 try:
                     from data_processor import calculate_normalized_linear_regression_slope
-                    kospi_ma20 = kospi_close.rolling(window=20).mean()
-                    macro_df['KOSPI_MA20_Slope'] = calculate_normalized_linear_regression_slope(kospi_ma20, window=20)
+                    ixic_ma20 = ixic_close.rolling(window=20).mean()
+                    macro_df['IXIC_MA20_Slope'] = calculate_normalized_linear_regression_slope(ixic_ma20, window=20)
                 except Exception as e:
-                    log_warning(f"KOSPI_MA20_Slope 계산 실패: {e}")
-                    macro_df['KOSPI_MA20_Slope'] = np.nan
-            
-            # 인덱스를 date 컬럼으로 변환 (merge_asof를 위해)
-            macro_df.reset_index(inplace=True)
-            macro_df.rename(columns={'index': 'date'}, inplace=True)
+                    log_warning(f"IXIC_MA20_Slope 계산 실패: {e}")
+                    macro_df['IXIC_MA20_Slope'] = np.nan
+
             log_info("✅ 거시 경제 지표 수집 완료.")
             return macro_df
         else:
@@ -347,37 +435,58 @@ def _fetch_macro_data(start_date, end_date):
         return pd.DataFrame()
 
 def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for_fetch, selected_analysis_date, latest_fs_df):
-    ticker = stock_info['종목코드']; shares = stock_info['상장주식수']
+    ticker = stock_info['종목코드']
+    shares = stock_info.get('상장주식수', np.nan)
     try:
         fetch_start = (pd.to_datetime(start_date_for_fetch) - timedelta(days=60)).strftime('%Y-%m-%d')
         
-        # 하이브리드 방식으로 주가 데이터 수집 (Yahoo Finance → KRX → NAVER)
+        # NASDAQ 일봉 주가 데이터 수집 (티커 그대로)
         df_price_full = None
         try:
             df_price_full = fdr.DataReader(ticker, fetch_start, end_date_for_fetch)
         except:
-            try:
-                df_price_full = fdr.DataReader(f'KRX:{ticker}', fetch_start, end_date_for_fetch)
-            except:
-                try:
-                    df_price_full = fdr.DataReader(f'NAVER:{ticker}', fetch_start, end_date_for_fetch)
-                except:
-                    df_price_full = None
+            df_price_full = None
         
         if df_price_full is None or df_price_full.empty or len(df_price_full) < 251 + 60: return None, None
         df_price_full.rename(columns={'Open':'시가', 'Close':'종가', 'High':'고가', 'Low':'저가', 'Volume':'거래량'}, inplace=True)
 
         selected_analysis_date_ts = pd.Timestamp(selected_analysis_date)
-        df_temp = df_price_full[df_price_full.index <= selected_analysis_date_ts]
-        if df_temp.empty: return None, None
-        actual_analysis_date = df_temp.index.max()
-        reference_date_price = df_temp.loc[actual_analysis_date]['종가']
-        latest_current_price = df_price_full.iloc[-1]['종가']
+
+        # -----------------------------------------------------------------
+        # NASDAQ 버전 거래/가격 보정 (코스피 버전의 "삼성전자 거래일 보정"과 동일한 철학)
+        # - 선택 기준일 <= 구간에서 "종가가 유효한 마지막 날짜"를 실제 기준일로 사용
+        # - 최신 현재가도 "종가가 유효한 마지막 값"을 사용 (NaN이면 N/A로 떨어지는 문제 방지)
+        # - 전날종가도 "기준일 이전의 마지막 유효 종가"를 사용
+        # -----------------------------------------------------------------
+        df_upto = df_price_full[df_price_full.index <= selected_analysis_date_ts].copy()
+        if df_upto.empty:
+            return None, None
+
+        # 종가 유효값 기준으로 실제 분석일 찾기
+        if '종가' not in df_upto.columns:
+            return None, None
+
+        df_upto_valid = df_upto[df_upto['종가'].notna()].copy()
+        if df_upto_valid.empty:
+            # 해당 기간에 유효 종가가 없으면 스킵
+            return None, None
+
+        actual_analysis_date = df_upto_valid.index.max()
+        reference_date_price = float(df_upto_valid.loc[actual_analysis_date]['종가'])
+
+        # 최신 현재가: 전체 구간에서 종가 유효 마지막 값 사용
+        df_full_valid = df_price_full[df_price_full['종가'].notna()]
+        latest_current_price = float(df_full_valid.iloc[-1]['종가']) if not df_full_valid.empty else float('nan')
+
+        # 전날종가: 기준일 이전 유효 종가
+        df_prev_valid = df_upto_valid[df_upto_valid.index < actual_analysis_date]
+        prev_close = float(df_prev_valid.iloc[-1]['종가']) if not df_prev_valid.empty else latest_current_price
         
         df_for_indicators = df_price_full[df_price_full.index <= actual_analysis_date].copy()
         
-        fs_data = latest_fs_df[latest_fs_df['종목코드'] == ticker]
-        if fs_data.empty or fs_data[['PER', 'PBR']].isnull().values.any(): return None, None
+        fs_data = pd.DataFrame()
+        if latest_fs_df is not None and not latest_fs_df.empty and '종목코드' in latest_fs_df.columns:
+            fs_data = latest_fs_df[latest_fs_df['종목코드'] == ticker]
         
         latest_data = {} 
 
@@ -407,10 +516,28 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             log_warning(f"RVOL(1W) 계산 실패 ({ticker}): {e}")
             latest_data['RVOL(1W)'] = np.nan
         
+        # --------------------------------------------------------------
+        # 시가총액 통일 (NASDAQ Screener API 기반 marketCap)
+        # - Yahoo(yfinance)는 현재 환경에서 401로 막힐 수 있어 기본 경로에서 사용하지 않음
+        # - 시총 피처(log_mktcap/시총 회전율) 목적에는 marketCap(USD) 자체가 가장 안정적
+        # --------------------------------------------------------------
+        marketcap_usd_ref = np.nan
+        marketcap_hint = stock_info.get('시가총액_기준일', np.nan)
+        try:
+            if pd.notna(marketcap_hint) and float(marketcap_hint) > 0:
+                marketcap_usd_ref = float(marketcap_hint)
+            # fallback: shares가 유효한 경우에만 기준일가*shares로 계산 (향후 확장용)
+            elif pd.notna(shares) and shares > 0 and pd.notna(reference_date_price) and reference_date_price > 0:
+                marketcap_usd_ref = float(reference_date_price) * float(shares)
+        except Exception:
+            marketcap_usd_ref = np.nan
+
+        latest_data['시가총액'] = marketcap_usd_ref
+
         # 시총 회전율 계산
         try:
-            시가총액 = reference_date_price * shares
-            if 시가총액 > 0:
+            시가총액 = marketcap_usd_ref
+            if pd.notna(시가총액) and 시가총액 > 0:
                 # 시총 회전율(1W): 5일 평균 거래대금 / 시가총액 * 100
                 거래대금_5일_평균 = df_for_indicators['거래대금'].rolling(window=5).mean().iloc[-1]
                 if pd.notna(거래대금_5일_평균):
@@ -432,11 +559,20 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             latest_data['시총 회전율(1W)'] = np.nan
             latest_data['시총 회전율(3M)'] = np.nan
         
-        latest_data['log_mktcap'] = np.log(reference_date_price * shares) if (reference_date_price * shares) > 0 else np.nan
-        latest_data['이익수익률'] = 1 / fs_data['PER'].values[0] if fs_data['PER'].values[0] != 0 else np.nan
+        # 시가총액: NASDAQ Screener 기반 힌트(또는 위에서 계산된 marketcap_usd_ref)로 log 변환
+        if pd.notna(marketcap_hint) and marketcap_hint > 0:
+            latest_data['log_mktcap'] = np.log(marketcap_hint)
+        elif pd.notna(marketcap_usd_ref) and marketcap_usd_ref > 0:
+            latest_data['log_mktcap'] = np.log(marketcap_usd_ref)
+        else:
+            latest_data['log_mktcap'] = np.nan
 
-        latest_data['수익률(1M)'] = df_for_indicators['종가'].pct_change(20).iloc[-1]
-        latest_data['수익률(3M)'] = df_for_indicators['종가'].pct_change(60).iloc[-1]
+        # 재무 피처는 NASDAQ 버전에서 기본 NaN (필요 시 추후 yfinance/SEC 등으로 확장)
+        latest_data['이익수익률'] = np.nan
+
+        # NASDAQ 전용 정리:
+        # - 수익률(1M/3M) 피처는 과거에 제거된 피처이며 현재 파이프라인에서 사용하지 않음
+        # - 불필요한 계산/컬럼 생성을 제거하여 성능 및 로그 노이즈를 줄임
         
         # ATR 계산 (5일, 20일, 60일)
         atr_5 = df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=5)
@@ -601,7 +737,12 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             if feature in df_for_indicators.columns:
                  latest_data[feature] = df_for_indicators[feature].iloc[-1]
 
-        latest_data.update(fs_data.iloc[0].to_dict())
+        if fs_data is not None and not fs_data.empty:
+            latest_data.update(fs_data.iloc[0].to_dict())
+        else:
+            # 파이프라인 호환을 위해 기본 컬럼을 NaN으로 채움
+            for col in ['PER', 'PBR', 'ROE', 'EPS', 'BPS', 'DIV', 'DPS']:
+                latest_data[col] = np.nan
         
         # PBR_log 계산 (PBR 로그 변환) - 2024년 12월 제거
         # if 'PBR' in latest_data and pd.notna(latest_data['PBR']) and latest_data['PBR'] > 0:
@@ -609,16 +750,7 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         # else:
         #     latest_data['PBR_log'] = np.nan
             
-        # [신규 추가] 로그 수익률(1M) (Log Return 1M)
-        try:
-            # 최근 20일 전 데이터가 있어야 계산 가능
-            if len(df_for_indicators) >= 21:
-                latest_data['Log_Return_20'] = np.log(df_for_indicators['종가'].iloc[-1] / df_for_indicators['종가'].shift(20).iloc[-1])
-            else:
-                latest_data['Log_Return_20'] = np.nan
-        except Exception as e:
-            log_warning(f"Log_Return_20 계산 실패 ({ticker}): {e}")
-            latest_data['Log_Return_20'] = np.nan
+        # [정리] Log_Return_20도 현재 피처 세트에서 사용하지 않으므로 계산을 생략합니다.
             
         # HV 변동성 (5일, 20일, 60일)
         try:
@@ -739,11 +871,13 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         latest_data['종목명'] = stock_info['종목명']
         latest_data['현재가'] = latest_current_price
         latest_data['기준일가'] = reference_date_price
-        latest_data['전날종가'] = df_price_full.iloc[-2]['종가'] if len(df_price_full) >= 2 else latest_current_price  # 전날 종가 추가
-        if '시가총액_기준일' in stock_info and pd.notna(stock_info['시가총액_기준일']):
-            latest_data['시가총액'] = stock_info['시가총액_기준일'] / 1_0000_0000
+        latest_data['전날종가'] = prev_close  # 전날 종가(유효값) 추가
+        if pd.notna(marketcap_hint) and marketcap_hint > 0:
+            latest_data['시가총액'] = marketcap_hint
+        elif pd.notna(shares) and shares > 0:
+            latest_data['시가총액'] = reference_date_price * shares
         else:
-            latest_data['시가총액'] = (reference_date_price * shares) / 1_0000_0000
+            latest_data['시가총액'] = np.nan
         
         
         latest_data['종목코드'] = ticker
@@ -759,7 +893,7 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     주식 분석에 필요한 모든 데이터를 수집하고 처리합니다:
     1. 재무 데이터 수집 (PER, PBR, ROE 등)
     2. 주가 데이터 수집 및 기술적 지표 계산
-    3. 거시경제 데이터 수집 (KOSPI, 환율, VIX 등)
+    3. 거시경제 데이터 수집 (IXIC, VIX 등)
     4. 데이터 정제 및 병합
     
     Args:
@@ -770,17 +904,26 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     Returns:
         tuple: (처리된 데이터프레임, 실제 분석일)
     """
-    today = datetime.now()
-    end_date_for_fetch = today.strftime('%Y-%m-%d')
-    start_date_for_fetch = (today - timedelta(days=450)).strftime('%Y-%m-%d')
+    # NASDAQ 전용: 날짜 경계(미국 시간) 이슈를 줄이기 위해 뉴욕 시간 기준으로 수집 구간 설정
+    try:
+        from zoneinfo import ZoneInfo
+        ny_now = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        ny_now = datetime.utcnow()
+    today_date = ny_now.date()
+    end_date_for_fetch = ny_now.strftime('%Y-%m-%d')
+    start_date_for_fetch = (ny_now - timedelta(days=450)).strftime('%Y-%m-%d')
 
     latest_fs_df = get_fs_data_from_pit(stock_list, selected_analysis_date, use_cache)
-    
-    if latest_fs_df.empty or latest_fs_df.dropna().empty:
-        log_warning("사용 가능한 재무 데이터가 없어 분석을 중단합니다.")
-        return pd.DataFrame(), None
 
-    if selected_analysis_date.date() < today.date():
+    # NASDAQ 버전: 재무데이터 없이도 파이프라인이 진행되어야 함
+    if latest_fs_df is None or latest_fs_df.empty or latest_fs_df.dropna(how='all').empty:
+        log_warning("재무데이터가 없어도 분석을 계속 진행합니다. (PER/PBR 등은 NaN으로 처리)")
+        latest_fs_df = stock_list[['종목코드']].copy()
+        for col in ['PER', 'PBR', 'ROE', 'EPS', 'BPS', 'DIV', 'DPS']:
+            latest_fs_df[col] = np.nan
+
+    if selected_analysis_date.date() < today_date:
         log_info(f"과거 분석(기준일={selected_analysis_date.strftime('%Y-%m-%d')}): 기준일의 시가총액 데이터를 수집합니다.")
         try:
             # 통일된 함수 사용
@@ -799,8 +942,7 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
             
     # 공통 함수를 사용하여 실제 거래일 확인
     actual_trading_date = get_actual_trading_date(selected_analysis_date)
-    today = datetime.now().date()
-    is_today_analysis = actual_trading_date == today
+    is_today_analysis = actual_trading_date == today_date
     
     # 실시간 거시경제 데이터 수집 (캐시 사용 안함)
     log_info("🔄 실시간 거시경제 데이터를 수집합니다")
@@ -818,22 +960,31 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     
     log_info(f"주식 분석 시작: {total_stocks:,}개 종목을 {total_batches}개 그룹으로 처리 (예상 5-10분)")
     
-    for i in range(0, len(stock_records), batch_size):
-        batch = stock_records[i:i + batch_size]
-        current_batch = i // batch_size + 1
-        batch_start = i + 1
-        batch_end = min(i + batch_size, total_stocks)
-        
-        # 첫 번째 그룹에서만 상세 설명 표시
-        if current_batch == 1:
-            log_info("가격, 거래량, 기술적 지표 계산 중...")
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:  # 워커 수 감소
-            future_to_stock = {executor.submit(fetch_and_process_ticker_data, r, start_date_for_fetch, end_date_for_fetch, selected_analysis_date, latest_fs_df): r for r in batch}
+    # NOTE:
+    # - 배치마다 ThreadPoolExecutor를 생성/종료하면(특히 Windows) 종료(shutdown/join)에서 간헐적으로 스톨하는 사례가 있음
+    # - executor를 전체 루프 동안 재사용하고, 마지막에 한 번만 종료하여 스톨 가능성을 크게 낮춤
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)  # 워커 수 감소
+    try:
+        for i in range(0, len(stock_records), batch_size):
+            batch = stock_records[i:i + batch_size]
+            current_batch = i // batch_size + 1
+            batch_start = i + 1
+            batch_end = min(i + batch_size, total_stocks)
             
-            # 전체 진행률을 포함한 진행률 표시
-            total_processed = (current_batch - 1) * batch_size
-            total_remaining = total_stocks - total_processed
+            # 첫 번째 그룹에서만 상세 설명 표시
+            if current_batch == 1:
+                log_info("가격, 거래량, 기술적 지표 계산 중...")
+            
+            future_to_stock = {
+                executor.submit(
+                    fetch_and_process_ticker_data,
+                    r,
+                    start_date_for_fetch,
+                    end_date_for_fetch,
+                    selected_analysis_date,
+                    latest_fs_df
+                ): r for r in batch
+            }
             
             # 통합된 진행률 표시
             completed_count = 0
@@ -850,30 +1001,129 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
                         all_actual_dates.append(analysis_date)
                     
                     completed_count += 1
-                    progress_percent = (completed_count / total_count) * 100
                     
                     # 매번 진행률 업데이트 (같은 줄에서) - PROGRESS 접두사 유지
                     if completed_count % 10 == 0 or completed_count == total_count:
-                        log_progress(f"그룹 {current_batch}/{total_batches} 처리 중", 
-                                   completed_count, total_count,
-                                   context={'batch': current_batch, 'total_batches': total_batches})
+                        log_progress(
+                            f"그룹 {current_batch}/{total_batches} 처리 중",
+                            completed_count,
+                            total_count,
+                            context={'batch': current_batch, 'total_batches': total_batches}
+                        )
                     
                 except Exception as e: 
                     completed_count += 1
-                    log_warning(f"종목 처리 중 오류 발생: {e}", 
-                               context={'batch': current_batch, 'stock': future_to_stock.get(future, {}).get('종목명', 'Unknown')})
+                    log_warning(
+                        f"종목 처리 중 오류 발생: {e}",
+                        context={
+                            'batch': current_batch,
+                            'stock': future_to_stock.get(future, {}).get('종목명', 'Unknown')
+                        }
+                    )
                     continue
             
             # 배치 완료 로그
             log_info(f"그룹 {current_batch}/{total_batches} 처리 완료 ({completed_count}/{total_count}개 종목)")
+
+            # future dict 참조 정리(메모리 압박 완화)
+            try:
+                del future_to_stock
+            except Exception:
+                pass
         
-        # 배치 간 메모리 정리
-        gc.collect()
-        time.sleep(0.1)  # API 부하 방지
-        
-        success_count = len(all_feature_data)
-        progress_percent = (current_batch / total_batches) * 100
-        log_info(f"   ✅ 그룹 {current_batch}/{total_batches} 완료! ({progress_percent:.1f}% 진행, {success_count:,}개 종목 수집)")
+            # 배치 간 메모리 정리
+            # - Windows 환경에서 매 배치마다 full GC(gc.collect())는 장시간 스톨처럼 보일 수 있음
+            # - 기본은 가벼운 0세대 GC만 수행하고, full GC는 간헐적으로만 수행
+            try:
+                gc_start = time.time()
+                log_info("🧹 배치 후 메모리 정리 시작", context={
+                    "batch": current_batch,
+                    "total_batches": total_batches,
+                    "success_count_so_far": len(all_feature_data)
+                })
+
+                # 가벼운 수집(0세대) - 대부분의 경우 이걸로 충분
+                collected_gen0 = gc.collect(0)
+
+                # full GC는 간헐적으로만 (기본: 5배치마다 1회)
+                collected_full = None
+                if current_batch % 5 == 0:
+                    collected_full = gc.collect()
+
+                elapsed_ms = int((time.time() - gc_start) * 1000)
+                log_info("🧹 배치 후 메모리 정리 완료", context={
+                    "batch": current_batch,
+                    "collected_gen0": collected_gen0,
+                    "collected_full": collected_full,
+                    "elapsed_ms": elapsed_ms
+                })
+            except Exception as e:
+                log_warning("배치 후 메모리 정리 중 오류(계속 진행)", context={
+                    "batch": current_batch,
+                    "error": str(e)
+                })
+
+            time.sleep(0.1)  # API 부하 방지
+            
+            success_count = len(all_feature_data)
+            progress_percent = (current_batch / total_batches) * 100
+            log_info(f"   ✅ 그룹 {current_batch}/{total_batches} 완료! ({progress_percent:.1f}% 진행, {success_count:,}개 종목 수집)")
+    finally:
+        # executor 종료 지점에서 스톨이 발생하는지 진단 로그 추가
+        # NOTE:
+        # - 일부 환경(특히 WSL/Windows)에서 executor.shutdown(wait=True)에서 간헐적으로 스톨 사례가 있음
+        # - 종료를 블로킹하지 않고(wait=False) 종료 요청을 보낸 뒤, 스레드 종료 상태만 짧게 확인
+        try:
+            # 내부 스레드 상태(진단용) - private API이므로 방어적으로 처리
+            thread_cnt = None
+            alive_cnt = None
+            try:
+                threads = list(getattr(executor, "_threads", []))
+                thread_cnt = len(threads)
+                alive_cnt = sum(1 for t in threads if getattr(t, "is_alive", lambda: False)())
+            except Exception:
+                pass
+
+            log_info("🧵 ThreadPoolExecutor 종료 요청", context={
+                "thread_cnt": thread_cnt,
+                "alive_cnt": alive_cnt
+            })
+
+            # 우선 종료 신호만 보내고 블로킹하지 않음
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                # Python 버전 호환: cancel_futures 미지원
+                executor.shutdown(wait=False)
+
+            # 짧게만 상태 확인(무한 대기 금지)
+            t0 = time.time()
+            timeout_sec = 10.0
+            while True:
+                try:
+                    threads = list(getattr(executor, "_threads", []))
+                    alive_cnt = sum(1 for t in threads if getattr(t, "is_alive", lambda: False)())
+                except Exception:
+                    alive_cnt = None
+                    break
+
+                if alive_cnt == 0:
+                    break
+                if (time.time() - t0) >= timeout_sec:
+                    break
+                time.sleep(0.1)
+
+            elapsed_ms = int((time.time() - t0) * 1000)
+            if alive_cnt == 0:
+                log_info("🧵 ThreadPoolExecutor 종료 완료", context={"elapsed_ms": elapsed_ms})
+            else:
+                log_warning("🧵 ThreadPoolExecutor 종료 지연(계속 진행)", context={
+                    "alive_cnt": alive_cnt,
+                    "elapsed_ms": elapsed_ms,
+                    "timeout_sec": timeout_sec
+                })
+        except Exception as e:
+            log_warning("ThreadPoolExecutor 종료 처리 중 오류(계속 진행)", context={"error": str(e)})
     
     log_info(f"🎉 종목 데이터 수집 완료! 총 {len(all_feature_data):,}개 종목")
     log_info("🔄 데이터 정제 및 거시경제 지표 병합 중...")
@@ -889,7 +1139,7 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     if not isinstance(macro_df.index, pd.DatetimeIndex):
         macro_df.index = pd.to_datetime(macro_df.index)
     
-    log_info("   🔗 거시경제 지표(KOSPI, USD/KRW, VIX)를 종목 데이터와 병합 중...")
+    log_info("   🔗 거시경제 지표(IXIC, VIX)를 종목 데이터와 병합 중...")
     
     # merge_asof 대신 더 안전한 방법 사용
     try:

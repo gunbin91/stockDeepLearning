@@ -71,12 +71,29 @@ def get_model_and_data():
     
     print(f"  - 훈련 데이터 {len(train_df)} 행, 검증 데이터 {len(validation_df)} 행 준비 완료.")
     
+    # NASDAQ 버전: data_processor에서 생성되는 피처 기준으로 구성
     features = [
-        '수익률(1M)', '수익률(3M)', '변동성(1W)', '변동성(1M)', '변동성(3M)', 'PER', 'PBR', '거래대금_MA20',
-        'BB_Position',
-        'KOSPI_pct_1d', 'KOSPI_pct_5d', 
-        'USDKRW_pct_1d', 'USDKRW_pct_5d', 
-        'VIX_pct_1d', 'VIX_pct_5d'
+        'log_mktcap',
+        'disparity_20',
+        'disparity_120',
+        'disparity_240',
+        'MA20_Slope',
+        'MA120_Slope',
+        'MA240_Slope',
+        'RSI_Signal_Oscillator',
+        'ATRr_5',
+        'ATRr_20',
+        'HV_Volatility_5',
+        'HV_Volatility_20',
+        'HV_Volatility_60',
+        'VWAP_Disparity_5',
+        'Max_Drawdown_20',
+        'Trend_Pullback_Score',
+        'Position_Range_60',
+        'IXIC_pct_1d',
+        'IXIC_disparity_20',
+        'IXIC_MA20_Slope',
+        'VIX',
     ]
     
     train_df.dropna(subset=features + ['target'], inplace=True)

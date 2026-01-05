@@ -811,11 +811,12 @@
                           callbacks: {
                               label: function(context) {
                                   const value = context.parsed.x || context.parsed.y;
-                                  // 큰 수치인 경우 천 단위 구분 기호 추가
-                                  if (value >= 1000) {
-                                      return label + ': ' + value.toLocaleString('ko-KR');
-                                  }
-                                  return label + ': ' + value.toFixed(2);
+                                  // NASDAQ 전용: 중요도가 작은 경우(예: SHAP/perm)도 0.00으로 뭉개지지 않게 표시
+                                  if (value === 0) return label + ': 0';
+                                  if (Math.abs(value) >= 1000) return label + ': ' + value.toLocaleString('ko-KR');
+                                  if (Math.abs(value) >= 1) return label + ': ' + value.toFixed(4);
+                                  // 1 미만은 지수표기 우선
+                                  return label + ': ' + value.toExponential(3);
                               }
                           }
                       }
@@ -825,11 +826,10 @@
                           beginAtZero: true,
                           ticks: {
                               callback: function(value) {
-                                  // 큰 수치인 경우 천 단위 구분 기호 추가
-                                  if (value >= 1000) {
-                                      return value.toLocaleString('ko-KR');
-                                  }
-                                  return value;
+                                  if (value === 0) return '0';
+                                  if (Math.abs(value) >= 1000) return value.toLocaleString('ko-KR');
+                                  if (Math.abs(value) >= 1) return value.toFixed ? value.toFixed(2) : value;
+                                  return (Number(value)).toExponential(2);
                               }
                           }
                       },

@@ -1,23 +1,24 @@
 """
-실시간 데이터 처리 시스템
-========================
+실시간 데이터 처리 시스템 (NASDAQ 전용)
+=====================================
 
-이 파일은 주식 분석을 위한 데이터를 실시간으로 수집하고 처리합니다.
+이 파일은 NASDAQ 종목을 대상으로 주식 분석 데이터를 수집/전처리합니다.
 대용량 데이터를 효율적으로 처리하기 위해 병렬 처리와 메모리 최적화를 사용합니다.
 
 주요 기능:
-- 종목 목록 수집 (KOSPI, KOSDAQ)
-- 시가총액 데이터 수집 및 일별 분배
-- 재무 데이터 수집 (월초 데이터를 일별로 분배)
-- 거시경제 데이터 수집
+- 종목 목록 수집 (NASDAQ)
+- (선택) 정적 시가총액(가능 시) 활용
+- 거시경제 데이터 수집 (IXIC, VIX 등)
 - 기술적 지표 계산
 - 데이터 품질 검증 및 정제
+
+주의:
+- 본 프로젝트는 NASDAQ 전용이며 국내(KRX) 기반 로직은 사용하지 않습니다.
 """
 
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
-from pykrx import stock
 from datetime import datetime, timedelta
 import pandas_ta as ta
 import concurrent.futures
@@ -28,6 +29,8 @@ import locale
 import platform
 import multiprocessing
 import time
+import json
+import urllib.request
 
 # WSL2/Linux 환경에서 multiprocessing 최적화
 # fork 방식 사용 (spawn보다 빠르고 메모리 효율적)
@@ -52,6 +55,54 @@ if platform.system() == 'Windows':
 from scoring import calculate_factor_scores
 from path_manager import path_manager
 from logger import log_info, log_critical, log_error, log_warning, log_progress
+
+# =================================================================
+# NASDAQ 시가총액 보강용 (Yahoo 차단 대비): NASDAQ Screener API
+# - 한 번 호출로 다수 심볼의 marketCap(USD)을 확보할 수 있어 대량 티커에도 안정적
+# - 표준 라이브러리(urllib)만 사용하여 환경 의존 최소화
+# =================================================================
+def _fetch_nasdaq_screener_marketcap_map() -> dict:
+    """
+    NASDAQ Screener API에서 symbol -> marketCap(USD) 매핑을 가져옵니다.
+    Returns:
+        dict: { 'AAPL': 4004539426530.0, ... }
+    """
+    url = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.nasdaq.com/",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read()
+    data = json.loads(raw.decode("utf-8", "replace"))
+    rows = (data.get("data") or {}).get("rows") or []
+
+    def _to_float_marketcap(v):
+        if v is None:
+            return np.nan
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v).strip()
+        if not s or s.upper() in ("N/A", "NA", "NULL", "NONE", "-"):
+            return np.nan
+        s = s.replace("$", "").replace(",", "")
+        try:
+            return float(s)
+        except Exception:
+            return np.nan
+
+    m = {}
+    for r in rows:
+        sym = str(r.get("symbol") or "").strip()
+        if not sym:
+            continue
+        mc = _to_float_marketcap(r.get("marketCap"))
+        if np.isfinite(mc) and mc > 0:
+            m[sym] = mc
+    return m
 
 # =================================================================
 # 유틸리티 함수: 정규화된 선형회귀기울기 계산
@@ -156,283 +207,93 @@ def fetch_stock_list():
     """
     주식 목록 수집 함수
     
-    KOSPI와 KOSDAQ에 상장된 모든 종목의 목록을 수집합니다.
-    스팩, 리츠 등은 제외하고 일반 주식만 수집합니다.
+    NASDAQ 상장 종목 목록을 수집합니다. (티커 그대로)
     
     Returns:
         pandas.DataFrame: 종목코드, 종목명, 시장구분이 포함된 데이터프레임
     """
-    max_retries = 3
-    retry_delay = 2  # 초
-    
-    for attempt in range(max_retries):
+    try:
+        log_info("FinanceDataReader를 통해 NASDAQ 종목 리스트 수집 (NASDAQ)...")
+        df_list = fdr.StockListing('NASDAQ')
+        if df_list is None or df_list.empty:
+            log_error("NASDAQ 종목 리스트를 가져올 수 없습니다.")
+            return pd.DataFrame()
+
+        symbol_col = 'Symbol' if 'Symbol' in df_list.columns else ('Code' if 'Code' in df_list.columns else None)
+        name_col = 'Name' if 'Name' in df_list.columns else ('Security Name' if 'Security Name' in df_list.columns else None)
+        if symbol_col is None:
+            log_error(f"NASDAQ 리스트에서 심볼 컬럼을 찾을 수 없습니다. columns={list(df_list.columns)}")
+            return pd.DataFrame()
+        if name_col is None:
+            name_col = symbol_col
+
+        stock_list = df_list[[symbol_col, name_col]].copy()
+        stock_list.rename(columns={symbol_col: '종목코드', name_col: '종목명'}, inplace=True)
+        stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.strip()
+        stock_list['종목명'] = stock_list['종목명'].astype(str).str.strip()
+        stock_list['시장구분'] = 'NASDAQ'
+
+        # 정적 시가총액(가능 시) - KRX-MARCAP 대체
+        if 'MarketCap' in df_list.columns:
+            stock_list['시가총액'] = pd.to_numeric(df_list['MarketCap'], errors='coerce')
+        elif 'Marcap' in df_list.columns:
+            stock_list['시가총액'] = pd.to_numeric(df_list['Marcap'], errors='coerce')
+        else:
+            stock_list['시가총액'] = np.nan
+
+        # --------------------------------------------------------------
+        # NASDAQ 학습/전처리 경로용 시가총액 보강 (NASDAQ Screener API)
+        # - Yahoo(yfinance/quote)는 환경에 따라 401(crumb/unauthorized)로 막힐 수 있어 배제
+        # - Screener API는 1회 호출로 다수 심볼 marketCap을 제공 → 대규모 티커에도 안정적
+        # - 원본 훼손 최소: NaN(또는 0 이하)인 티커만 보강, 실패 시 NaN 유지
+        # --------------------------------------------------------------
         try:
-            # KRX-MARCAP에서 주식 목록 가져오기 (더 안정적)
-            # 1차 시도: KRX-MARCAP
-            try:
-                if attempt > 0:
-                    log_info(f"주식 목록 수집 재시도 중... ({attempt + 1}/{max_retries})")
-                    time.sleep(retry_delay)
-                
-                log_info("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보 수집 (KRX-MARCAP)...")
-                df_marcap = fdr.StockListing('KRX-MARCAP')
-                
-                if df_marcap is not None and not df_marcap.empty:
-                    # 스팩, 리츠 제외
-                    df_marcap = df_marcap[~df_marcap['Name'].str.contains('스팩|리츠', na=False)].copy()
-                    
-                    # KONEX 제외 (KOSPI, KOSDAQ만 포함)
-                    if 'Market' in df_marcap.columns:
-                        df_marcap = df_marcap[df_marcap['Market'].isin(['KOSPI', 'KOSDAQ'])].copy()
-                        log_info(f"KONEX 제외 후 종목 수: {len(df_marcap)}개")
-                    
-                    # 상장주식수가 있는 경우만 필터링
-                    if 'Stocks' in df_marcap.columns:
-                        df_marcap = df_marcap[df_marcap['Stocks'] > 0]
-                    
-                    # 시가총액 100억 미만 제외 (100억 = 10,000,000,000원)
-                    if 'Marcap' in df_marcap.columns:
-                        min_marcap = 10_000_000_000  # 100억원
-                        before_count = len(df_marcap)
-                        df_marcap = df_marcap[df_marcap['Marcap'] >= min_marcap].copy()
-                        excluded_count = before_count - len(df_marcap)
-                        if excluded_count > 0:
-                            log_info(f"시가총액 100억 미만 종목 {excluded_count}개 제외")
-                    
-                    # 컬럼명 정리 및 종목코드 6자리 패딩
-                    stock_list = df_marcap[['Code', 'Name']].copy()
-                    stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명'}, inplace=True)
-                    stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.zfill(6)
-                    
-                    # 시장구분 추가 (Market 컬럼이 있으면 사용, 없으면 추정)
-                    if 'Market' in df_marcap.columns:
-                        stock_list['시장구분'] = df_marcap['Market']
-                    else:
-                        # 종목코드로 시장구분 추정 (KOSPI: 000000-099999, KOSDAQ: 그 외)
-                        stock_list['시장구분'] = stock_list['종목코드'].apply(
-                            lambda x: 'KOSPI' if x.startswith('0') and len(x) >= 2 and int(x[:2]) < 10 else 'KOSDAQ'
-                        )
-                    
-                    log_info(f"주식 목록 수집 완료: {len(stock_list)}개 종목")
-                    return stock_list
-                else:
-                    log_warning("KRX-MARCAP에서 빈 데이터를 받았습니다. KRX로 재시도합니다.")
-            except Exception as e1:
-                log_warning(f"KRX-MARCAP 수집 실패, KRX로 재시도: {e1}")
-            
-            # 2차 시도: KRX (기존 방식)
-            try:
-                stock_list = fdr.StockListing('KRX')
-                if stock_list is not None and not stock_list.empty:
-                    # 필요한 컬럼만 선택
-                    stock_list = stock_list[['Code', 'Name', 'Market']].copy()
-                    stock_list.columns = ['종목코드', '종목명', '시장구분']
-                    
-                    # KOSPI, KOSDAQ만 필터링
-                    stock_list = stock_list[stock_list['시장구분'].isin(['KOSPI', 'KOSDAQ'])]
-                    
-                    # 종목코드 6자리 패딩
-                    stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.zfill(6)
-                    
-                    log_info(f"주식 목록 수집 완료: {len(stock_list)}개 종목")
-                    return stock_list
-                else:
-                    log_warning("KRX에서 빈 데이터를 받았습니다.")
-            except Exception as e2:
-                log_warning(f"KRX 수집도 실패: {e2}")
-            
-            # 마지막 시도가 아니면 재시도
-            if attempt < max_retries - 1:
-                continue
-            else:
-                # 모든 시도 실패
-                log_error("주식 목록을 가져올 수 없습니다 (모든 재시도 실패)")
-                return pd.DataFrame()
-                
+            missing_mask = stock_list['시가총액'].isna() | (pd.to_numeric(stock_list['시가총액'], errors='coerce') <= 0)
+            missing_tickers = stock_list.loc[missing_mask, '종목코드'].astype(str).str.strip().tolist()
+            if missing_tickers:
+                log_info(f"📌 시가총액 보강 필요: {len(missing_tickers):,}개 티커 (NASDAQ screener marketCap 조회)")
+                screener_map = _fetch_nasdaq_screener_marketcap_map()
+
+                ok = 0
+                # 티커 관례 차이 보정: '.' -> '-' (예: BRK.B -> BRK-B)
+                for t in missing_tickers:
+                    mc = screener_map.get(t)
+                    if mc is None:
+                        mc = screener_map.get(t.replace(".", "-"))
+                    if mc is not None and np.isfinite(float(mc)) and float(mc) > 0:
+                        stock_list.loc[stock_list['종목코드'] == t, '시가총액'] = float(mc)
+                        ok += 1
+
+                still_missing = int(stock_list['시가총액'].isna().sum())
+                log_info(f"✅ 시가총액 보강 완료: 성공 {ok:,}개 | 남은 NaN {still_missing:,}개")
         except Exception as e:
-            if attempt < max_retries - 1:
-                log_warning(f"주식 목록 수집 중 오류 발생 (재시도 예정): {e}")
-                time.sleep(retry_delay)
-                continue
-            else:
-                log_error(f"주식 목록 수집 실패 (모든 재시도 실패): {e}")
-                return pd.DataFrame()
-    
-    # 여기 도달하면 안 되지만 안전장치
-    log_error("주식 목록을 가져올 수 없습니다")
-    return pd.DataFrame()
+            log_warning(f"시가총액 보강 중 오류(무시하고 진행): {e}")
+
+        log_info(f"주식 목록 수집 완료: {len(stock_list)}개 NASDAQ 종목")
+        return stock_list
+
+    except Exception as e:
+        log_error(f"주식 목록 수집 실패: {e}")
+        return pd.DataFrame()
 
 def _fetch_financial_data(start_date, end_date):
-    """월초 재무데이터 수집 및 일별 분배 (삼성전자 거래일 기준)"""
+    """월초 재무데이터 수집 및 일별 분배 (NASDAQ 버전: 재무데이터 수집 생략)"""
     try:
-        log_info(f"월초 재무데이터 수집 시작: {start_date} ~ {end_date}")
-        
-        # 삼성전자 주가 데이터로 실제 거래일 확인
-        try:
-            from pykrx import stock
-            trading_days = pd.to_datetime(stock.get_market_ohlcv(start_date, end_date, "005930").index).strftime('%Y%m%d').tolist()
-            log_info(f"삼성전자 기준 실제 거래일: {len(trading_days)}개")
-        except Exception as e:
-            log_warning(f"삼성전자 거래일 확인 실패, 기본 로직 사용: {e}")
-            # 폴백: 기본 거래일 생성
-            start_date_obj = pd.to_datetime(start_date)
-            end_date_obj = pd.to_datetime(end_date)
-            all_dates = pd.date_range(start=start_date_obj, end=end_date_obj, freq='D')
-            trading_days = all_dates[all_dates.weekday < 5].strftime('%Y%m%d').tolist()
-        
-        # 월초 거래일 찾기 (삼성전자 거래일 기준)
-        start_date_obj = pd.to_datetime(start_date)
-        end_date_obj = pd.to_datetime(end_date)
-        
-        monthly_first_dates = []
-        current_date = start_date_obj
-        
-        while current_date <= end_date_obj:
-            month_start = current_date.replace(day=1)
-            
-            # 월초 거래일 찾기 (1일~3일 중 실제 거래일)
-            month_first_trading_day = None
-            for day in range(1, 4):  # 1일~3일까지 확인
-                target_date = month_start.replace(day=day)
-                if target_date.strftime('%Y%m%d') in trading_days:
-                    month_first_trading_day = target_date
-                    break
-            
-            # 폴백: 과거 가까운 거래일 찾기
-            if month_first_trading_day is None:
-                for days_back in range(1, 10):  # 최대 10일 전까지 확인
-                    target_date = month_start - pd.Timedelta(days=days_back)
-                    if target_date.strftime('%Y%m%d') in trading_days:
-                        month_first_trading_day = target_date
-                        log_info(f"월초 거래일 폴백: {month_start.strftime('%Y-%m')} → {target_date.strftime('%Y-%m-%d')}")
-                        break
-            
-            if month_first_trading_day is not None:
-                monthly_first_dates.append(month_first_trading_day)
-            else:
-                log_warning(f"월초 거래일을 찾을 수 없음: {month_start.strftime('%Y-%m')}")
-            
-            current_date = month_start + pd.DateOffset(months=1)
-        
-        log_info(f"월초 재무데이터 수집 날짜: {len(monthly_first_dates)}개")
-        
-        # 월초 재무데이터 수집 (강화된 오류 처리)
-        financial_dfs = []
-        completed_count = 0
-        failed_count = 0
-        total_dates = len(monthly_first_dates)
-        
-        if total_dates == 0:
-            log_warning("수집할 월초 거래일이 없습니다.")
-            return pd.DataFrame()
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            future_to_date = {executor.submit(_fetch_monthly_financial_data, date): date for date in monthly_first_dates}
-            for future in concurrent.futures.as_completed(future_to_date):
-                try:
-                    date_str = future_to_date[future]
-                    result_df = future.result()
-                    if not result_df.empty: 
-                        result_df['date'] = pd.to_datetime(date_str)
-                        financial_dfs.append(result_df)
-                        completed_count += 1
-                    else:
-                        failed_count += 1
-                        log_warning(f"재무데이터 수집 실패: {date_str.strftime('%Y-%m-%d')} ({failed_count}번째 실패)")
-                except Exception as e:
-                    failed_count += 1
-                    log_error(f"재무데이터 수집 오류 ({date_str.strftime('%Y-%m-%d')}): {e}")
-                
-                # API 부하 방지를 위한 지연 추가
-                time.sleep(0.2)
-                
-                # 진행률 로그 메시지 - 매번 출력하되 같은 줄에서 덮어쓰기
-                log_progress("월초 재무데이터 수집", completed_count + failed_count, total_dates)
-        
-        # 수집 결과 검증
-        success_rate = (completed_count / total_dates) * 100 if total_dates > 0 else 0
-        log_info(f"재무데이터 수집 완료: {completed_count}/{total_dates} ({success_rate:.1f}%)")
-        
-        if not financial_dfs: 
-            log_warning("수집된 재무데이터가 없습니다.")
-            log_warning("재무데이터 수집에 실패했지만 분석을 계속합니다.")
-            return pd.DataFrame()
-        
-        if success_rate < 50:
-            log_warning(f"재무데이터 수집 성공률이 낮습니다: {success_rate:.1f}%")
-            
-        df_financial_long = pd.concat(financial_dfs, ignore_index=True)
-        df_financial_long.sort_values(by=['Code', 'date'], inplace=True)
-        
-        # 월초 데이터를 일별로 분배 (데이터 정합성 검증 포함)
-        df_financial_long = distribute_monthly_financial_data_to_daily(df_financial_long, start_date, end_date)
-        
-        # 데이터 정합성 검증
-        if not df_financial_long.empty:
-            total_records = len(df_financial_long)
-            unique_codes = df_financial_long['Code'].nunique()
-            date_range = df_financial_long['date'].nunique()
-            
-            log_info(f"✅ 월초 재무데이터 수집 및 일별 분배 완료: {total_records}개 레코드")
-            log_info(f"데이터 정합성 검증: 종목수 {unique_codes}개, 거래일수 {date_range}개")
-        else:
-            log_warning("분배된 재무데이터가 없습니다.")
-        
-        return df_financial_long
+        log_info("📊 NASDAQ 버전: 재무데이터 수집을 생략합니다.")
+        return pd.DataFrame()
         
     except Exception as e:
         log_error(f"월초 재무데이터 수집 실패: {e}")
         return pd.DataFrame()
 
 def _fetch_monthly_financial_data(date):
-    """특정 날짜의 재무데이터 수집"""
+    """
+    NASDAQ 전용 프로젝트에서는 월초 재무데이터(국내 기반)를 사용하지 않습니다.
+    하위 호환을 위해 빈 DataFrame을 반환합니다.
+    """
     try:
-        # pykrx를 사용한 재무데이터 수집
-        from pykrx import stock
-        
-        date_str = date.strftime('%Y%m%d')
-        
-        try:
-            # 전체 시장 일괄 호출 방식
-            df_fundamental = stock.get_market_fundamental(date_str, market="ALL")
-            
-            if df_fundamental.empty:
-                log_warning(f"재무데이터가 비어있음 ({date_str})")
-                return pd.DataFrame()
-            
-            # 데이터 처리
-            if 'PBR' in df_fundamental.columns:
-                df_fundamental = df_fundamental[df_fundamental['PBR'] > 0]
-                
-                if not df_fundamental.empty:
-                    df_fundamental.reset_index(inplace=True)
-                    df_fundamental.rename(columns={'티커': 'Code'}, inplace=True)  # Code 컬럼명으로 통일
-                    
-                    # 컬럼 선택
-                    required_cols = ['Code', 'PBR', 'PER', 'EPS', 'BPS', 'DIV', 'DPS']
-                    available_cols = [col for col in required_cols if col in df_fundamental.columns]
-                    df_fundamental = df_fundamental[available_cols]
-                    
-                    # ROE 계산
-                    if 'PBR' in df_fundamental.columns and 'PER' in df_fundamental.columns:
-                        df_fundamental['ROE'] = np.where(df_fundamental['PER'] != 0, 
-                                                       df_fundamental['PBR'] / df_fundamental['PER'], 
-                                                       np.nan)
-                    
-                    return df_fundamental
-                else:
-                    log_warning(f"PBR > 0 조건을 만족하는 데이터가 없음 ({date_str})")
-                    return pd.DataFrame()
-            else:
-                log_warning(f"PBR 컬럼이 없음 ({date_str})")
-                return pd.DataFrame()
-                
-        except Exception as e:
-            log_warning(f"재무데이터 API 호출 실패 ({date_str}): {e}")
-            return pd.DataFrame()
-        
-    except Exception as e:
-        log_error(f"재무데이터 수집 실패 ({date}): {e}")
+        return pd.DataFrame()
+    except Exception:
         return pd.DataFrame()
 
 def distribute_monthly_financial_data_to_daily(monthly_data, start_date, end_date):
@@ -484,22 +345,13 @@ def _fetch_macro_data(start_date, end_date):
         macro_data = {}
         
         try:
-            kospi = fdr.DataReader('KS11', start_date_str, end_date_str)
-            if not kospi.empty:
-                kospi_copy = kospi.copy()
-                kospi_copy.index = pd.to_datetime(kospi_copy.index, format='mixed', errors='coerce')
-                macro_data['KOSPI'] = kospi_copy['Close']
+            ixic = fdr.DataReader('IXIC', start_date_str, end_date_str)
+            if not ixic.empty:
+                ixic_copy = ixic.copy()
+                ixic_copy.index = pd.to_datetime(ixic_copy.index, format='mixed', errors='coerce')
+                macro_data['IXIC'] = ixic_copy['Close']
         except Exception as e:
-            log_warning(f"KOSPI 데이터 수집 실패: {e}")
-        
-        try:
-            usdkrw = fdr.DataReader('USD/KRW', start_date_str, end_date_str)
-            if not usdkrw.empty:
-                usdkrw_copy = usdkrw.copy()
-                usdkrw_copy.index = pd.to_datetime(usdkrw_copy.index, format='mixed', errors='coerce')
-                macro_data['USDKRW'] = usdkrw_copy['Close']
-        except Exception as e:
-            log_warning(f"USD/KRW 데이터 수집 실패: {e}")
+            log_warning(f"IXIC 데이터 수집 실패: {e}")
         
         try:
             vix = fdr.DataReader('^VIX', start_date_str, end_date_str)
@@ -512,24 +364,22 @@ def _fetch_macro_data(start_date, end_date):
         
         if macro_data:
             macro_df = pd.concat(macro_data.values(), axis=1, keys=macro_data.keys()).ffill()
-            # pct_1d는 KOSPI만 생성 (USDKRW, VIX는 생성하지 않음)
-            if 'KOSPI' in macro_df.columns:
-                macro_df['KOSPI_pct_1d'] = macro_df['KOSPI'].pct_change(1)
-            if 'USDKRW' in macro_df.columns:
-                macro_df['USDKRW_pct_1d'] = macro_df['USDKRW'].pct_change(1)
+            # pct_1d는 IXIC만 생성 (VIX는 생성하지 않음)
+            if 'IXIC' in macro_df.columns:
+                macro_df['IXIC_pct_1d'] = macro_df['IXIC'].pct_change(1)
             if 'VIX' in macro_df.columns:
                 # VIX_pct_1d는 생성하지 않음 (삭제 요청)
                 pass
             
-            # KOSPI 변동성 및 이격도 계산 (종목 데이터와 동일한 방식)
-            if 'KOSPI' in macro_df.columns:
-                kospi_close = macro_df['KOSPI']
+            # IXIC 이격도 및 MA20_Slope 계산
+            if 'IXIC' in macro_df.columns:
+                ixic_close = macro_df['IXIC']
                 
                 # 이격도 계산 (종목 데이터와 동일한 방식)
                 # 이격도 = (현재가 / 이동평균) * 100
                 for period in [20]:
-                    ma = kospi_close.rolling(window=period).mean()
-                    macro_df[f'KOSPI_disparity_{period}'] = (kospi_close / ma) * 100
+                    ma = ixic_close.rolling(window=period).mean()
+                    macro_df[f'IXIC_disparity_{period}'] = (ixic_close / ma) * 100
                 
                 # KOSPI 변동성 1M 계산 (20일 기준) - 2024년 12월 제거
                 # try:
@@ -540,13 +390,13 @@ def _fetch_macro_data(start_date, end_date):
                 #     log_warning(f"KOSPI 변동성(1M) 계산 실패: {e}")
                 #     macro_df['KOSPI_변동성(1M)'] = np.nan
                 
-                # KOSPI_MA20_Slope 계산 (KOSPI 20일 이동평균선 기울기)
+                # IXIC_MA20_Slope 계산 (IXIC 20일 이동평균선 기울기)
                 try:
-                    kospi_ma20 = kospi_close.rolling(window=20).mean()
-                    macro_df['KOSPI_MA20_Slope'] = calculate_normalized_linear_regression_slope(kospi_ma20, window=5)
+                    ixic_ma20 = ixic_close.rolling(window=20).mean()
+                    macro_df['IXIC_MA20_Slope'] = calculate_normalized_linear_regression_slope(ixic_ma20, window=5)
                 except Exception as e:
-                    log_warning(f"KOSPI_MA20_Slope 계산 실패: {e}")
-                    macro_df['KOSPI_MA20_Slope'] = np.nan
+                    log_warning(f"IXIC_MA20_Slope 계산 실패: {e}")
+                    macro_df['IXIC_MA20_Slope'] = np.nan
             
             macro_df.reset_index(inplace=True)
             macro_df.rename(columns={'index': 'date'}, inplace=True)
@@ -576,33 +426,13 @@ def fetch_ticker_price_data(stock_info, start_date, end_date):
     """
     ticker = stock_info['종목코드']
     try:
-        # =================================================================
-        # 하이브리드 데이터 수집 방식 (3단계 폴백 시스템)
-        # =================================================================
-        # 1단계: Yahoo Finance (가장 빠르고 안정적)
-        # 2단계: KRX (한국 거래소 공식 데이터)
-        # 3단계: NAVER (최후의 수단)
+        # NASDAQ 일봉 데이터 수집 (티커 그대로)
         df_price = None
         
-        # 1차 시도: Yahoo Finance (가장 빠름)
         try:
             df_price = fdr.DataReader(ticker, start_date, end_date)
         except:
             df_price = None
-        
-        if df_price is None or df_price.empty:
-            # 2차 시도: KRX (한국 거래소 공식 데이터)
-            try:
-                df_price = fdr.DataReader(f'KRX:{ticker}', start_date, end_date)
-            except:
-                df_price = None
-        
-        if df_price is None or df_price.empty:
-            # 3차 시도: NAVER (최후의 수단)
-            try:
-                df_price = fdr.DataReader(f'NAVER:{ticker}', start_date, end_date)
-            except:
-                df_price = None
         
         # 데이터 품질 검증: 충분한 데이터가 있는지 확인
         # 251일(1년) + 60일(추가 버퍼) = 311일 이상의 데이터 필요
@@ -643,7 +473,6 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
     global _global_marcap_data, _global_financial_data
     
     try:
-        import gc
         df = df_price.copy()
         
         # 전역 변수 검증
@@ -651,17 +480,24 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             log_error(f"종목 {ticker} 피처 계산 중 오류: 전역 시가총액 데이터가 설정되지 않았습니다.")
             return None
         
-        # 시가총액 데이터 병합 (전역 변수 사용)
+        # 시가총액 데이터 주입 (NASDAQ 버전: 정적 MarketCap 기반, 없으면 NaN)
         df_marcap_ticker = _global_marcap_data[_global_marcap_data['Code'] == ticker].copy()
-        if df_marcap_ticker.empty: 
-            log_warning(f"⚠️ {ticker} 종목의 시가총액 데이터가 없습니다.")
-            return None
-            
-        df_marcap_ticker.sort_values(by='date', inplace=True)
-        df = pd.merge_asof(left=df, right=df_marcap_ticker[['date', 'Marcap']], left_index=True, right_on='date', direction='backward')
-        df.rename(columns={'Marcap': '시가총액'}, inplace=True)
-        
-        # 시가총액 데이터 메모리 해제
+        if df_marcap_ticker.empty:
+            df['시가총액'] = np.nan
+        else:
+            if 'Marcap' in df_marcap_ticker.columns and 'date' in df_marcap_ticker.columns:
+                df_marcap_ticker.sort_values(by='date', inplace=True)
+                df = pd.merge_asof(left=df, right=df_marcap_ticker[['date', 'Marcap']], left_index=True, right_on='date', direction='backward')
+                df.rename(columns={'Marcap': '시가총액'}, inplace=True)
+            elif 'MarketCap' in df_marcap_ticker.columns:
+                mc = pd.to_numeric(df_marcap_ticker['MarketCap'].iloc[0], errors='coerce')
+                df['시가총액'] = mc
+            elif '시가총액' in df_marcap_ticker.columns:
+                mc = pd.to_numeric(df_marcap_ticker['시가총액'].iloc[0], errors='coerce')
+                df['시가총액'] = mc
+            else:
+                df['시가총액'] = np.nan
+
         del df_marcap_ticker
         gc.collect()
         
@@ -766,10 +602,6 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             df['RSI_Signal_Oscillator'] = np.nan
         
         # 기존 방식과 동일한 기본 지표들만 사용 (과도한 기술적 지표 제거)
-        
-        # 수익률 계산
-        df['수익률(1M)'] = df['종가'].pct_change(20)
-        df['수익률(3M)'] = df['종가'].pct_change(60)
         
         # 거래대금 계산
         df['거래대금'] = df['종가'] * df['거래량']
@@ -1133,101 +965,14 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     if stock_list.empty: 
         raise ValueError("종목 리스트를 가져올 수 없습니다.")
     
-    try:
-        # 월초 거래일만 수집하여 효율성 극대화
-        start_date_obj = pd.to_datetime(start_date)
-        end_date_obj = pd.to_datetime(end_date)
-        
-        # 월별 첫 거래일만 수집
-        monthly_first_dates = []
-        current_date = start_date_obj
-        
-        while current_date <= end_date_obj:
-            # 해당 월의 첫 거래일 찾기
-            month_start = current_date.replace(day=1)
-            month_dates = pd.date_range(start=month_start, end=month_start + pd.DateOffset(months=1) - pd.DateOffset(days=1), freq='D')
-            trading_dates = month_dates[month_dates.weekday < 5]
-            
-            if not trading_dates.empty:
-                monthly_first_dates.append(trading_dates[0])
-            
-            # 다음 달로 이동
-            current_date = month_start + pd.DateOffset(months=1)
-        
-        # 문자열로 변환
-        marcap_dates = [date.strftime('%Y%m%d') for date in monthly_first_dates]
-        
-        if not marcap_dates:
-            raise Exception("수집할 시가총액 데이터 날짜가 없습니다.")
-        
-        marcap_dfs = []
-        completed_count = 0
-        total_dates = len(marcap_dates)
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            future_to_date = {executor.submit(fdr.StockListing, 'KRX-MARCAP', date): date for date in marcap_dates}
-            for future in concurrent.futures.as_completed(future_to_date):
-                try:
-                    date_str = future_to_date[future]
-                    result_df = future.result()
-                    if not result_df.empty: 
-                        result_df['date'] = pd.to_datetime(date_str)
-                        marcap_dfs.append(result_df)
-                except Exception: 
-                    continue
-                
-                # API 부하 방지를 위한 지연 추가
-                time.sleep(0.2)
-                
-                completed_count += 1
-                # PROGRESS 접두사로 진행률 로그 출력 - 매번 출력하되 같은 줄에서 덮어쓰기
-                log_progress("시가총액 데이터 수집", completed_count, total_dates)
-        
-        if not marcap_dfs: 
-            raise Exception("수집된 시가총액 데이터가 없습니다.")
-            
-        df_marcap_long = pd.concat(marcap_dfs, ignore_index=True)
-        df_marcap_long.sort_values(by=['Code', 'date'], inplace=True)
-        
-        # 원본 시가총액 데이터 메모리 해제
-        del marcap_dfs
-        import gc
-        gc.collect()
-        
-        # 월초 데이터를 일별로 분배
-        start_date_obj = pd.to_datetime(start_date)
-        end_date_obj = pd.to_datetime(end_date)
-        
-        all_dates = pd.date_range(start=start_date_obj, end=end_date_obj, freq='D')
-        trading_dates = all_dates[all_dates.weekday < 5]
-        
-        distributed_data = []
-        
-        for date in trading_dates:
-            # 해당 월의 첫 거래일 찾기
-            month_start = date.replace(day=1)
-            month_dates = pd.date_range(start=month_start, end=month_start + pd.DateOffset(months=1) - pd.DateOffset(days=1), freq='D')
-            month_trading_dates = month_dates[month_dates.weekday < 5]
-            
-            if not month_trading_dates.empty:
-                month_first_trading_day = month_trading_dates[0]
-                
-                # 해당 월의 첫 거래일 데이터를 현재 날짜에 복사
-                monthly_data_for_date = df_marcap_long[df_marcap_long['date'] == month_first_trading_day].copy()
-                if not monthly_data_for_date.empty:
-                    monthly_data_for_date['date'] = date
-                    distributed_data.append(monthly_data_for_date)
-        
-        if not distributed_data:
-            log_warning("분배할 월초 데이터가 없습니다.")
-        else:
-            df_marcap_long = pd.concat(distributed_data, ignore_index=True)
-            df_marcap_long.sort_values(by=['Code', 'date'], inplace=True)
-        
-        log_info(f"✅ 시가총액 데이터 수집 및 일별 분배 완료: {len(df_marcap_long)}개 레코드")
-        
-    except Exception as e:
-        raise ConnectionError(f"시가총액 데이터 수집 실패: {e}")
+    # NASDAQ 버전: KRX-MARCAP 대신 정적 시가총액(가능 시)을 사용
+    df_marcap_long = stock_list[['종목코드']].copy()
+    df_marcap_long.rename(columns={'종목코드': 'Code'}, inplace=True)
+    if '시가총액' in stock_list.columns:
+        df_marcap_long['MarketCap'] = pd.to_numeric(stock_list['시가총액'], errors='coerce')
+    else:
+        df_marcap_long['MarketCap'] = np.nan
+    log_info("✅ NASDAQ 정적 시가총액(가능 시) 준비 완료")
     
     # 재무데이터 수집 추가
     try:
@@ -1363,7 +1108,6 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
             log_progress("피처 계산", completed_count, total_calc_count)
             # 주기적 메모리 정리 (10개마다)
             if completed_count % 10 == 0:
-                import gc
                 gc.collect()
     finally:
         # 전역 변수 초기화 (메모리 해제)
@@ -1371,7 +1115,6 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
         
         # 다운로드된 데이터 메모리 해제
         del downloaded_data
-        import gc
         gc.collect()
 
     if not all_data: 
@@ -1405,7 +1148,6 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     
     # 개별 데이터 리스트 메모리 해제
     del all_data
-    import gc
     gc.collect()
     
     # 거시경제 데이터 추가
@@ -1444,7 +1186,6 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     
     # 원본 데이터 메모리 해제
     del raw_feature_df
-    import gc
     gc.collect()
     
     return final_df

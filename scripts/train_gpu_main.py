@@ -493,8 +493,8 @@ def prepare_data_and_save(data_path, start_date, end_date):
     log_info(f"   📅 실제 데이터 수집 시작일: {actual_start_date} (웜업 기간 포함)")
 
     # 기존 CPU 버전과 동일하게, 검증된 핵심 피처 목록을 공용 설정에서 로드
-    # 제거된 피처: PBR, USDKRW_pct_1d, KOSPI_pct_1d, 이익수익률, 수익률(3M), 수익률(1M), ATRr_14
-    # 제거된 피처: KOSPI_disparity_240, USDKRW_pct_5d, VIX_pct_1d, VIX_pct_5d, KOSPI_pct_5d
+    # 제거된 피처: PBR, 이익수익률, 수익률(3M), 수익률(1M), ATRr_14
+    # 제거된 피처: VIX_pct_1d, VIX_pct_5d
     # 추가된 피처: KOSPI_disparity_60
     # 추가된 피처: disparity_60
     # 제거된 피처: BBW_20_2, 거래량 변동성 계수, 변동성 기울기, 거래량 변동성 계수 기울기
@@ -502,7 +502,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
     # 제거된 피처: 변동성(3D/3M/1M/1W), KOSPI_변동성(3M/1W), KOSPI_disparity_120/20, BPS, 거래대금_MA20/MA5, BB_Position
     # 제거된 피처: disparity_120, disparity_240
     # 변경된 피처: RSI_14 -> RSI_Signal_Oscillator
-    # 추가된 피처: Relative_Strength_20 (KOSPI 수익률 상대강도), 시총_회전율(1W) (5일 거래대금 기준)
+    # 추가된 피처: 시총_회전율(1W) (5일 거래대금 기준)
     # 제거된 피처: 변동성(1W), 변동성(3M) (2024년 12월)
     features = [
         'log_mktcap',
@@ -511,7 +511,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
         'disparity_120',  # 120일 이격도
         'disparity_240',  # 240일 이격도
         'disparity_20',   # 20일 이격도
-        'KOSPI_disparity_20',  # KOSPI 20일 이격도
+        'IXIC_disparity_20',  # IXIC 20일 이격도 (NASDAQ 지수)
         # 추가된 피처
         'Trend_Pullback_Score',  # 추세+눌림 점수
         'Position_Range_60',
@@ -520,7 +520,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
         'MA20_Slope',  # 20일 이동평균선 기울기
         'MA120_Slope',  # 120일 이동평균선 기울기
         'MA240_Slope',  # 240일 이동평균선 기울기
-        'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
+        'IXIC_MA20_Slope',  # IXIC 20일 이동평균선 기울기 (NASDAQ 지수)
         # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
         # 새로 추가된 피처
         'RVOL',  # 상대 거래량 (Relative Volume)
@@ -535,7 +535,8 @@ def prepare_data_and_save(data_path, start_date, end_date):
         # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
         
         # 2024년 12월 신규 추가 피처 (3종)
-        'Log_Return_20',     # 로그 수익률 1개월 (20일)
+        # NASDAQ 전용 정리:
+        # - Log_Return_20은 현재 피처 세트에서 사용하지 않음(생성도 생략)
         'HV_Volatility_20',  # HV 변동성 1개월 (일별 로그 수익률의 20일 표준편차)
         'HV_Volatility_60',  # HV 변동성 3개월 (일별 로그 수익률의 60일 표준편차)
         'HV_Volatility_5',   # HV 변동성 1주 (일별 로그 수익률의 5일 표준편차)
@@ -1110,13 +1111,20 @@ def load_data_period(file_paths, features, start_date, end_date, imputation_map=
         log_info(f"   ✅ 병합 완료: {len(final_df):,}행")
         
         # 무한대(Inf) 값 처리 안전장치 (스케일러 고장 방지)
-        # 숫자형 컬럼만 처리
-        numeric_cols = final_df.select_dtypes(include=[np.number]).columns
-        if len(numeric_cols) > 0:
-            inf_count_before = (final_df[numeric_cols] == np.inf).sum().sum() + (final_df[numeric_cols] == -np.inf).sum().sum()
+        # cuDF에서는 컬럼별 sum() 결과 dtype이 섞이면 MixedTypeError가 날 수 있어,
+        # float 컬럼만 대상으로 "행 기준" 합산으로 안전하게 카운트합니다.
+        float_cols = final_df.select_dtypes(include=[np.floating]).columns
+        if len(float_cols) > 0:
+            inf_mask = (final_df[float_cols] == np.inf) | (final_df[float_cols] == -np.inf)
+            # cuDF 비교 연산은 원본이 null이면 결과도 null이 될 수 있음.
+            # bool 마스크에 null이 섞인 채로 sum(axis=1)을 하면 내부 fillna(np.nan) 경로를 타며
+            # bool에 float(NaN) fill을 시도해 TypeError가 날 수 있으므로, 먼저 False로 채움.
+            inf_mask = inf_mask.fillna(False)
+            # axis=1(행) 합산 → 단일 dtype Series → scalar 합산 (MixedTypeError 회피)
+            inf_count_before = int(inf_mask.astype(np.int8).sum(axis=1).sum())
             if inf_count_before > 0:
                 log_warning(f"   ⚠️ 무한대 값 {inf_count_before:,}개 발견. NaN으로 변환합니다.")
-                final_df[numeric_cols] = final_df[numeric_cols].replace([np.inf, -np.inf], np.nan)
+                final_df[float_cols] = final_df[float_cols].replace([np.inf, -np.inf], np.nan)
         
         # features와 target 추출
         missing_features = [f for f in features if f not in final_df.columns]
@@ -2065,7 +2073,7 @@ def main():
         'disparity_120',  # 120일 이격도
         'disparity_240',  # 240일 이격도
         'disparity_20',   # 20일 이격도
-        'KOSPI_disparity_20',  # KOSPI 20일 이격도
+        'IXIC_disparity_20',  # IXIC 20일 이격도 (NASDAQ 지수)
         # 추가된 피처
         'Trend_Pullback_Score',
         'Position_Range_60',
@@ -2074,7 +2082,7 @@ def main():
         'MA20_Slope',  # 20일 이동평균선 기울기
         'MA120_Slope',  # 120일 이동평균선 기울기
         'MA240_Slope',  # 240일 이동평균선 기울기
-        'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
+        'IXIC_MA20_Slope',  # IXIC 20일 이동평균선 기울기 (NASDAQ 지수)
         # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
         # 새로 추가된 피처
         'RVOL',  # 상대 거래량 (Relative Volume)
