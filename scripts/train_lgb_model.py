@@ -61,7 +61,8 @@ from scripts.train_model import (
     _sanitize_numeric_frame,
     compute_imputation_values_train_only,
     expanding_time_series_folds,
-    expanding_time_series_folds_gpustock
+    expanding_time_series_folds_gpustock,
+    DEFAULT_HORIZON_TRADING_DAYS
 )
 
 import data_processor
@@ -194,7 +195,8 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
         train_dates_cv,
         warmup_days=250,
         val_period_days=365,
-        n_folds=3
+        n_folds=3,
+        purge_trading_days=DEFAULT_HORIZON_TRADING_DAYS
     )
     if not fold_indices:
         log_warning("   ⚠️ Expanding CV fold 생성 실패(데이터 기간 부족). Optuna 튜닝을 중단합니다.")
@@ -351,14 +353,54 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
         # gpuStock 방식: 전체 데이터의 마지막 20%를 검증(Valid)용으로 사용하고, 나머지를 학습(Train)용으로 사용
         # (별도의 Test 셋이 없으므로, 이 Valid 셋이 최종 성능 평가 역할도 겸함)
         
+        # 인덱스 정합성 확보 (dates와 X/y가 반드시 같은 row 정렬을 공유해야 함)
+        X_train_raw = X_train_raw.reset_index(drop=True)
+        y_train = y_train.reset_index(drop=True)
+        train_dates = pd.to_datetime(train_dates).reset_index(drop=True)
+
         X_train_raw = _sanitize_numeric_frame(X_train_raw)
         
-        # 전체 데이터 기준 분할 (80:20)
+        # 전체 데이터 기준 분할 (기본 80:20) + horizon purge(10거래일)로 경계 누수 방지
         val_size = int(len(X_train_raw) * 0.2)
-        X_train_fit_raw = X_train_raw.iloc[:-val_size].copy()
-        X_val_raw = X_train_raw.iloc[-val_size:].copy()
-        y_train_fit = y_train.iloc[:-val_size].copy()
-        y_val = y_train.iloc[-val_size:].copy()
+        val_start_idx = max(0, len(X_train_raw) - val_size)
+        d_norm = train_dates.dt.normalize()
+
+        # 기본: 마지막 20%를 Val로
+        base_val_start_date = d_norm.iloc[val_start_idx] if len(d_norm) > 0 else None
+        unique_norm_dates = pd.Series(d_norm.dropna().unique()).sort_values().tolist()
+
+        cutoff_date = None
+        if base_val_start_date is not None and base_val_start_date in unique_norm_dates:
+            try:
+                pos = unique_norm_dates.index(base_val_start_date)
+                cutoff_pos = pos - int(DEFAULT_HORIZON_TRADING_DAYS)
+                if cutoff_pos > 0:
+                    cutoff_date = unique_norm_dates[cutoff_pos]
+            except Exception:
+                cutoff_date = None
+
+        if cutoff_date is not None:
+            # Train: cutoff_date 이전, Val: base_val_start_date 이후
+            train_fit_mask = d_norm < cutoff_date
+            val_mask = d_norm >= base_val_start_date
+            embargo_mask = (d_norm >= cutoff_date) & (d_norm < base_val_start_date)
+
+            X_train_fit_raw = X_train_raw.loc[train_fit_mask].copy()
+            X_val_raw = X_train_raw.loc[val_mask].copy()
+            y_train_fit = y_train.loc[train_fit_mask].copy()
+            y_val = y_train.loc[val_mask].copy()
+
+            if embargo_mask.any():
+                log_info(
+                    f"      🧹 purge 적용: Val 시작({base_val_start_date.date()}) 직전 "
+                    f"{int(DEFAULT_HORIZON_TRADING_DAYS)}거래일 구간 {int(embargo_mask.sum()):,}행 제외"
+                )
+        else:
+            # fallback: purge 불가(기간 부족 등) 시 기존 80:20 유지
+            X_train_fit_raw = X_train_raw.iloc[:-val_size].copy()
+            X_val_raw = X_train_raw.iloc[-val_size:].copy()
+            y_train_fit = y_train.iloc[:-val_size].copy()
+            y_val = y_train.iloc[-val_size:].copy()
         
         log_info(f"   ✂️ 최종 학습 데이터 분할 (gpuStock 방식):")
         log_info(f"      🔸 학습용 (Train): {len(X_train_fit_raw):,}행 (전체의 80%)")

@@ -58,6 +58,15 @@ from logger import log_info, log_warning, log_error
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 
+# ============================================================
+# Horizon / Purge(embargo) 설정
+# - 본 프로젝트의 타겟은 "향후 10거래일"을 참조하여 생성됩니다.
+# - 시계열 분할 시 Train/Val(Test) 경계 근처 샘플의 라벨이
+#   Val(Test) 구간의 가격을 참조할 수 있어 평가 누수가 생길 수 있으므로,
+#   기본적으로 horizon만큼(purge_trading_days) 갭을 두는 옵션을 제공합니다.
+# ============================================================
+DEFAULT_HORIZON_TRADING_DAYS = 10
+
 def get_memory_usage():
     """현재 메모리 사용량을 반환합니다."""
     process = psutil.Process(os.getpid())
@@ -290,13 +299,16 @@ def compute_imputation_values_train_only(X_train: pd.DataFrame) -> Dict[str, flo
 
 def expanding_time_series_folds(
     dates: pd.Series,
-    n_splits: int = 3
+    n_splits: int = 3,
+    purge_trading_days: int = 0
 ) -> List[Tuple[np.ndarray, np.ndarray]]:
     """
     gpuStock 철학에 맞춘 Expanding Window 방식의 시간 기반 CV split 생성.
     - Train은 누적(expanding)
     - Val은 바로 다음 구간(미래)
     - 같은 날짜는 Train/Val에 동시에 걸리지 않도록 unique date 단위로 나눔
+    - (선택) purge_trading_days: Val 시작 직전 N거래일 구간을 학습에서 제외하여
+      horizon 라벨로 인한 경계 누수(lookahead)를 방지합니다.
     Returns:
         (train_idx_positions, val_idx_positions) 리스트. 인덱스는 '위치' 기준(0..N-1).
     """
@@ -315,7 +327,15 @@ def expanding_time_series_folds(
     for i in range(n_splits):
         train_end = fold_size * (i + 1)
         val_end = fold_size * (i + 2)
-        train_dates = set(unique_dates[:train_end])
+        # purge: Val 시작 직전 purge_trading_days 만큼은 Train에서 제외
+        if purge_trading_days and purge_trading_days > 0:
+            train_end_purged = train_end - int(purge_trading_days)
+        else:
+            train_end_purged = train_end
+        if train_end_purged <= 0:
+            continue
+
+        train_dates = set(unique_dates[:train_end_purged])
         val_dates = set(unique_dates[train_end:val_end])
         if not train_dates or not val_dates:
             continue
@@ -330,13 +350,16 @@ def expanding_time_series_folds_gpustock(
     dates: pd.Series,
     warmup_days: int = 250,
     val_period_days: int = 365,
-    n_folds: int = 3
+    n_folds: int = 3,
+    purge_trading_days: int = 0
 ) -> List[Tuple[np.ndarray, np.ndarray]]:
     """
     gpuStock의 LGBM 학습과 동일한 Fold 구성 방식.
     - 웜업(warmup_days) 기간은 학습에서 제외
     - 검증 기간은 고정(val_period_days)이고, 마지막 n_folds개 구간을 1년 단위로 검증
     - Train은 항상 시작점부터 누적(expanding)
+    - (선택) purge_trading_days: Val 시작 직전 N거래일 구간을 학습에서 제외하여
+      horizon 라벨로 인한 경계 누수(lookahead)를 방지합니다.
 
     Returns:
         (train_idx_positions, val_idx_positions) 리스트. 인덱스는 '위치' 기준(0..N-1).
@@ -388,6 +411,28 @@ def expanding_time_series_folds_gpustock(
         if len(train_idx) == 0 or len(val_idx) == 0:
             continue
 
+        # purge 적용: Val 시작 직전 purge_trading_days 만큼을 Train에서 제외
+        if purge_trading_days and purge_trading_days > 0:
+            try:
+                unique_norm_dates = pd.Series(d_norm.unique()).sort_values().tolist()
+                val_start_date = d_norm.iloc[val_idx].min()
+                if pd.isna(val_start_date):
+                    continue
+                pos = unique_norm_dates.index(val_start_date)
+                # Val 시작일 포함 이전으로 purge 구간을 제거해야 하므로 cutoff는 val_start의 purge_trading_days 전 "시작점"
+                cutoff_pos = pos - int(purge_trading_days)
+                if cutoff_pos <= 0:
+                    continue
+                cutoff_date = unique_norm_dates[cutoff_pos]
+                # Train: [train_start, cutoff_date) 로 축소 (cutoff_date ~ val_start_date 전은 embargo/drop)
+                train_mask_purged = (d_norm >= train_start) & (d_norm < cutoff_date)
+                train_idx = np.where(train_mask_purged.values)[0]
+                if len(train_idx) == 0:
+                    continue
+            except Exception:
+                # purge 계산 실패 시 원래 split 유지(안전장치)
+                pass
+
         folds.append((train_idx, val_idx))
 
     return folds
@@ -398,13 +443,14 @@ def time_series_cv_auc(
     y: pd.Series,
     dates: pd.Series,
     features: List[str],
-    n_splits: int = 3
+    n_splits: int = 3,
+    purge_trading_days: int = 0
 ) -> float:
     """
     시간 기반 Expanding CV로 ROC-AUC 평균을 계산합니다.
     - 각 fold마다 Train-only로 imputation/scaler fit
     """
-    folds = expanding_time_series_folds(dates, n_splits=n_splits)
+    folds = expanding_time_series_folds(dates, n_splits=n_splits, purge_trading_days=purge_trading_days)
     if not folds:
         return 0.0
 
@@ -481,7 +527,7 @@ def save_training_data_to_file(final_df, training_data_path):
         log_error(f"학습 데이터 파일 저장 실패: {e}")
         return False
 
-def split_by_date(X, y, dates, test_size=0.3):
+def split_by_date(X, y, dates, test_size=0.3, purge_trading_days: int = 0):
     """
     날짜 기반 데이터 분할 함수 (미래 데이터 참조 방지)
     
@@ -493,6 +539,9 @@ def split_by_date(X, y, dates, test_size=0.3):
     
     Returns:
         X_train, X_test, y_train, y_test, train_dates, test_dates
+    Notes:
+        purge_trading_days > 0 인 경우, Test 시작일 직전 N거래일 구간은 Train에서 제외하여
+        horizon 라벨로 인한 경계 누수를 줄입니다. (해당 구간 샘플은 Train/Test 모두에서 제외)
     """
     # 날짜 기준으로 정렬
     sorted_indices = dates.argsort()
@@ -521,12 +570,32 @@ def split_by_date(X, y, dates, test_size=0.3):
     if split_idx >= len(X_sorted):
         split_idx = len(X_sorted) - 1
     
-    X_train = X_sorted.iloc[:split_idx].copy()
-    X_test = X_sorted.iloc[split_idx:].copy()
-    y_train = y_sorted.iloc[:split_idx].copy()
-    y_test = y_sorted.iloc[split_idx:].copy()
-    train_dates = dates_sorted.iloc[:split_idx].copy()
-    test_dates = dates_sorted.iloc[split_idx:].copy()
+    # 기본 test 시작 인덱스 (같은 날짜는 Train에 몰아넣은 이후 기준)
+    test_start_idx = split_idx
+
+    # purge 적용 시, Train 끝을 더 과거로 당겨 "embargo 구간"을 drop
+    train_end_idx = test_start_idx
+    if purge_trading_days and purge_trading_days > 0 and len(dates_sorted) > 0:
+        try:
+            d_norm = pd.to_datetime(dates_sorted, errors='coerce').dt.normalize()
+            test_start_date = d_norm.iloc[test_start_idx]
+            unique_norm_dates = pd.Series(d_norm.dropna().unique()).sort_values().tolist()
+            if test_start_date in unique_norm_dates:
+                pos = unique_norm_dates.index(test_start_date)
+                cutoff_pos = pos - int(purge_trading_days)
+                if cutoff_pos > 0:
+                    cutoff_date = unique_norm_dates[cutoff_pos]
+                    # Train은 cutoff_date 이전까지만 포함 (cutoff_date ~ test_start_date 직전은 drop)
+                    train_end_idx = int(np.where(d_norm < cutoff_date)[0].max() + 1) if (d_norm < cutoff_date).any() else 0
+        except Exception:
+            pass
+
+    X_train = X_sorted.iloc[:train_end_idx].copy()
+    X_test = X_sorted.iloc[test_start_idx:].copy()
+    y_train = y_sorted.iloc[:train_end_idx].copy()
+    y_test = y_sorted.iloc[test_start_idx:].copy()
+    train_dates = dates_sorted.iloc[:train_end_idx].copy()
+    test_dates = dates_sorted.iloc[test_start_idx:].copy()
     
     # 데이터 정합성 검증: Train의 최대 날짜 < Test의 최소 날짜
     train_max_date = train_dates.max()
@@ -580,6 +649,8 @@ def split_by_date(X, y, dates, test_size=0.3):
     log_info(f"      Train: {train_dates.min().strftime('%Y-%m-%d')} ~ {train_max_date.strftime('%Y-%m-%d')} ({len(X_train):,}행)")
     log_info(f"      Test:  {test_min_date.strftime('%Y-%m-%d')} ~ {test_dates.max().strftime('%Y-%m-%d')} ({len(X_test):,}행)")
     log_info(f"      ✅ 미래 데이터 참조 방지 확인: Train 최대 날짜 < Test 최소 날짜")
+    if purge_trading_days and purge_trading_days > 0:
+        log_info(f"      🧹 purge 적용: Test 시작 직전 {int(purge_trading_days)}거래일 구간은 Train에서 제외(경계 누수 방지)")
     
     return X_train, X_test, y_train, y_test, train_dates, test_dates
 
@@ -915,7 +986,11 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, dates, n_jo
     
     # 날짜 기반 데이터 분할 (미래 데이터 참조 방지)
     log_info("   📊 날짜 기반 학습/테스트 데이터 분할 중...")
-    X_train, X_test, y_train, y_test, train_dates, test_dates = split_by_date(X, y, dates, test_size=0.3)
+    X_train, X_test, y_train, y_test, train_dates, test_dates = split_by_date(
+        X, y, dates,
+        test_size=0.3,
+        purge_trading_days=DEFAULT_HORIZON_TRADING_DAYS
+    )
     log_memory_usage("데이터 분할 완료")
     check_memory_and_cleanup()
 
@@ -935,7 +1010,11 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, dates, n_jo
     y_train_cv = y_train.reset_index(drop=True)
     X_train_cv = X_train_raw.reset_index(drop=True)
 
-    fold_indices = expanding_time_series_folds(train_dates_cv, n_splits=3)
+    fold_indices = expanding_time_series_folds(
+        train_dates_cv,
+        n_splits=3,
+        purge_trading_days=DEFAULT_HORIZON_TRADING_DAYS
+    )
     if not fold_indices:
         log_warning("   ⚠️ Expanding CV fold 생성 실패(데이터 기간 부족). Optuna 튜닝을 중단합니다.")
         return
