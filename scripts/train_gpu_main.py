@@ -15,6 +15,7 @@ import shutil
 import glob
 import subprocess
 from datetime import datetime, timedelta
+from bisect import bisect_left
 import gc
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -59,6 +60,15 @@ from logger import log_info, log_warning, log_error, log_critical
 import data_processor
 
 from path_manager import path_manager
+
+# ============================================================
+# Horizon / Purge(embargo) 설정
+# - 본 프로젝트의 타겟은 "향후 10거래일"을 참조하여 생성됩니다.
+# - 시계열 Fold 분할 시 Train/Val 경계 근처 샘플의 라벨이
+#   Val 구간의 가격을 참조할 수 있어 평가 누수가 생길 수 있으므로,
+#   기본적으로 horizon만큼(purge_trading_days) 갭을 둡니다.
+# ============================================================
+DEFAULT_HORIZON_TRADING_DAYS = 10
 
 # 언더샘플링은 직접 구현하므로 외부 라이브러리 불필요
 
@@ -832,6 +842,56 @@ def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days
     
     return fold_ranges
 
+def _build_trading_calendar_from_files(file_paths, max_files=30, min_unique_dates=2000):
+    """
+    파일들에서 'date' 컬럼만 읽어 거래일 캘린더(정렬된 unique normalize 날짜)를 구성합니다.
+    - 최소 변경/성능을 위해 일부 파일만 샘플링합니다.
+    - 주식 시장 캘린더가 종목 간 동일하다는 가정 하에, 충분한 개수의 날짜가 확보되면 조기 종료합니다.
+    """
+    dates_set = set()
+    if not file_paths:
+        return []
+    for fp in file_paths[:max_files]:
+        try:
+            df = pd.read_feather(fp, columns=['date'])
+            if 'date' not in df.columns:
+                continue
+            d = pd.to_datetime(df['date'], errors='coerce').dropna().dt.normalize()
+            dates_set.update(d.unique().tolist())
+            if len(dates_set) >= min_unique_dates:
+                break
+        except Exception:
+            continue
+    if not dates_set:
+        return []
+    return sorted(pd.to_datetime(list(dates_set)).to_list())
+
+def _apply_purge_to_fold_ranges(fold_ranges, trading_dates, purge_trading_days):
+    """
+    fold_ranges(list[dict])의 train_end를 Val 시작 직전 purge_trading_days 거래일만큼 앞당겨
+    Train/Val 경계 누수를 줄입니다.
+    - 날짜 필터가 [start, end) (end exclusive)라는 전제에서 동작합니다.
+    """
+    if not fold_ranges or not trading_dates or purge_trading_days <= 0:
+        return fold_ranges
+
+    td = [pd.Timestamp(x).normalize() for x in trading_dates]
+    for fr in fold_ranges:
+        try:
+            val_start = pd.Timestamp(fr['val_start']).normalize()
+            pos = bisect_left(td, val_start)
+            if pos <= 0:
+                continue
+            cutoff_pos = pos - int(purge_trading_days)
+            if cutoff_pos <= 0:
+                continue
+            cutoff_date = td[cutoff_pos]
+            if pd.Timestamp(fr['train_start']).normalize() < cutoff_date < val_start:
+                fr['train_end'] = cutoff_date
+        except Exception:
+            continue
+    return fold_ranges
+
 def _process_single_file(file_path, features, start_date, end_date, include_crash_pattern=False):
     """
     단일 파일을 처리하는 헬퍼 함수 (워커 스레드에서 실행)
@@ -1418,15 +1478,8 @@ def objective(trial, fold_data_cache, features, max_depth_list, rng):
         log_info(f"   ✅ Fold #{fold+1}/3 | Score: {score:.4f} | 총: {fold_duration:.1f}초 "
                  f"(전처리: {preprocessing_time:.1f}초, 학습: {fit_time:.1f}초, 예측: {pred_time:.1f}초){batch_info_str}")
 
-        # Pruning 체크
-        trial.report(score, step=fold)
-        if trial.should_prune():
-            trial_duration = (datetime.now() - trial_start_time).total_seconds()
-            log_info(f"   ⏹️ Trial #{trial.number} 조기 종료 (Pruning) | 총 소요시간: {trial_duration/60:.1f}분 ({trial_duration:.1f}초)")
-            log_info(f"{'='*60}")
-            enhanced_gpu_memory_cleanup(force_defrag=True)
-            gc.collect()
-            raise optuna.TrialPruned()
+        # ✅ A안 적용: Pruning(조기 종료) 비활성화
+        # - 어떤 trial도 fold 중간에 끊지 않습니다.
 
     if not fold_scores:
         log_error("모든 Fold에서 학습에 실패했습니다. Trial을 중단합니다.")
@@ -2115,17 +2168,13 @@ def main():
 
     # --- 3. Optuna 하이퍼파라미터 튜닝 ---
     study_name = "cuml_randomforest_optimization"
-    # Pruning을 통해 나쁜 trial을 조기 종료하여 시간 절약
-    pruner = optuna.pruners.MedianPruner(
-        n_startup_trials=5,  # 처음 5개 trial은 pruning하지 않음
-        n_warmup_steps=1,    # 첫 번째 fold만 완료하면 바로 pruning 판단 시작
-        interval_steps=1      # 매 fold마다 pruning 체크
-    )
+    # ✅ A안 적용: Pruning(조기 종료) 비활성화
+    # - "초반 fold 성적이 낮지만 후반 fold에서 좋아지는" 파라미터를 놓치지 않도록
+    #   어떤 trial도 중간에 끊지 않고 끝까지(모든 fold) 평가합니다.
     study = optuna.create_study(
         direction='maximize',
         study_name=study_name,
         sampler=optuna.samplers.TPESampler(seed=42),
-        pruner=pruner
     )
 
     # --- 모든 Fold의 데이터를 미리 로드하여 캐싱 (날짜 기반 Expanding Window) ---
@@ -2137,10 +2186,29 @@ def main():
     
     # 날짜 기반 Expanding Window Fold 범위 계산
     fold_ranges = calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days=365, n_folds=3)
+
+    # ✅ 10거래일 purge(embargo) 적용: Val 시작 직전 10거래일은 Train에서 제외
+    trading_dates = _build_trading_calendar_from_files(file_paths)
+    if trading_dates:
+        fold_ranges = _apply_purge_to_fold_ranges(fold_ranges, trading_dates, DEFAULT_HORIZON_TRADING_DAYS)
+        log_info(f"   🧹 purge 적용: Val 시작 직전 {DEFAULT_HORIZON_TRADING_DAYS}거래일은 Train에서 제외합니다.")
+    else:
+        log_warning("   ⚠️ 거래일 캘린더 생성 실패: purge(10거래일) 적용을 건너뜁니다.")
     
     if not fold_ranges:
         log_critical("Fold 범위 계산에 실패했습니다. 프로그램을 종료합니다.")
         sys.exit(1)
+
+    # ✅ 정합성 검증 로그: Train/Val 날짜가 겹치지 않는지 확인
+    for fr in fold_ranges:
+        try:
+            if pd.Timestamp(fr['train_end']).normalize() >= pd.Timestamp(fr['val_start']).normalize():
+                log_warning(
+                    f"   ⚠️ Fold#{fr.get('fold', '?')+1 if isinstance(fr.get('fold', None), int) else fr.get('fold', '?')}: "
+                    f"Train_end({pd.Timestamp(fr['train_end']).date()}) >= Val_start({pd.Timestamp(fr['val_start']).date()})"
+                )
+        except Exception:
+            pass
     
     fold_data_cache = {}  # {fold_idx: (X_train, y_train, X_val, y_val)}
     

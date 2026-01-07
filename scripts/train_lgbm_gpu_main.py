@@ -16,6 +16,7 @@ import shutil
 import glob
 import subprocess
 from datetime import datetime, timedelta
+from bisect import bisect_left
 import gc
 import warnings
 
@@ -45,6 +46,15 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from logger import log_info, log_warning, log_error, log_critical
 import data_processor
 from path_manager import path_manager
+
+# ============================================================
+# Horizon / Purge(embargo) 설정
+# - 본 프로젝트의 타겟은 "향후 10거래일"을 참조하여 생성됩니다.
+# - 시계열 Fold 분할 시 Train/Val 경계 근처 샘플의 라벨이
+#   Val 구간의 가격을 참조할 수 있어 평가 누수가 생길 수 있으므로,
+#   기본적으로 horizon만큼(purge_trading_days) 갭을 둡니다.
+# ============================================================
+DEFAULT_HORIZON_TRADING_DAYS = 10
 
 # Optuna TPE Sampler의 seed 고정을 위한 설정
 optuna.samplers.TPESampler.init_rng = lambda self: np.random.RandomState()
@@ -255,7 +265,8 @@ def load_data_period(file_paths, features, start_date, end_date, imputation_map=
             # 날짜 필터링
             if 'date' in ticker_df.columns:
                 ticker_df['date'] = pd.to_datetime(ticker_df['date'])
-                mask = (ticker_df['date'] >= start_date) & (ticker_df['date'] <= end_date)
+                # ✅ 시계열 정합성: end_date는 "exclusive"로 통일 (Train/Val 경계 날짜 겹침 방지)
+                mask = (ticker_df['date'] >= start_date) & (ticker_df['date'] < end_date)
                 ticker_df = ticker_df[mask].copy()
             
             if ticker_df.empty:
@@ -291,6 +302,59 @@ def load_data_period(file_paths, features, start_date, end_date, imputation_map=
     log_info(f"   ✅ 데이터 로딩 완료: {len(combined_df):,}행")
     
     return combined_df, None, None
+
+def _build_trading_calendar_from_files(file_paths, max_files=30, min_unique_dates=2000):
+    """
+    파일들에서 'date' 컬럼만 읽어 거래일 캘린더(정렬된 unique normalize 날짜)를 구성합니다.
+    - 최소 변경/성능을 위해 일부 파일만 샘플링합니다.
+    - 주식 시장 캘린더가 종목 간 동일하다는 가정 하에, 충분한 개수의 날짜가 확보되면 조기 종료합니다.
+    """
+    dates_set = set()
+    if not file_paths:
+        return []
+    for fp in file_paths[:max_files]:
+        try:
+            df = pd.read_feather(fp, columns=['date'])
+            if 'date' not in df.columns:
+                continue
+            d = pd.to_datetime(df['date'], errors='coerce').dropna().dt.normalize()
+            dates_set.update(d.unique().tolist())
+            if len(dates_set) >= min_unique_dates:
+                break
+        except Exception:
+            continue
+    if not dates_set:
+        return []
+    # Timestamp 정렬
+    return sorted(pd.to_datetime(list(dates_set)).to_list())
+
+def _apply_purge_to_fold_ranges(fold_ranges, trading_dates, purge_trading_days):
+    """
+    fold_ranges(list[dict])의 train_end를 Val 시작 직전 purge_trading_days 거래일만큼 앞당겨
+    Train/Val 경계 누수를 줄입니다.
+    - 날짜 필터가 [start, end) (end exclusive)라는 전제에서 동작합니다.
+    """
+    if not fold_ranges or not trading_dates or purge_trading_days <= 0:
+        return fold_ranges
+
+    td = [pd.Timestamp(x).normalize() for x in trading_dates]
+    for fr in fold_ranges:
+        try:
+            val_start = pd.Timestamp(fr['val_start']).normalize()
+            # val_start가 캘린더에 없으면 삽입 위치를 사용 (가장 가까운 이후 거래일로 정렬)
+            pos = bisect_left(td, val_start)
+            if pos <= 0:
+                continue
+            cutoff_pos = pos - int(purge_trading_days)
+            if cutoff_pos <= 0:
+                continue
+            cutoff_date = td[cutoff_pos]
+            # Train은 [train_start, cutoff_date) 로 축소
+            if pd.Timestamp(fr['train_start']).normalize() < cutoff_date < val_start:
+                fr['train_end'] = cutoff_date
+        except Exception:
+            continue
+    return fold_ranges
 
 def get_date_range_from_files(file_paths):
     """
@@ -661,7 +725,7 @@ def objective(trial, fold_data_cache, features):
 
 # --- 최종 모델 학습 함수 ---
 
-def train_final_model(fold_ranges, file_paths, features, best_params, best_score=None):
+def train_final_model(fold_ranges, file_paths, features, best_params, best_score=None, optimization_results=None, training_config=None):
     """
     최적 파라미터로 최종 모델을 학습합니다.
     """
@@ -1015,6 +1079,12 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
         'best_score': best_score,  # Optuna 최적 점수 저장
         'scaler': scaler,
     }
+
+    # Optuna 탐색(Trial) 결과/학습 설정은 있을 때만 저장 (하위 호환)
+    if isinstance(optimization_results, dict):
+        metadata['optimization_results'] = optimization_results
+    if isinstance(training_config, dict):
+        metadata['training_config'] = training_config
     
     metadata_path = path_manager.data_dir / 'lgbm_model_metadata.joblib'
     joblib.dump(metadata, metadata_path)
@@ -1130,10 +1200,29 @@ def main():
     log_info(f"\n--- 📁 Fold 데이터 로딩 및 구성 중 (날짜 기반 Expanding Window) ---")
     
     fold_ranges = calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days=365, n_folds=3)
+
+    # ✅ 10거래일 purge(embargo) 적용: Val 시작 직전 10거래일은 Train에서 제외
+    trading_dates = _build_trading_calendar_from_files(file_paths)
+    if trading_dates:
+        fold_ranges = _apply_purge_to_fold_ranges(fold_ranges, trading_dates, DEFAULT_HORIZON_TRADING_DAYS)
+        log_info(f"   🧹 purge 적용: Val 시작 직전 {DEFAULT_HORIZON_TRADING_DAYS}거래일은 Train에서 제외합니다.")
+    else:
+        log_warning("   ⚠️ 거래일 캘린더 생성 실패: purge(10거래일) 적용을 건너뜁니다.")
     
     if not fold_ranges:
         log_critical("Fold 범위 계산에 실패했습니다. 프로그램을 종료합니다.")
         sys.exit(1)
+
+    # ✅ 정합성 검증 로그: Train/Val 날짜가 겹치지 않는지 확인
+    for fr in fold_ranges:
+        try:
+            if pd.Timestamp(fr['train_end']).normalize() >= pd.Timestamp(fr['val_start']).normalize():
+                log_warning(
+                    f"   ⚠️ Fold#{fr.get('fold', '?')+1 if isinstance(fr.get('fold', None), int) else fr.get('fold', '?')}: "
+                    f"Train_end({pd.Timestamp(fr['train_end']).date()}) >= Val_start({pd.Timestamp(fr['val_start']).date()})"
+                )
+        except Exception:
+            pass
         
     # 4. 데이터 캐싱 (메모리 로드)
     # I/O 병목 제거를 위해 미리 데이터를 로드하여 메모리에 저장합니다.
@@ -1222,6 +1311,33 @@ def main():
     # --- 6. 최종 모델 학습 ---
     best_params = study.best_params
     best_score = study.best_value
+
+    # Optuna 최적화 결과 요약 (RF와 동일한 키 구조 유지)
+    try:
+        complete_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        pruned_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]
+        optimization_results = {
+            'best_score': best_score,
+            'best_params': best_params,
+            'total_combinations_tested': len(study.trials),
+            'n_complete_trials': len(complete_trials),
+            'n_pruned_trials': len(pruned_trials),
+            'n_trials_requested': int(n_trials),
+        }
+    except Exception:
+        optimization_results = {
+            'best_score': best_score,
+            'best_params': best_params,
+            'total_combinations_tested': None,
+            'n_complete_trials': None,
+            'n_pruned_trials': None,
+            'n_trials_requested': int(n_trials),
+        }
+
+    training_config = {
+        'search_method': 'optuna_tpe',
+        'n_trials': int(n_trials),
+    }
     
     # 최종 모델 학습을 위해 fold_ranges 재구성 (문자열 날짜 형식)
     fold_ranges_str = []
@@ -1233,7 +1349,15 @@ def main():
             fold_info['val_end'].strftime('%Y-%m-%d')
         ))
         
-    final_model, final_features = train_final_model(fold_ranges_str, file_paths, features, best_params, best_score)
+    final_model, final_features = train_final_model(
+        fold_ranges_str,
+        file_paths,
+        features,
+        best_params,
+        best_score,
+        optimization_results=optimization_results,
+        training_config=training_config
+    )
     
     if final_model is None:
         log_critical("최종 모델 학습에 실패했습니다.")

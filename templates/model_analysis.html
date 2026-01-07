@@ -441,6 +441,71 @@
     </div>
     {% else %}
     
+    <!-- 최적화 결과 (LGBM) -->
+    <div class="card mb-4">
+      <div class="card-header">
+        <h5 class="mb-0">
+          <i class="fas fa-trophy text-warning me-2"></i>최적화 결과 (LightGBM)
+        </h5>
+      </div>
+      <div class="card-body">
+        <div class="row">
+          <div class="col-md-6">
+            <div class="alert alert-success">
+              <h6 class="alert-heading">
+                <i class="fas fa-star me-2"></i>최고 성능
+              </h6>
+              <h3 class="mb-1">
+                {% if lgbm_model_info.optimization_results and lgbm_model_info.optimization_results.best_score is not none %}
+                  {{ lgbm_model_info.optimization_results.best_score | round(4) }}
+                {% elif lgbm_model_info.best_score is not none %}
+                  {{ lgbm_model_info.best_score | round(4) }}
+                {% else %}
+                  <span class="text-muted">정보 없음</span>
+                {% endif %}
+              </h3>
+              <small class="text-muted">ROC-AUC 점수</small>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="alert alert-info">
+              <h6 class="alert-heading">
+                <i class="fas fa-list me-2"></i>탐색 범위
+              </h6>
+              <h3 class="mb-1">
+                {% if lgbm_model_info.optimization_results and lgbm_model_info.optimization_results.total_combinations_tested is not none %}
+                  {{ lgbm_model_info.optimization_results.total_combinations_tested }}개
+                {% else %}
+                  <span class="text-muted">정보 없음</span>
+                {% endif %}
+              </h3>
+              <small class="text-muted">테스트한 조합 수 (trial)</small>
+            </div>
+          </div>
+        </div>
+
+        {% if lgbm_model_info.optimization_results and lgbm_model_info.optimization_results.best_params %}
+        <div class="mt-3">
+          <h6><i class="fas fa-cog me-2"></i>최적 파라미터</h6>
+          <div class="row">
+            {% for param, value in lgbm_model_info.optimization_results.best_params.items() %}
+            <div class="col-md-4 mb-2">
+              <div class="d-flex justify-content-between align-items-center">
+                <span class="fw-bold">{{ param }}:</span>
+                <span class="badge bg-primary">{{ value }}</span>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% else %}
+        <div class="mt-3 text-muted">
+          <small>※ Optuna 탐색 정보(Trial)가 저장된 모델은 여기에 자동으로 표시됩니다. 현재는 정보가 없습니다.</small>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
     <!-- 모델 개요 -->
     <div class="card mb-4">
       <div class="card-header">
