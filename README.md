@@ -220,7 +220,7 @@ python flask_app.py
 run/start_flask_app.command  # macOS
 run/start_flask_app.bat      # Windows
 ```
-- **URL**: http://localhost:5000
+- **URL**: http://localhost:5500
 - **특징**: 현대적인 웹 UI, 실시간 WebSocket 통신, 반응형 디자인
 
 

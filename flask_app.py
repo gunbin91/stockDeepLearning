@@ -914,7 +914,10 @@ def model_analysis():
                     'features': lgbm_data.get('features', []),
                     'params': lgbm_data.get('best_params', {}),
                     'best_score': lgbm_data.get('best_score', None),
-                    'best_iteration': lgbm_data.get('best_iteration', None)
+                    'best_iteration': lgbm_data.get('best_iteration', None),
+                    # Optuna 탐색 결과(있으면 표시)
+                    'optimization_results': lgbm_data.get('optimization_results', None),
+                    'training_config': lgbm_data.get('training_config', None),
                 }
                 
                 # 기본 중요도: 모델에서 직접 가져오기
@@ -1849,11 +1852,11 @@ def handle_disconnect():
 # 포트 찾기 함수 - 사용 가능한 포트 자동 검색
 # =============================================================================
 
-def find_available_port(start_port=5000, max_port=5100):
+def find_available_port(start_port=5500, max_port=5600):
     """사용 가능한 포트를 찾는 함수"""
     import socket
     
-    # 첫 번째 시도: 기본 범위 (5000-5100)
+    # 첫 번째 시도: 기본 범위 (5500-5600)
     for port in range(start_port, max_port):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -1887,7 +1890,7 @@ if __name__ == '__main__':
     
     # 명령행 인수 파싱
     parser = argparse.ArgumentParser(description='AI 주식 분석 시스템 - Flask 앱')
-    parser.add_argument('--port', type=int, default=None, help='사용할 포트 번호 (기본값: 자동 검색)')
+    parser.add_argument('--port', type=int, default=None, help='사용할 포트 번호 (기본값: 5500 우선 자동 검색)')
     parser.add_argument('--host', type=str, default='0.0.0.0', help='바인딩할 호스트 (기본값: 0.0.0.0)')
     parser.add_argument('--debug', action='store_true', help='디버그 모드 활성화')
     args = parser.parse_args()
@@ -1912,7 +1915,7 @@ if __name__ == '__main__':
             print(f"❌ 오류: {e}")
             print("💡 해결 방법:")
             print("   1. 다른 Flask 앱을 종료하세요")
-            print("   2. 또는 수동으로 포트를 지정하세요: python flask_app.py --port 5001")
+            print("   2. 또는 수동으로 포트를 지정하세요: python flask_app.py --port 5501")
             print("   3. 더 넓은 범위의 포트를 시도해보세요: python flask_app.py --port 8000")
             sys.exit(1)
     
