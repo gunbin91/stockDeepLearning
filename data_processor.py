@@ -619,6 +619,8 @@ def fetch_ticker_price_data(stock_info, start_date, end_date):
             
         df_price.rename(columns={'Open':'시가', 'Close':'종가', 'High': '고가', 'Low': '저가', 'Volume':'거래량'}, inplace=True)
         df = df_price[['시가', '종가', '고가', '저가', '거래량']].copy()
+        # 전날 종가(상한가 필터/등락률 계산용)
+        df['전날종가'] = df['종가'].shift(1)
         df.sort_index(inplace=True)
         
         # 메모리 최적화: 원본 데이터프레임 해제

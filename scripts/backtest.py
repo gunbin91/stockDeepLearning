@@ -176,10 +176,23 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         # ============================================================
         if 'daily_return_pct' not in data.columns:
             try:
-                # pct_change는 날짜 순 정렬이 중요
+                # 날짜 순 정렬이 중요
                 data = data.sort_index()
-                closes = pd.to_numeric(data['종가'], errors='coerce')
-                data['daily_return_pct'] = closes.groupby(level='종목코드').pct_change() * 100.0
+                daily_return = None
+
+                # 전날종가가 있으면 그 값을 우선 사용
+                if '전날종가' in data.columns:
+                    close = pd.to_numeric(data['종가'], errors='coerce')
+                    prev = pd.to_numeric(data['전날종가'], errors='coerce')
+                    daily_return = (close / prev - 1) * 100.0
+                    daily_return = daily_return.where(prev > 0)
+
+                # 전날종가가 없거나 계산 실패 시 종가 pct_change로 대체
+                if daily_return is None:
+                    closes = pd.to_numeric(data['종가'], errors='coerce')
+                    daily_return = closes.groupby(level='종목코드').pct_change() * 100.0
+
+                data['daily_return_pct'] = daily_return
             except Exception as e:
                 # 계산 실패해도 백테스트는 계속 진행 (필터는 미적용)
                 log_warning("⚠️ 당일 등락율 계산 실패: 필터를 적용하지 않고 진행합니다.", exception=e)
