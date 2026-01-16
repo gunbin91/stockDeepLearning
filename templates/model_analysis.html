@@ -480,15 +480,34 @@
             <div class="card bg-light">
               <div class="card-body">
                 <h6 class="card-title">
-                  <i class="fas fa-calendar text-info me-2"></i>최종 학습일
+                  <i class="fas fa-list text-info me-2"></i>탐색 범위
                 </h6>
-                <p class="card-text">{{ lgbm_model_info.last_modified }}</p>
-      </div>
-    </div>
-  </div>
+                <h3 class="mb-1">
+                  {% if lgbm_model_info.trials_completed is not none %}
+                    {{ lgbm_model_info.trials_completed }}회
+                  {% elif lgbm_model_info.n_trials is not none %}
+                    {{ lgbm_model_info.n_trials }}회
+                  {% else %}
+                    N/A
+                  {% endif %}
+                </h3>
+                <small class="text-muted">Optuna Trial 수</small>
+              </div>
+            </div>
+          </div>
 </div>
 
         <div class="row mt-3">
+          <div class="col-12">
+            <div class="card bg-light mb-3">
+              <div class="card-body">
+                <h6 class="card-title">
+                  <i class="fas fa-calendar text-info me-2"></i>최종 학습일
+                </h6>
+                <p class="card-text mb-0">{{ lgbm_model_info.last_modified }}</p>
+              </div>
+            </div>
+          </div>
           <div class="col-12">
             <div class="card bg-light">
               <div class="card-body">

@@ -882,7 +882,10 @@ def model_analysis():
                     'features': lgbm_data.get('features', []),
                     'params': lgbm_data.get('best_params', {}),
                     'best_score': lgbm_data.get('best_score', None),
-                    'best_iteration': lgbm_data.get('best_iteration', None)
+                    'best_iteration': lgbm_data.get('best_iteration', None),
+                    # 모델 분석 페이지 표기용 (탐색 범위)
+                    'n_trials': lgbm_data.get('n_trials', None),
+                    'trials_completed': lgbm_data.get('trials_completed', None),
                 }
                 
                 # 기본 중요도: 모델에서 직접 가져오기

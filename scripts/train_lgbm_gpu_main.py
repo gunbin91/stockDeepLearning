@@ -255,7 +255,9 @@ def load_data_period(file_paths, features, start_date, end_date, imputation_map=
             # 날짜 필터링
             if 'date' in ticker_df.columns:
                 ticker_df['date'] = pd.to_datetime(ticker_df['date'])
-                mask = (ticker_df['date'] >= start_date) & (ticker_df['date'] <= end_date)
+                # [중요] 폴드/기간 경계를 [start, end) 형태로 통일하여
+                # Train/Val 경계에서 동일 날짜 샘플이 중복 포함되는 누수를 방지합니다.
+                mask = (ticker_df['date'] >= start_date) & (ticker_df['date'] < end_date)
                 ticker_df = ticker_df[mask].copy()
             
             if ticker_df.empty:
@@ -340,7 +342,67 @@ def get_date_range_from_files(file_paths):
     
     return min_date, max_date
 
-def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days=365, n_folds=3):
+def get_trading_dates_from_files(file_paths, max_files=30):
+    """
+    샘플 feather 파일에서 거래일(date) 캘린더를 추출합니다.
+    - 폴드 경계 purge(미래 10거래일 라벨 누수 방지)를 위해 사용
+    - 성능을 위해 모든 파일을 읽지 않고 샘플링합니다.
+    """
+    if not file_paths:
+        return pd.DatetimeIndex([])
+    
+    # 샘플링: 앞/중간/뒤에서 일부 추출 (균형)
+    sample_paths = []
+    head_n = min(max_files // 3, len(file_paths))
+    tail_n = min(max_files // 3, len(file_paths))
+    mid_n = min(max_files - head_n - tail_n, max(0, len(file_paths) - head_n - tail_n))
+    
+    sample_paths.extend(file_paths[:head_n])
+    if mid_n > 0 and len(file_paths) > (head_n + tail_n):
+        mid_start = max(0, len(file_paths) // 2 - mid_n // 2)
+        sample_paths.extend(file_paths[mid_start:mid_start + mid_n])
+    sample_paths.extend(file_paths[-tail_n:])
+    
+    # 중복 제거
+    sample_paths = list(dict.fromkeys(sample_paths))
+    
+    all_dates = []
+    for p in sample_paths:
+        try:
+            df = pd.read_feather(p, columns=['date'])
+            if 'date' not in df.columns:
+                continue
+            dates = pd.to_datetime(df['date'], errors='coerce')
+            dates = dates.dropna()
+            if not dates.empty:
+                all_dates.append(dates)
+        except Exception:
+            continue
+    
+    if not all_dates:
+        return pd.DatetimeIndex([])
+    
+    unique_dates = pd.to_datetime(pd.concat(all_dates, ignore_index=True).unique())
+    unique_dates = pd.DatetimeIndex(unique_dates).sort_values()
+    return unique_dates
+
+def get_purged_train_end_exclusive(trading_dates: pd.DatetimeIndex, val_start, purge_trading_days: int):
+    """
+    Val 시작일 기준으로 purge_trading_days(거래일)만큼 떨어진 Train end(exclusive)를 계산합니다.
+    Train/Val을 [start, end) 형태로 사용할 때 안전한 경계값을 반환합니다.
+    """
+    if trading_dates is None or len(trading_dates) == 0:
+        return None
+    if purge_trading_days <= 0:
+        return pd.Timestamp(val_start)
+    
+    val_start_ts = pd.Timestamp(val_start)
+    idx = trading_dates.searchsorted(val_start_ts, side='left')  # val_start 이상 첫 거래일 index
+    if idx - purge_trading_days <= 0:
+        return None
+    return pd.Timestamp(trading_dates[idx - purge_trading_days])
+
+def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days=365, n_folds=3, purge_trading_days=10):
     """
     Expanding Window 방식으로 Fold 범위를 계산합니다.
     
@@ -356,14 +418,20 @@ def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days
     """
     # 전체 날짜 범위 확인
     min_date, max_date = get_date_range_from_files(file_paths)
+    trading_dates = get_trading_dates_from_files(file_paths)
     
     if min_date is None or max_date is None:
         log_error("날짜 범위를 확인할 수 없습니다.")
         return []
+    if trading_dates is None or len(trading_dates) == 0:
+        log_error("거래일(date) 캘린더를 추출할 수 없습니다.")
+        return []
 
     # 실제 학습 시작일: 웜업 기간 제외
     actual_start_date = min_date + timedelta(days=warmup_days)
-    actual_end_date = max_date
+    # [중요] 날짜 필터링을 [start, end)로 통일하므로 end는 exclusive 경계로 둡니다.
+    # max_date(마지막 거래일)을 포함하려면 +1일을 더한 값을 end 경계로 사용해야 합니다.
+    actual_end_date = max_date + timedelta(days=1)
     
     log_info(f"   📅 전체 데이터 기간: {min_date.strftime('%Y-%m-%d')} ~ {max_date.strftime('%Y-%m-%d')}")
     log_info(f"   📅 실제 학습 기간 (웜업 제외): {actual_start_date.strftime('%Y-%m-%d')} ~ {actual_end_date.strftime('%Y-%m-%d')}")
@@ -395,14 +463,20 @@ def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days
         
         # Train 기간: actual_start_date ~ val_start (항상 처음부터 시작 = Expanding)
         train_start = actual_start_date
-        train_end = val_start
+        train_end = None
         
         # 검증 기간이 실제 학습 기간을 벗어나지 않도록 조정
         if val_start < actual_start_date:
             log_warning(f"   ⚠️ Fold #{fold_idx+1} 검증 기간이 학습 시작일보다 이전입니다. 조정합니다.")
             val_start = actual_start_date
             val_end = val_start + timedelta(days=val_period_days)
-            train_end = val_start
+        
+        # [핵심] 타깃이 "향후 10거래일"을 참조하므로, 폴드 경계에서 라벨 누수를 막기 위해
+        # val_start 기준 purge_trading_days(기본 10거래일)만큼 Train 끝을 앞당깁니다.
+        train_end = get_purged_train_end_exclusive(trading_dates, val_start, purge_trading_days)
+        if train_end is None:
+            log_warning(f"   ⚠️ Fold #{fold_idx+1} purge({purge_trading_days}거래일) 적용 후 Train 기간이 유효하지 않습니다. 건너뜁니다.")
+            continue
         
         if train_end <= train_start:
             log_warning(f"   ⚠️ Fold #{fold_idx+1} Train 기간이 유효하지 않습니다. 건너뜁니다.")
@@ -661,7 +735,7 @@ def objective(trial, fold_data_cache, features):
 
 # --- 최종 모델 학습 함수 ---
 
-def train_final_model(fold_ranges, file_paths, features, best_params, best_score=None):
+def train_final_model(fold_ranges, file_paths, features, best_params, best_score=None, n_trials=None, trials_completed=None):
     """
     최적 파라미터로 최종 모델을 학습합니다.
     """
@@ -1013,6 +1087,9 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
         'best_params': best_params,
         'best_iteration': best_iteration,
         'best_score': best_score,  # Optuna 최적 점수 저장
+        # 모델 분석 페이지 표기용 (탐색 범위)
+        'n_trials': n_trials,
+        'trials_completed': trials_completed,
         'scaler': scaler,
     }
     
@@ -1233,7 +1310,19 @@ def main():
             fold_info['val_end'].strftime('%Y-%m-%d')
         ))
         
-    final_model, final_features = train_final_model(fold_ranges_str, file_paths, features, best_params, best_score)
+    # Optuna 탐색 범위(시도 횟수)도 메타데이터에 저장하여 모델 분석 페이지에 표시
+    trials_completed = None
+    try:
+        trials_completed = len(study.trials)
+    except Exception:
+        trials_completed = None
+
+    final_model, final_features = train_final_model(
+        fold_ranges_str, file_paths, features,
+        best_params, best_score,
+        n_trials=n_trials,
+        trials_completed=trials_completed
+    )
     
     if final_model is None:
         log_critical("최종 모델 학습에 실패했습니다.")
