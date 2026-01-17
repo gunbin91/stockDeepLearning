@@ -1012,7 +1012,7 @@ $(document).ready(function() {
                                                 <th>실현손익</th>
                                                 <th>누적 실현손익</th>
                                                 <th>매수금액</th>
-                                                <th>시가총액(십만달러)</th>
+                                                <th>시가총액(억달러)</th>
                                                 <th>총자산</th>
                                                 <th>최종점수</th>
                                                 <th>RF상승확률</th>
@@ -1023,10 +1023,10 @@ $(document).ready(function() {
                                         <tbody>
             `;
             
-            // 시가총액 포맷팅 함수 (십만달러 단위, 소수점 없음 / 값은 숫자만)
+            // 시가총액 포맷팅 함수 (억달러 단위, 소수점 없음 / 값은 숫자만)
             function formatMarketCap(value) {
                 if (value === null || value === undefined || isNaN(value)) return 'N/A';
-                const v = value / 100000; // 십만달러(USD 100,000) 단위
+                const v = value / 100000000; // 억달러(USD 100,000,000) 단위
                 return new Intl.NumberFormat('en-US', {
                     maximumFractionDigits: 0
                 }).format(v);
