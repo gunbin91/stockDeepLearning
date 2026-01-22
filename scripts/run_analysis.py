@@ -350,7 +350,15 @@ def run_analysis(analysis_date_str):
             final_ranked_df['종목코드'] = final_ranked_df['종목코드'].astype(str).str.strip()
             stock_list_df['종목코드'] = stock_list_df['종목코드'].astype(str).str.strip()
             
-            final_df_with_names = pd.merge(final_ranked_df, stock_list_df[['종목코드', '종목명']].drop_duplicates(), on='종목코드', how='left')
+            merge_cols = ['종목코드', '종목명']
+            if '시장구분' in stock_list_df.columns:
+                merge_cols.append('시장구분')
+            final_df_with_names = pd.merge(
+                final_ranked_df,
+                stock_list_df[merge_cols].drop_duplicates(),
+                on='종목코드',
+                how='left'
+            )
             log_info(f"   📊 종목명 병합 완료: {len(final_df_with_names):,}개 종목")
             
             if final_df_with_names.empty:

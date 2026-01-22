@@ -1,10 +1,10 @@
 """
-주식 데이터 수집 모듈 (NASDAQ 전용)
-=================================
+주식 데이터 수집 모듈 (미국 주식: NYSE/NASDAQ/AMEX)
+============================================
 
-이 파일은 NASDAQ 주식 분석에 필요한 데이터를 수집합니다.
-- 종목 목록 수집 (NASDAQ)
-- (재무 데이터) NASDAQ 버전은 외부 재무 API 없이 파이프라인 호환 컬럼을 NaN으로 채움
+이 파일은 미국 주식 분석에 필요한 데이터를 수집합니다.
+- 종목 목록 수집 (NYSE/NASDAQ/AMEX)
+- (재무 데이터) 외부 재무 API 없이 파이프라인 호환 컬럼을 NaN으로 채움
 - 주가 데이터 수집 (가격, 거래량, 기술적 지표)
 - 거시경제 데이터 수집 (IXIC, VIX)
 
@@ -47,7 +47,7 @@ from exceptions import DataFetchError, DataValidationError
 from path_manager import path_manager
 
 # =================================================================
-# NASDAQ 시가총액 통일 소스: NASDAQ Screener API
+# 미국 시가총액 통일 소스: Nasdaq Screener API
 # - Yahoo(yfinance)는 환경에 따라 401(Unauthorized/crumb)로 막힐 수 있어 기본 경로에서 배제
 # - 한 번 호출로 다수 심볼의 marketCap(USD)을 가져올 수 있어 대량 티커에도 안정적
 # =================================================================
@@ -295,39 +295,59 @@ def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
 
 
 def _get_stock_list_from_marcap(analysis_date=None):
-    """NASDAQ 주식 목록 가져오기 (통일된 함수)"""
+    """미국 주식 목록 가져오기 (NYSE/NASDAQ/AMEX 통일)"""
     try:
-        # FinanceDataReader가 NASDAQ 심볼 리스트를 제공 (티커 그대로)
-        log_info("FinanceDataReader를 통해 NASDAQ 종목 리스트 수집 (NASDAQ)...")
-        df_list = fdr.StockListing('NASDAQ')
-        if df_list is None or df_list.empty:
-            raise DataFetchError("NASDAQ 종목 리스트가 비어있습니다.", source="FinanceDataReader")
+        exchanges = ["NASDAQ", "NYSE", "AMEX"]
+        stock_lists = []
 
-        # FDR 버전에 따라 컬럼명이 다를 수 있어 방어적으로 처리
-        symbol_col = 'Symbol' if 'Symbol' in df_list.columns else ('Code' if 'Code' in df_list.columns else None)
-        name_col = 'Name' if 'Name' in df_list.columns else ('Security Name' if 'Security Name' in df_list.columns else None)
-        if symbol_col is None:
-            raise DataFetchError(f"NASDAQ 리스트에서 심볼 컬럼을 찾을 수 없습니다. columns={list(df_list.columns)}", source="FinanceDataReader")
-        if name_col is None:
-            # 종목명 컬럼이 없는 경우에도 파이프라인은 동작하도록 심볼을 이름으로 사용
-            name_col = symbol_col
+        for exchange in exchanges:
+            log_info(f"FinanceDataReader를 통해 {exchange} 종목 리스트 수집...")
+            df_list = fdr.StockListing(exchange)
+            if df_list is None or df_list.empty:
+                log_warning(f"{exchange} 종목 리스트가 비어있습니다. (계속 진행)")
+                continue
 
-        stock_list = df_list[[symbol_col, name_col]].copy()
-        stock_list.rename(columns={symbol_col: '종목코드', name_col: '종목명'}, inplace=True)
-        stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.strip()
-        stock_list['종목명'] = stock_list['종목명'].astype(str).str.strip()
+            # FDR 버전에 따라 컬럼명이 다를 수 있어 방어적으로 처리
+            symbol_col = 'Symbol' if 'Symbol' in df_list.columns else ('Code' if 'Code' in df_list.columns else None)
+            name_col = 'Name' if 'Name' in df_list.columns else ('Security Name' if 'Security Name' in df_list.columns else None)
+            if symbol_col is None:
+                log_warning(f"{exchange} 리스트에서 심볼 컬럼을 찾을 수 없습니다. columns={list(df_list.columns)}")
+                continue
+            if name_col is None:
+                # 종목명 컬럼이 없는 경우에도 파이프라인은 동작하도록 심볼을 이름으로 사용
+                name_col = symbol_col
 
-        # 시가총액/상장주식수는 NASDAQ 리스트에서 제공되지 않을 수 있음 → 통일된 소스로 보강
-        if 'MarketCap' in df_list.columns:
-            stock_list['시가총액_기준일'] = pd.to_numeric(df_list['MarketCap'], errors='coerce')
-        elif 'Marcap' in df_list.columns:
-            stock_list['시가총액_기준일'] = pd.to_numeric(df_list['Marcap'], errors='coerce')
-        else:
-            stock_list['시가총액_기준일'] = np.nan
+            stock_list = df_list[[symbol_col, name_col]].copy()
+            stock_list.rename(columns={symbol_col: '종목코드', name_col: '종목명'}, inplace=True)
+            stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.strip()
+            stock_list['종목명'] = stock_list['종목명'].astype(str).str.strip()
+            stock_list['시장구분'] = exchange
+
+            # 시가총액(기준일) 힌트
+            if 'MarketCap' in df_list.columns:
+                stock_list['시가총액_기준일'] = pd.to_numeric(df_list['MarketCap'], errors='coerce')
+            elif 'Marcap' in df_list.columns:
+                stock_list['시가총액_기준일'] = pd.to_numeric(df_list['Marcap'], errors='coerce')
+            else:
+                stock_list['시가총액_기준일'] = np.nan
+
+            stock_lists.append(stock_list)
+
+        if not stock_lists:
+            raise DataFetchError("미국(NYSE/NASDAQ/AMEX) 종목 리스트가 비어있습니다.", source="FinanceDataReader")
+
+        stock_list = pd.concat(stock_lists, ignore_index=True)
+
+        # 중복 티커 제거 (시장 중복 상장 대비)
+        before_dedup = len(stock_list)
+        stock_list = stock_list.drop_duplicates(subset=['종목코드'], keep='first')
+        dup_count = before_dedup - len(stock_list)
+        if dup_count > 0:
+            log_warning(f"중복 티커 {dup_count}개 제거됨 (종목코드 기준)")
 
         stock_list['상장주식수'] = np.nan
 
-        # NASDAQ 시총 통일: Screener API marketCap으로 NaN만 보강
+        # Screener API marketCap으로 NaN만 보강
         try:
             missing_mask = stock_list['시가총액_기준일'].isna() | (pd.to_numeric(stock_list['시가총액_기준일'], errors='coerce') <= 0)
             if missing_mask.any():
@@ -339,9 +359,17 @@ def _get_stock_list_from_marcap(analysis_date=None):
                 combined = mapped.combine_first(mapped2)
                 stock_list.loc[missing_mask, '시가총액_기준일'] = combined.values
         except Exception as e:
-            log_warning(f"NASDAQ Screener 시가총액 보강 실패(무시하고 진행): {e}")
+            log_warning(f"Screener 시가총액 보강 실패(무시하고 진행): {e}")
 
-        log_info(f"총 {len(stock_list)}개 NASDAQ 종목을 찾았습니다.")
+        # 시가총액 조회 불가 종목 제외
+        mktcap = pd.to_numeric(stock_list['시가총액_기준일'], errors='coerce')
+        before_filter = len(stock_list)
+        stock_list = stock_list[mktcap > 0].copy()
+        removed = before_filter - len(stock_list)
+        if removed > 0:
+            log_info(f"시가총액 미확인 종목 {removed}개 제외")
+
+        log_info(f"총 {len(stock_list)}개 미국(NYSE/NASDAQ/AMEX) 종목을 찾았습니다.")
         return stock_list
         
     except Exception as e:

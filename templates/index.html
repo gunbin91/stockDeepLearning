@@ -98,6 +98,7 @@
                 <thead class="table-dark">
                     <tr>
                         <th>최종순위</th>
+                        <th>시장구분</th>
                         <th>종목명</th>
                         <th>종목코드</th>
                         <th>현재가(USD)</th>
@@ -114,6 +115,13 @@
                     {% for _, row in analysis_result.iterrows() %}
                     <tr class="stock-row" data-ticker="{{ row['종목코드'] }}" data-name="{{ row['종목명'] }}">
                         <td>{{ row['최종순위'] }}</td>
+                        <td>
+                            {% if '시장구분' in row.index and row['시장구분'] is not none %}
+                                {{ row['시장구분'] }}
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        </td>
                         <td>{{ row['종목명'] }}</td>
                         <td>{{ row['종목코드'] }}</td>
                         <td class="price-cell">{{ row['현재가(USD)']|safe }}</td>

@@ -1,19 +1,19 @@
 """
-실시간 데이터 처리 시스템 (NASDAQ 전용)
-=====================================
+실시간 데이터 처리 시스템 (미국 주식: NYSE/NASDAQ/AMEX)
+================================================
 
-이 파일은 NASDAQ 종목을 대상으로 주식 분석 데이터를 수집/전처리합니다.
+이 파일은 미국 종목을 대상으로 주식 분석 데이터를 수집/전처리합니다.
 대용량 데이터를 효율적으로 처리하기 위해 병렬 처리와 메모리 최적화를 사용합니다.
 
 주요 기능:
-- 종목 목록 수집 (NASDAQ)
+- 종목 목록 수집 (NYSE/NASDAQ/AMEX)
 - (선택) 정적 시가총액(가능 시) 활용
 - 거시경제 데이터 수집 (IXIC, VIX 등)
 - 기술적 지표 계산
 - 데이터 품질 검증 및 정제
 
 주의:
-- 본 프로젝트는 NASDAQ 전용이며 국내(KRX) 기반 로직은 사용하지 않습니다.
+- 본 프로젝트는 미국 주식 전용이며 국내(KRX) 기반 로직은 사용하지 않습니다.
 """
 
 import pandas as pd
@@ -57,7 +57,7 @@ from path_manager import path_manager
 from logger import log_info, log_critical, log_error, log_warning, log_progress
 
 # =================================================================
-# NASDAQ 시가총액 보강용 (Yahoo 차단 대비): NASDAQ Screener API
+# 미국 시가총액 보강용 (Yahoo 차단 대비): Nasdaq Screener API
 # - 한 번 호출로 다수 심볼의 marketCap(USD)을 확보할 수 있어 대량 티커에도 안정적
 # - 표준 라이브러리(urllib)만 사용하여 환경 의존 최소화
 # =================================================================
@@ -207,42 +207,61 @@ def fetch_stock_list():
     """
     주식 목록 수집 함수
     
-    NASDAQ 상장 종목 목록을 수집합니다. (티커 그대로)
+    미국 상장 종목 목록을 수집합니다. (NYSE/NASDAQ/AMEX)
     
     Returns:
         pandas.DataFrame: 종목코드, 종목명, 시장구분이 포함된 데이터프레임
     """
     try:
-        log_info("FinanceDataReader를 통해 NASDAQ 종목 리스트 수집 (NASDAQ)...")
-        df_list = fdr.StockListing('NASDAQ')
-        if df_list is None or df_list.empty:
-            log_error("NASDAQ 종목 리스트를 가져올 수 없습니다.")
+        exchanges = ["NASDAQ", "NYSE", "AMEX"]
+        stock_lists = []
+
+        for exchange in exchanges:
+            log_info(f"FinanceDataReader를 통해 {exchange} 종목 리스트 수집...")
+            df_list = fdr.StockListing(exchange)
+            if df_list is None or df_list.empty:
+                log_warning(f"{exchange} 종목 리스트를 가져올 수 없습니다. (계속 진행)")
+                continue
+
+            symbol_col = 'Symbol' if 'Symbol' in df_list.columns else ('Code' if 'Code' in df_list.columns else None)
+            name_col = 'Name' if 'Name' in df_list.columns else ('Security Name' if 'Security Name' in df_list.columns else None)
+            if symbol_col is None:
+                log_warning(f"{exchange} 리스트에서 심볼 컬럼을 찾을 수 없습니다. columns={list(df_list.columns)}")
+                continue
+            if name_col is None:
+                name_col = symbol_col
+
+            stock_list = df_list[[symbol_col, name_col]].copy()
+            stock_list.rename(columns={symbol_col: '종목코드', name_col: '종목명'}, inplace=True)
+            stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.strip()
+            stock_list['종목명'] = stock_list['종목명'].astype(str).str.strip()
+            stock_list['시장구분'] = exchange
+
+            # 정적 시가총액(가능 시)
+            if 'MarketCap' in df_list.columns:
+                stock_list['시가총액'] = pd.to_numeric(df_list['MarketCap'], errors='coerce')
+            elif 'Marcap' in df_list.columns:
+                stock_list['시가총액'] = pd.to_numeric(df_list['Marcap'], errors='coerce')
+            else:
+                stock_list['시가총액'] = np.nan
+
+            stock_lists.append(stock_list)
+
+        if not stock_lists:
+            log_error("미국(NYSE/NASDAQ/AMEX) 종목 리스트를 가져올 수 없습니다.")
             return pd.DataFrame()
 
-        symbol_col = 'Symbol' if 'Symbol' in df_list.columns else ('Code' if 'Code' in df_list.columns else None)
-        name_col = 'Name' if 'Name' in df_list.columns else ('Security Name' if 'Security Name' in df_list.columns else None)
-        if symbol_col is None:
-            log_error(f"NASDAQ 리스트에서 심볼 컬럼을 찾을 수 없습니다. columns={list(df_list.columns)}")
-            return pd.DataFrame()
-        if name_col is None:
-            name_col = symbol_col
+        stock_list = pd.concat(stock_lists, ignore_index=True)
 
-        stock_list = df_list[[symbol_col, name_col]].copy()
-        stock_list.rename(columns={symbol_col: '종목코드', name_col: '종목명'}, inplace=True)
-        stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.strip()
-        stock_list['종목명'] = stock_list['종목명'].astype(str).str.strip()
-        stock_list['시장구분'] = 'NASDAQ'
-
-        # 정적 시가총액(가능 시) - KRX-MARCAP 대체
-        if 'MarketCap' in df_list.columns:
-            stock_list['시가총액'] = pd.to_numeric(df_list['MarketCap'], errors='coerce')
-        elif 'Marcap' in df_list.columns:
-            stock_list['시가총액'] = pd.to_numeric(df_list['Marcap'], errors='coerce')
-        else:
-            stock_list['시가총액'] = np.nan
+        # 중복 티커 제거 (시장 중복 상장 대비)
+        before_dedup = len(stock_list)
+        stock_list = stock_list.drop_duplicates(subset=['종목코드'], keep='first')
+        dup_count = before_dedup - len(stock_list)
+        if dup_count > 0:
+            log_warning(f"중복 티커 {dup_count}개 제거됨 (종목코드 기준)")
 
         # --------------------------------------------------------------
-        # NASDAQ 학습/전처리 경로용 시가총액 보강 (NASDAQ Screener API)
+        # 학습/전처리 경로용 시가총액 보강 (Nasdaq Screener API)
         # - Yahoo(yfinance/quote)는 환경에 따라 401(crumb/unauthorized)로 막힐 수 있어 배제
         # - Screener API는 1회 호출로 다수 심볼 marketCap을 제공 → 대규모 티커에도 안정적
         # - 원본 훼손 최소: NaN(또는 0 이하)인 티커만 보강, 실패 시 NaN 유지
@@ -251,7 +270,7 @@ def fetch_stock_list():
             missing_mask = stock_list['시가총액'].isna() | (pd.to_numeric(stock_list['시가총액'], errors='coerce') <= 0)
             missing_tickers = stock_list.loc[missing_mask, '종목코드'].astype(str).str.strip().tolist()
             if missing_tickers:
-                log_info(f"📌 시가총액 보강 필요: {len(missing_tickers):,}개 티커 (NASDAQ screener marketCap 조회)")
+                log_info(f"📌 시가총액 보강 필요: {len(missing_tickers):,}개 티커 (screener marketCap 조회)")
                 screener_map = _fetch_nasdaq_screener_marketcap_map()
 
                 ok = 0
@@ -269,7 +288,15 @@ def fetch_stock_list():
         except Exception as e:
             log_warning(f"시가총액 보강 중 오류(무시하고 진행): {e}")
 
-        log_info(f"주식 목록 수집 완료: {len(stock_list)}개 NASDAQ 종목")
+        # 시가총액 조회 불가 종목 제외
+        mktcap = pd.to_numeric(stock_list['시가총액'], errors='coerce')
+        before_filter = len(stock_list)
+        stock_list = stock_list[mktcap > 0].copy()
+        removed = before_filter - len(stock_list)
+        if removed > 0:
+            log_info(f"시가총액 미확인 종목 {removed}개 제외")
+
+        log_info(f"주식 목록 수집 완료: {len(stock_list)}개 미국(NYSE/NASDAQ/AMEX) 종목")
         return stock_list
 
     except Exception as e:
@@ -965,14 +992,14 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     if stock_list.empty: 
         raise ValueError("종목 리스트를 가져올 수 없습니다.")
     
-    # NASDAQ 버전: KRX-MARCAP 대신 정적 시가총액(가능 시)을 사용
+    # 미국 버전: KRX-MARCAP 대신 정적 시가총액(가능 시)을 사용
     df_marcap_long = stock_list[['종목코드']].copy()
     df_marcap_long.rename(columns={'종목코드': 'Code'}, inplace=True)
     if '시가총액' in stock_list.columns:
         df_marcap_long['MarketCap'] = pd.to_numeric(stock_list['시가총액'], errors='coerce')
     else:
         df_marcap_long['MarketCap'] = np.nan
-    log_info("✅ NASDAQ 정적 시가총액(가능 시) 준비 완료")
+    log_info("✅ 미국 정적 시가총액(가능 시) 준비 완료")
     
     # 재무데이터 수집 추가
     try:

@@ -345,6 +345,10 @@ def load_cached_analysis_result():
             # 데이터프레임 후처리
             display_df = final_df.copy()
 
+            # 시장구분이 없으면 기본값으로 채움 (기존 캐시 호환)
+            if '시장구분' not in display_df.columns:
+                display_df['시장구분'] = 'N/A'
+
             # 숫자 컬럼 정리 (NaN/문자 혼합 대비)
             for col in ['현재가', '기준일가', '전날종가', 'final_score', 'ml_pred_proba', 'lgbm_pred_proba', 'volatility_score', '시가총액']:
                 if col in display_df.columns:
@@ -397,7 +401,7 @@ def load_cached_analysis_result():
             rename_map = { '현재가': '현재가(USD)', '시가총액': '시가총액(억달러)',  'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(USD)'}
             display_df.rename(columns=rename_map, inplace=True)
             
-            display_columns = [ '최종순위', '종목명', '종목코드', '현재가(USD)_formatted', '등락율(%)', '기준일가(USD)', '최종점수(점)', '상승확률(%)', '변동성(점)', '시가총액(억달러)']
+            display_columns = [ '최종순위', '시장구분', '종목명', '종목코드', '현재가(USD)_formatted', '등락율(%)', '기준일가(USD)', '최종점수(점)', '상승확률(%)', '변동성(점)', '시가총액(억달러)']
             
             # lgbm_pred_proba가 있으면 컬럼 목록에 추가 (이름은 그대로 유지)
             if 'lgbm_pred_proba' in display_df.columns:

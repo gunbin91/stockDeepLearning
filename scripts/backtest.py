@@ -597,6 +597,7 @@ def create_json_report(results, output_path=None):
                 'trade_date': row['trade_date'].strftime('%Y-%m-%d') if pd.notna(row['trade_date']) else None,
                 'ticker': row['ticker'],
                 'stock_name': row.get('종목명', 'N/A'),
+                'market': row.get('시장구분', 'N/A'),
                 'buy_date': row['buy_date'].strftime('%Y-%m-%d') if pd.notna(row['buy_date']) else None,
                 'sell_date': row['sell_date'].strftime('%Y-%m-%d') if pd.notna(row['sell_date']) and 'sell_date' in row else None,
                 'holding_period': int((row['sell_date'] - row['buy_date']).days) if 'sell_date' in row and pd.notna(row['sell_date']) and pd.notna(row['buy_date']) else None,
@@ -801,311 +802,312 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             })
             raise
     
-        # 모델 로딩 (강화된 에러 처리)
-        try:
-            print("  - 정식 모델 로딩 중...")
-            
-            # cuML 모델 파일 우선 확인, 없으면 기존 모델 파일 확인
-            model_file_path = None
-            is_cuml_model = False
-            
-            if os.path.exists(CUML_MODEL_FILE):
-                model_file_path = CUML_MODEL_FILE
-                is_cuml_model = True
-                log_info("ML 모델 로딩 시작 (cuML 앙상블)", context={"model_file": model_file_path})
-            elif os.path.exists(MODEL_FILE):
-                model_file_path = MODEL_FILE
+        # RF(ml_pred_proba) 가중치가 0이면 모델 로딩/검증/예측을 모두 스킵
+        if not do_rf:
+            log_info("⏭️ RF(ml_pred_proba) 가중치가 0이라 모델 로딩/검증/예측을 모두 건너뜁니다.")
+            test_data['ml_pred_proba'] = np.nan
+        else:
+            # 모델 로딩 (강화된 에러 처리)
+            try:
+                print("  - 정식 모델 로딩 중...")
+                
+                # cuML 모델 파일 우선 확인, 없으면 기존 모델 파일 확인
+                model_file_path = None
                 is_cuml_model = False
-                log_info("ML 모델 로딩 시작 (기존 모델)", context={"model_file": model_file_path})
-            else:
-                error_msg = f"모델 파일을 찾을 수 없습니다. (cuML: {CUML_MODEL_FILE}, 기존: {MODEL_FILE})"
-                log_critical("ML 모델 파일 없음", context={"cuml_file": CUML_MODEL_FILE, "legacy_file": MODEL_FILE})
-                raise FileNotFoundError(error_msg)
-            
-            model_data = joblib.load(model_file_path)
-            
-            # cuML 앙상블 모델인지 확인
-            if is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'mini_batch_ensemble':
-                # cuML 앙상블 모델 처리
-                from ml_model_wrapper import EnsembleModelWrapper
-                models = model_data['models']
-                scaler = model_data['scaler']
-                features = model_data['features']
                 
-                # 앙상블 모델 래퍼 생성
-                model = EnsembleModelWrapper(models, scaler)
-                
-                log_info("ML 모델 로딩 완료 (cuML 앙상블)", context={
-                    "model_type": f"cuML 앙상블 ({len(models)}개 모델)",
-                    "features_count": len(features),
-                    "scaler_type": type(scaler).__name__ if scaler else "None"
-                })
-            elif is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'single_model':
-                # cuML 단일 모델 처리
-                model = model_data['model']
-                features = model_data['features']
-                scaler = model_data['scaler']
-                # imputation_values는 나중에 로드 (필요할 때)
-                
-                log_info("ML 모델 로딩 완료 (cuML 단일 모델)", context={
-                    "model_type": "cuML 단일 모델",
-                    "features_count": len(features),
-                    "scaler_type": type(scaler).__name__ if scaler else "None"
-                })
-            else:
-                # 기존 모델 구조 (sklearn) 또는 model_type이 없는 경우
-                model = model_data['model']
-                features = model_data['features']
-                scaler = model_data['scaler']
-                
-                # cuML 모델인지 확인 (타입으로 판단)
-                if 'cuml' in str(type(model)).lower() or hasattr(model, 'predict_proba') and 'cuml' in str(type(model).__module__).lower():
+                if os.path.exists(CUML_MODEL_FILE):
+                    model_file_path = CUML_MODEL_FILE
                     is_cuml_model = True
-                    log_info("ML 모델 로딩 완료 (cuML 모델 - 타입 감지)", context={
-                        "model_type": type(model).__name__,
+                    log_info("ML 모델 로딩 시작 (cuML 앙상블)", context={"model_file": model_file_path})
+                elif os.path.exists(MODEL_FILE):
+                    model_file_path = MODEL_FILE
+                    is_cuml_model = False
+                    log_info("ML 모델 로딩 시작 (기존 모델)", context={"model_file": model_file_path})
+                else:
+                    error_msg = f"모델 파일을 찾을 수 없습니다. (cuML: {CUML_MODEL_FILE}, 기존: {MODEL_FILE})"
+                    log_critical("ML 모델 파일 없음", context={"cuml_file": CUML_MODEL_FILE, "legacy_file": MODEL_FILE})
+                    raise FileNotFoundError(error_msg)
+                
+                model_data = joblib.load(model_file_path)
+                
+                # cuML 앙상블 모델인지 확인
+                if is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'mini_batch_ensemble':
+                    # cuML 앙상블 모델 처리
+                    from ml_model_wrapper import EnsembleModelWrapper
+                    models = model_data['models']
+                    scaler = model_data['scaler']
+                    features = model_data['features']
+                    
+                    # 앙상블 모델 래퍼 생성
+                    model = EnsembleModelWrapper(models, scaler)
+                    
+                    log_info("ML 모델 로딩 완료 (cuML 앙상블)", context={
+                        "model_type": f"cuML 앙상블 ({len(models)}개 모델)",
+                        "features_count": len(features),
+                        "scaler_type": type(scaler).__name__ if scaler else "None"
+                    })
+                elif is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'single_model':
+                    # cuML 단일 모델 처리
+                    model = model_data['model']
+                    features = model_data['features']
+                    scaler = model_data['scaler']
+                    # imputation_values는 나중에 로드 (필요할 때)
+                    
+                    log_info("ML 모델 로딩 완료 (cuML 단일 모델)", context={
+                        "model_type": "cuML 단일 모델",
                         "features_count": len(features),
                         "scaler_type": type(scaler).__name__ if scaler else "None"
                     })
                 else:
-                    is_cuml_model = False
-                    log_info("ML 모델 로딩 완료 (sklearn 모델)", context={
-                        "model_type": type(model).__name__,
-                        "features_count": len(features),
-                        "scaler_type": type(scaler).__name__ if scaler else "None"
-                    })
+                    # 기존 모델 구조 (sklearn) 또는 model_type이 없는 경우
+                    model = model_data['model']
+                    features = model_data['features']
+                    scaler = model_data['scaler']
+                    
+                    # cuML 모델인지 확인 (타입으로 판단)
+                    if 'cuml' in str(type(model)).lower() or hasattr(model, 'predict_proba') and 'cuml' in str(type(model).__module__).lower():
+                        is_cuml_model = True
+                        log_info("ML 모델 로딩 완료 (cuML 모델 - 타입 감지)", context={
+                            "model_type": type(model).__name__,
+                            "features_count": len(features),
+                            "scaler_type": type(scaler).__name__ if scaler else "None"
+                        })
+                    else:
+                        is_cuml_model = False
+                        log_info("ML 모델 로딩 완료 (sklearn 모델)", context={
+                            "model_type": type(model).__name__,
+                            "features_count": len(features),
+                            "scaler_type": type(scaler).__name__ if scaler else "None"
+                        })
+                
+            except FileNotFoundError as e:
+                error_msg = f"모델 파일을 찾을 수 없습니다. train_gpu_main.py를 먼저 실행해주세요."
+                log_critical("ML 모델 파일 없음", exception=e, context={"model_file": model_file_path if 'model_file_path' in locals() else "Unknown"})
+                raise FileNotFoundError(error_msg)
+            except Exception as e:
+                log_critical("ML 모델 로딩 실패", exception=e, context={"model_file": model_file_path if 'model_file_path' in locals() else "Unknown"})
+                raise
             
-        except FileNotFoundError as e:
-            error_msg = f"모델 파일을 찾을 수 없습니다. train_gpu_main.py를 먼저 실행해주세요."
-            log_critical("ML 모델 파일 없음", exception=e, context={"model_file": model_file_path if 'model_file_path' in locals() else "Unknown"})
-            raise FileNotFoundError(error_msg)
-        except Exception as e:
-            log_critical("ML 모델 로딩 실패", exception=e, context={"model_file": model_file_path if 'model_file_path' in locals() else "Unknown"})
-            raise
-        
-        # ML 예측 적용 (강화된 에러 처리) - 가중치 0이면 스킵
-        try:
-            if not do_rf:
-                log_info("⏭️ RF(ml_pred_proba) 가중치가 0이라 예측을 건너뜁니다.")
-                test_data['ml_pred_proba'] = np.nan
-            else:
+            # ML 예측 적용 (강화된 에러 처리)
+            try:
                 print("  - 테스트 데이터에 ML 예측 적용 중...")
                 log_info("ML 예측 적용 시작", context={
                     "data_rows": len(test_data),
                     "features": features
                 })
-            
-            # 모델이 기대하는 피처만 선택 (데이터에 있는 피처만 사용)
-            # 중요: 모델이 저장된 피처 순서를 정확히 따라야 함
-            available_features = [f for f in features if f in test_data.columns]
-            missing_features = [f for f in features if f not in test_data.columns]
-            
-            if missing_features:
-                log_warning(f"   ⚠️ 필요한 피처 부족: {len(missing_features)}개 - {missing_features[:5]}{'...' if len(missing_features) > 5 else ''}")
-                if len(available_features) == 0:
-                    log_error("   ❌ 사용 가능한 피처가 없습니다. 예측을 수행할 수 없습니다.")
-                    raise ValueError("모델이 기대하는 피처가 데이터에 없습니다.")
-                log_info(f"   ℹ️ 사용 가능한 피처 {len(available_features)}개로 예측 진행")
-            
-            # 모델의 피처 수 확인 (cuML 모델은 n_features_in_ 속성 확인)
-            # 주의: cuML 모델은 내부적으로 학습 시 사용된 피처 수를 저장하므로 정확히 일치해야 함
-            model_expected_features = None
-            try:
-                if hasattr(model, 'n_features_in_'):
-                    model_expected_features = model.n_features_in_
-                elif hasattr(model, 'n_features_'):
-                    model_expected_features = model.n_features_
-                # cuML 모델의 경우 내부 모델에서 확인
-                elif hasattr(model, 'cuml_model') and hasattr(model.cuml_model, 'n_features_in_'):
-                    model_expected_features = model.cuml_model.n_features_in_
-                # EnsembleModelWrapper의 경우 내부 모델들 확인
-                elif hasattr(model, 'models') and len(model.models) > 0:
-                    first_model = model.models[0]
-                    if hasattr(first_model, 'n_features_in_'):
-                        model_expected_features = first_model.n_features_in_
-            except Exception:
-                pass  # 모델 피처 수 확인 실패는 무시
-            
-            # 가장 먼저 확인: 모델이 저장된 features 리스트와 실제 모델의 피처 수가 일치하는지 확인
-            # 이게 불일치하면 근본적인 문제이므로 먼저 체크
-            if model_expected_features is not None and model_expected_features != len(features):
-                log_error(f"   ❌ 심각한 불일치: 모델 내부는 {model_expected_features}개 피처를 기대하지만, 저장된 features 리스트는 {len(features)}개입니다.")
-                log_error(f"   ❌ 저장된 features: {features}")
-                log_error(f"   ❌ 이 모델은 피처 수가 불일치합니다. 모델을 다시 학습해야 합니다.")
-                error_msg = f"모델 내부 피처 수({model_expected_features})와 저장된 features 리스트({len(features)})가 일치하지 않습니다. 모델을 다시 학습해야 합니다."
-                log_critical(error_msg)
-                raise ValueError(error_msg)
-            
-            # 모델이 기대하는 피처 수와 사용 가능한 피처 수가 일치하는지 확인
-            if model_expected_features is not None and model_expected_features != len(available_features):
-                log_error(f"   ❌ 모델 피처 수 불일치: 모델은 {model_expected_features}개를 기대하지만 데이터는 {len(available_features)}개입니다.")
-                log_error(f"   ❌ 모델이 저장된 features 리스트: {len(features)}개 - {features}")
-                log_error(f"   ❌ 사용 가능한 features: {len(available_features)}개 - {available_features}")
-                if model_expected_features > len(available_features):
-                    error_msg = f"모델은 {model_expected_features}개 피처를 기대하지만 {len(available_features)}개만 제공되었습니다. 모델을 다시 학습해야 합니다."
+                
+                # 모델이 기대하는 피처만 선택 (데이터에 있는 피처만 사용)
+                # 중요: 모델이 저장된 피처 순서를 정확히 따라야 함
+                available_features = [f for f in features if f in test_data.columns]
+                missing_features = [f for f in features if f not in test_data.columns]
+                
+                if missing_features:
+                    log_warning(f"   ⚠️ 필요한 피처 부족: {len(missing_features)}개 - {missing_features[:5]}{'...' if len(missing_features) > 5 else ''}")
+                    if len(available_features) == 0:
+                        log_error("   ❌ 사용 가능한 피처가 없습니다. 예측을 수행할 수 없습니다.")
+                        raise ValueError("모델이 기대하는 피처가 데이터에 없습니다.")
+                    log_info(f"   ℹ️ 사용 가능한 피처 {len(available_features)}개로 예측 진행")
+                
+                # 모델의 피처 수 확인 (cuML 모델은 n_features_in_ 속성 확인)
+                # 주의: cuML 모델은 내부적으로 학습 시 사용된 피처 수를 저장하므로 정확히 일치해야 함
+                model_expected_features = None
+                try:
+                    if hasattr(model, 'n_features_in_'):
+                        model_expected_features = model.n_features_in_
+                    elif hasattr(model, 'n_features_'):
+                        model_expected_features = model.n_features_
+                    # cuML 모델의 경우 내부 모델에서 확인
+                    elif hasattr(model, 'cuml_model') and hasattr(model.cuml_model, 'n_features_in_'):
+                        model_expected_features = model.cuml_model.n_features_in_
+                    # EnsembleModelWrapper의 경우 내부 모델들 확인
+                    elif hasattr(model, 'models') and len(model.models) > 0:
+                        first_model = model.models[0]
+                        if hasattr(first_model, 'n_features_in_'):
+                            model_expected_features = first_model.n_features_in_
+                except Exception:
+                    pass  # 모델 피처 수 확인 실패는 무시
+                
+                # 가장 먼저 확인: 모델이 저장된 features 리스트와 실제 모델의 피처 수가 일치하는지 확인
+                # 이게 불일치하면 근본적인 문제이므로 먼저 체크
+                if model_expected_features is not None and model_expected_features != len(features):
+                    log_error(f"   ❌ 심각한 불일치: 모델 내부는 {model_expected_features}개 피처를 기대하지만, 저장된 features 리스트는 {len(features)}개입니다.")
+                    log_error(f"   ❌ 저장된 features: {features}")
+                    log_error(f"   ❌ 이 모델은 피처 수가 불일치합니다. 모델을 다시 학습해야 합니다.")
+                    error_msg = f"모델 내부 피처 수({model_expected_features})와 저장된 features 리스트({len(features)})가 일치하지 않습니다. 모델을 다시 학습해야 합니다."
                     log_critical(error_msg)
                     raise ValueError(error_msg)
+                
+                # 모델이 기대하는 피처 수와 사용 가능한 피처 수가 일치하는지 확인
+                if model_expected_features is not None and model_expected_features != len(available_features):
+                    log_error(f"   ❌ 모델 피처 수 불일치: 모델은 {model_expected_features}개를 기대하지만 데이터는 {len(available_features)}개입니다.")
+                    log_error(f"   ❌ 모델이 저장된 features 리스트: {len(features)}개 - {features}")
+                    log_error(f"   ❌ 사용 가능한 features: {len(available_features)}개 - {available_features}")
+                    if model_expected_features > len(available_features):
+                        error_msg = f"모델은 {model_expected_features}개 피처를 기대하지만 {len(available_features)}개만 제공되었습니다. 모델을 다시 학습해야 합니다."
+                        log_critical(error_msg)
+                        raise ValueError(error_msg)
+                    else:
+                        log_warning(f"   ⚠️ 모델이 기대하는 피처 수({model_expected_features})가 제공된 피처 수({len(available_features)})보다 적습니다. 예측을 시도하지만 오류가 발생할 수 있습니다.")
+                
+                # 사용 가능한 피처만 선택 (모델이 저장된 순서대로)
+                test_data_for_pred = test_data[available_features].copy()
+                
+                # imputation_values 로드 (모델 데이터에서)
+                imputation_values = None
+                if 'imputation_values' in model_data and model_data['imputation_values']:
+                    imputation_values = model_data['imputation_values']
+                
+                # imputation_values가 있으면 사용, 없으면 0으로 채움
+                if imputation_values:
+                    available_imputation = {k: v for k, v in imputation_values.items() if k in available_features}
+                    test_data_for_pred.fillna(available_imputation, inplace=True)
                 else:
-                    log_warning(f"   ⚠️ 모델이 기대하는 피처 수({model_expected_features})가 제공된 피처 수({len(available_features)})보다 적습니다. 예측을 시도하지만 오류가 발생할 수 있습니다.")
-            
-            # 사용 가능한 피처만 선택 (모델이 저장된 순서대로)
-            test_data_for_pred = test_data[available_features].copy()
-            
-            # imputation_values 로드 (모델 데이터에서)
-            imputation_values = None
-            if 'imputation_values' in model_data and model_data['imputation_values']:
-                imputation_values = model_data['imputation_values']
-            
-            # imputation_values가 있으면 사용, 없으면 0으로 채움
-            if imputation_values:
-                available_imputation = {k: v for k, v in imputation_values.items() if k in available_features}
-                test_data_for_pred.fillna(available_imputation, inplace=True)
-            else:
-                test_data_for_pred.fillna(0, inplace=True)
-            
-            # 스케일러의 피처 수 확인 (cuML scaler는 n_features_in_ 속성 사용)
-            scaler_expected_features = None
-            if scaler and hasattr(scaler, 'n_features_in_'):
-                scaler_expected_features = scaler.n_features_in_
-            elif scaler and hasattr(scaler, 'mean_'):
-                # cuML StandardScaler는 mean_ 속성의 길이로 피처 수 확인 가능
-                scaler_expected_features = len(scaler.mean_) if hasattr(scaler.mean_, '__len__') else None
-            
-            # 현재 데이터의 피처 수
-            current_features_count = len(available_features)
-            
-            # 스케일러와 데이터의 피처 수가 일치하는지 확인
-            use_scaler = scaler is not None
-            if scaler_expected_features is not None and scaler_expected_features != current_features_count:
-                log_warning(f"스케일러 피처 수 불일치: 스케일러는 {scaler_expected_features}개를 기대하지만 데이터는 {current_features_count}개입니다. 스케일링을 건너뜁니다.")
-                use_scaler = False
-            
-            # cuML 모델인 경우 cuDF DataFrame으로 변환 필요
-            if is_cuml_model:
-                import cudf
-                # cuML scaler인지 확인
-                if use_scaler and hasattr(scaler, 'transform'):
-                    # cuML scaler는 cuDF DataFrame을 받아야 함
-                    try:
+                    test_data_for_pred.fillna(0, inplace=True)
+                
+                # 스케일러의 피처 수 확인 (cuML scaler는 n_features_in_ 속성 사용)
+                scaler_expected_features = None
+                if scaler and hasattr(scaler, 'n_features_in_'):
+                    scaler_expected_features = scaler.n_features_in_
+                elif scaler and hasattr(scaler, 'mean_'):
+                    # cuML StandardScaler는 mean_ 속성의 길이로 피처 수 확인 가능
+                    scaler_expected_features = len(scaler.mean_) if hasattr(scaler.mean_, '__len__') else None
+                
+                # 현재 데이터의 피처 수
+                current_features_count = len(available_features)
+                
+                # 스케일러와 데이터의 피처 수가 일치하는지 확인
+                use_scaler = scaler is not None
+                if scaler_expected_features is not None and scaler_expected_features != current_features_count:
+                    log_warning(f"스케일러 피처 수 불일치: 스케일러는 {scaler_expected_features}개를 기대하지만 데이터는 {current_features_count}개입니다. 스케일링을 건너뜁니다.")
+                    use_scaler = False
+                
+                # cuML 모델인 경우 cuDF DataFrame으로 변환 필요
+                if is_cuml_model:
+                    import cudf
+                    # cuML scaler인지 확인
+                    if use_scaler and hasattr(scaler, 'transform'):
+                        # cuML scaler는 cuDF DataFrame을 받아야 함
+                        try:
+                            # 모델이 저장된 피처 순서대로 컬럼 정렬 (중요: 순서가 정확히 일치해야 함)
+                            test_data_ordered = test_data_for_pred[available_features]
+                            test_data_cudf = cudf.from_pandas(test_data_ordered)
+                            X_test_scaled_cudf = scaler.transform(test_data_cudf)
+                            # cuML 모델은 cuDF DataFrame을 받을 수 있음
+                            X_test_scaled = X_test_scaled_cudf
+                        except ImportError:
+                            log_warning("cuDF를 사용할 수 없습니다. 원본 데이터 사용")
+                            test_data_ordered = test_data_for_pred[available_features]
+                            X_test_scaled = cudf.from_pandas(test_data_ordered)
+                        except Exception as e:
+                            log_warning(f"cuML 스케일링 오류: {e}, 원본 데이터 사용")
+                            test_data_ordered = test_data_for_pred[available_features]
+                            X_test_scaled = cudf.from_pandas(test_data_ordered)
+                    else:
+                        # 스케일러를 사용하지 않음 (피처 수 불일치 또는 스케일러 없음)
+                        # cuML 모델은 cuDF DataFrame을 기대하므로 변환
                         # 모델이 저장된 피처 순서대로 컬럼 정렬 (중요: 순서가 정확히 일치해야 함)
                         test_data_ordered = test_data_for_pred[available_features]
-                        test_data_cudf = cudf.from_pandas(test_data_ordered)
-                        X_test_scaled_cudf = scaler.transform(test_data_cudf)
-                        # cuML 모델은 cuDF DataFrame을 받을 수 있음
-                        X_test_scaled = X_test_scaled_cudf
-                    except ImportError:
-                        log_warning("cuDF를 사용할 수 없습니다. 원본 데이터 사용")
-                        test_data_ordered = test_data_for_pred[available_features]
                         X_test_scaled = cudf.from_pandas(test_data_ordered)
-                    except Exception as e:
-                        log_warning(f"cuML 스케일링 오류: {e}, 원본 데이터 사용")
-                        test_data_ordered = test_data_for_pred[available_features]
-                        X_test_scaled = cudf.from_pandas(test_data_ordered)
-                else:
-                    # 스케일러를 사용하지 않음 (피처 수 불일치 또는 스케일러 없음)
-                    # cuML 모델은 cuDF DataFrame을 기대하므로 변환
-                    # 모델이 저장된 피처 순서대로 컬럼 정렬 (중요: 순서가 정확히 일치해야 함)
-                    test_data_ordered = test_data_for_pred[available_features]
-                    X_test_scaled = cudf.from_pandas(test_data_ordered)
-            elif use_scaler:
-                # sklearn scaler (sklearn 모델)
-                try:
-                    X_test_scaled = scaler.transform(test_data_for_pred)
-                except Exception as e:
-                    log_warning(f"sklearn 스케일링 오류: {e}, 원본 데이터 사용")
-                    X_test_scaled = test_data_for_pred.values
-            else:
-                # 스케일러를 사용하지 않음 (sklearn 모델)
-                X_test_scaled = test_data_for_pred.values
-            
-            # 예측 수행 (큰 데이터셋의 경우 배치 처리)
-            # cuDF DataFrame인 경우 len() 사용, numpy 배열인 경우 shape[0] 사용
-            if hasattr(X_test_scaled, '__len__'):
-                test_size = len(X_test_scaled)
-            elif hasattr(X_test_scaled, 'shape'):
-                test_size = X_test_scaled.shape[0]
-            else:
-                test_size = test_data_for_pred.shape[0]
-            
-            if test_size > 1000000 and is_cuml_model:
-                log_info(f"   [PRED] 큰 데이터셋 ({test_size:,}행) - 배치 처리로 예측")
-                batch_size = 500000  # 배치 크기
-                num_batches = (test_size + batch_size - 1) // batch_size
-                
-                pred_proba_list = []
-                for batch_idx in range(num_batches):
-                    start_idx = batch_idx * batch_size
-                    end_idx = min((batch_idx + 1) * batch_size, test_size)
-                    
-                    # cuDF DataFrame인 경우 iloc 사용
-                    if hasattr(X_test_scaled, 'iloc'):
-                        X_batch = X_test_scaled.iloc[start_idx:end_idx]
-                    else:
-                        # numpy 배열인 경우
-                        X_batch = X_test_scaled[start_idx:end_idx]
-                    
+                elif use_scaler:
+                    # sklearn scaler (sklearn 모델)
                     try:
-                        batch_proba = model.predict_proba(X_batch)
-                        # 결과 처리
-                        if isinstance(batch_proba, np.ndarray):
-                            if batch_proba.ndim == 2:
-                                pred_proba_list.append(batch_proba[:, 1])
-                            else:
-                                pred_proba_list.append(batch_proba)
-                        else:
-                            # cuDF Series나 다른 형태
-                            if hasattr(batch_proba, 'iloc'):
-                                pred_proba_list.append(batch_proba.iloc[:, 1].to_pandas().values if hasattr(batch_proba.iloc[:, 1], 'to_pandas') else batch_proba.iloc[:, 1].values)
-                            else:
-                                pred_proba_list.append(batch_proba[:, 1] if hasattr(batch_proba, '__getitem__') else batch_proba)
-                        
-                        del X_batch, batch_proba
-                        # 배치 간 메모리 정리
-                        if batch_idx < num_batches - 1:
-                            enhanced_gpu_memory_cleanup(force_defrag=False) if 'enhanced_gpu_memory_cleanup' in globals() else None
+                        X_test_scaled = scaler.transform(test_data_for_pred)
                     except Exception as e:
-                        log_error(f"   ❌ 배치 {batch_idx+1}/{num_batches} 예측 실패: {e}")
-                        # 실패한 배치는 중립값(0.5)으로 채움
-                        batch_len = end_idx - start_idx
-                        pred_proba_list.append(np.full(batch_len, 0.5))
-                        del X_batch
-                        enhanced_gpu_memory_cleanup(force_defrag=False) if 'enhanced_gpu_memory_cleanup' in globals() else None
+                        log_warning(f"sklearn 스케일링 오류: {e}, 원본 데이터 사용")
+                        X_test_scaled = test_data_for_pred.values
+                else:
+                    # 스케일러를 사용하지 않음 (sklearn 모델)
+                    X_test_scaled = test_data_for_pred.values
                 
-                # 배치 결과 합치기
-                pred_proba = np.concatenate(pred_proba_list)
-                del pred_proba_list
-            else:
-                # 작은 데이터셋은 한 번에 처리
-                pred_proba = model.predict_proba(X_test_scaled)
-            
-            # 반환 형태에 따라 처리 (cuML 모델은 cuDF DataFrame 반환)
-            if isinstance(pred_proba, np.ndarray):
-                if pred_proba.ndim == 2:
-                    test_data['ml_pred_proba'] = pred_proba[:, 1]
+                # 예측 수행 (큰 데이터셋의 경우 배치 처리)
+                # cuDF DataFrame인 경우 len() 사용, numpy 배열인 경우 shape[0] 사용
+                if hasattr(X_test_scaled, '__len__'):
+                    test_size = len(X_test_scaled)
+                elif hasattr(X_test_scaled, 'shape'):
+                    test_size = X_test_scaled.shape[0]
                 else:
-                    test_data['ml_pred_proba'] = pred_proba
-            elif hasattr(pred_proba, 'iloc'):
-                # cuDF DataFrame인 경우
-                if hasattr(pred_proba.iloc[:, 1], 'to_pandas'):
-                    test_data['ml_pred_proba'] = pred_proba.iloc[:, 1].to_pandas().values
-                elif hasattr(pred_proba.iloc[:, 1], 'to_numpy'):
-                    test_data['ml_pred_proba'] = pred_proba.iloc[:, 1].to_numpy()
+                    test_size = test_data_for_pred.shape[0]
+                
+                if test_size > 1000000 and is_cuml_model:
+                    log_info(f"   [PRED] 큰 데이터셋 ({test_size:,}행) - 배치 처리로 예측")
+                    batch_size = 500000  # 배치 크기
+                    num_batches = (test_size + batch_size - 1) // batch_size
+                    
+                    pred_proba_list = []
+                    for batch_idx in range(num_batches):
+                        start_idx = batch_idx * batch_size
+                        end_idx = min((batch_idx + 1) * batch_size, test_size)
+                        
+                        # cuDF DataFrame인 경우 iloc 사용
+                        if hasattr(X_test_scaled, 'iloc'):
+                            X_batch = X_test_scaled.iloc[start_idx:end_idx]
+                        else:
+                            # numpy 배열인 경우
+                            X_batch = X_test_scaled[start_idx:end_idx]
+                        
+                        try:
+                            batch_proba = model.predict_proba(X_batch)
+                            # 결과 처리
+                            if isinstance(batch_proba, np.ndarray):
+                                if batch_proba.ndim == 2:
+                                    pred_proba_list.append(batch_proba[:, 1])
+                                else:
+                                    pred_proba_list.append(batch_proba)
+                            else:
+                                # cuDF Series나 다른 형태
+                                if hasattr(batch_proba, 'iloc'):
+                                    pred_proba_list.append(batch_proba.iloc[:, 1].to_pandas().values if hasattr(batch_proba.iloc[:, 1], 'to_pandas') else batch_proba.iloc[:, 1].values)
+                                else:
+                                    pred_proba_list.append(batch_proba[:, 1] if hasattr(batch_proba, '__getitem__') else batch_proba)
+                            
+                            del X_batch, batch_proba
+                            # 배치 간 메모리 정리
+                            if batch_idx < num_batches - 1:
+                                enhanced_gpu_memory_cleanup(force_defrag=False) if 'enhanced_gpu_memory_cleanup' in globals() else None
+                        except Exception as e:
+                            log_error(f"   ❌ 배치 {batch_idx+1}/{num_batches} 예측 실패: {e}")
+                            # 실패한 배치는 중립값(0.5)으로 채움
+                            batch_len = end_idx - start_idx
+                            pred_proba_list.append(np.full(batch_len, 0.5))
+                            del X_batch
+                            enhanced_gpu_memory_cleanup(force_defrag=False) if 'enhanced_gpu_memory_cleanup' in globals() else None
+                    
+                    # 배치 결과 합치기
+                    pred_proba = np.concatenate(pred_proba_list)
+                    del pred_proba_list
                 else:
-                    test_data['ml_pred_proba'] = pred_proba.iloc[:, 1].values
-            else:
-                # 기타 형태는 그대로 사용
-                test_data['ml_pred_proba'] = pred_proba[:, 1] if hasattr(pred_proba, '__getitem__') else pred_proba
-            
-                log_info("ML 예측 적용 완료", context={
-                    "predictions_count": len(test_data['ml_pred_proba']),
-                    "prediction_range": f"{test_data['ml_pred_proba'].min():.3f} ~ {test_data['ml_pred_proba'].max():.3f}"
+                    # 작은 데이터셋은 한 번에 처리
+                    pred_proba = model.predict_proba(X_test_scaled)
+                
+                # 반환 형태에 따라 처리 (cuML 모델은 cuDF DataFrame 반환)
+                if isinstance(pred_proba, np.ndarray):
+                    if pred_proba.ndim == 2:
+                        test_data['ml_pred_proba'] = pred_proba[:, 1]
+                    else:
+                        test_data['ml_pred_proba'] = pred_proba
+                elif hasattr(pred_proba, 'iloc'):
+                    # cuDF DataFrame인 경우
+                    if hasattr(pred_proba.iloc[:, 1], 'to_pandas'):
+                        test_data['ml_pred_proba'] = pred_proba.iloc[:, 1].to_pandas().values
+                    elif hasattr(pred_proba.iloc[:, 1], 'to_numpy'):
+                        test_data['ml_pred_proba'] = pred_proba.iloc[:, 1].to_numpy()
+                    else:
+                        test_data['ml_pred_proba'] = pred_proba.iloc[:, 1].values
+                else:
+                    # 기타 형태는 그대로 사용
+                    test_data['ml_pred_proba'] = pred_proba[:, 1] if hasattr(pred_proba, '__getitem__') else pred_proba
+                
+                    log_info("ML 예측 적용 완료", context={
+                        "predictions_count": len(test_data['ml_pred_proba']),
+                        "prediction_range": f"{test_data['ml_pred_proba'].min():.3f} ~ {test_data['ml_pred_proba'].max():.3f}"
+                    })
+                
+            except Exception as e:
+                log_critical("ML 예측 적용 실패", exception=e, context={
+                    "features": features,
+                    "data_shape": test_data.shape
                 })
-            
-        except Exception as e:
-            log_critical("ML 예측 적용 실패", exception=e, context={
-                "features": features,
-                "data_shape": test_data.shape
-            })
-            raise
+                raise
 
         # LGBM은 일자별 최종 점수 계산 단계에서 필요할 때만 붙이도록 run_detailed_backtest에서 처리합니다.
         # (가중치 0이면 run_detailed_backtest에서 스킵)
