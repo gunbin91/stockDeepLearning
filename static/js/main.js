@@ -25,6 +25,9 @@ $(document).ready(function() {
         
         // 서버 상태 동기화
         syncServerStatus();
+
+        // 상태 폴링 (웹소켓 누락 대비)
+        setInterval(syncServerStatus, 15000);
     }
     
     function connectWebSocket() {
@@ -59,10 +62,16 @@ $(document).ready(function() {
     function syncServerStatus() {
         // 서버 상태 확인
         checkServerStatus().then(function(serverRunning) {
-            if (serverRunning !== window.analysisRunning) {
+            const prevRunning = window.analysisRunning;
+            if (serverRunning !== prevRunning) {
                 console.log('서버-클라이언트 상태 불일치 감지, 동기화 중...');
                 window.analysisRunning = serverRunning;
                 updateAnalysisUI();
+            }
+            // 서버가 종료 상태인데 클라이언트가 실행 중 UI일 경우 리셋
+            if (!serverRunning && prevRunning) {
+                resetAnalysisState();
+                $('#analysis_modal').modal('hide');
             }
         }).catch(function(error) {
             console.error('서버 상태 확인 실패:', error);
@@ -208,16 +217,17 @@ $(document).ready(function() {
                 },
                 columnDefs: [
                     { targets: [0], width: '70px', className: 'text-center' },      // 최종순위
-                    { targets: [1], width: '120px' },     // 종목명
-                    { targets: [2], width: '80px', className: 'text-center' },     // 종목코드
-                    { targets: [3], width: '100px', className: 'text-end' },  // 현재가
-                    { targets: [4], width: '80px', className: 'text-end' },  // 등락율
-                    { targets: [5], width: '100px', className: 'text-end' },      // 기준일가
-                    { targets: [6], width: '90px', className: 'text-end' }, // 최종점수
-                    { targets: [7], width: '100px', className: 'text-end' }, // RF상승확률
-                    { targets: [8], width: '110px', className: 'text-end' }, // LGBM상승확률
-                    { targets: [9], width: '90px', className: 'text-end' }, // 변동성
-                    { targets: [10], width: '100px', className: 'text-end' }       // 시가총액
+                    { targets: [1], width: '90px', className: 'text-center' },      // 시장구분
+                    { targets: [2], width: '140px' },                               // 종목명
+                    { targets: [3], width: '90px', className: 'text-center' },      // 종목코드
+                    { targets: [4], width: '110px', className: 'text-end' },        // 현재가
+                    { targets: [5], width: '90px', className: 'text-end' },         // 등락율
+                    { targets: [6], width: '110px', className: 'text-end' },        // 기준일가
+                    { targets: [7], width: '90px', className: 'text-end' },         // 최종점수
+                    { targets: [8], width: '110px', className: 'text-end' },        // RF상승확률
+                    { targets: [9], width: '120px', className: 'text-end' },        // LGBM상승확률
+                    { targets: [10], width: '90px', className: 'text-end' },        // 변동성
+                    { targets: [11], width: '110px', className: 'text-end' }        // 시가총액
                 ],
                 responsive: false,
                 drawCallback: function() {
@@ -244,7 +254,7 @@ $(document).ready(function() {
         $('.price-cell').each(function() {
             const row = $(this).closest('tr');
             const currentPrice = parseFloat($(this).text().replace(/,/g, ''));
-            const basePrice = parseFloat(row.find('td:eq(5)').text().replace(/,/g, ''));
+            const basePrice = parseFloat(row.find('td:eq(6)').text().replace(/,/g, ''));
             
             if (currentPrice > basePrice) {
                 $(this).addClass('text-danger fw-bold'); // 상승: 빨간색

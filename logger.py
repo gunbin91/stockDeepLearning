@@ -354,7 +354,7 @@ class StockAnalysisLogger:
 ═══════════════════════════════════════════════════════════════
 📅 분석 정보
    • 분석 기준일: {analysis_date}
-   • 분석 대상: KOSPI + KOSDAQ 전체 종목
+   • 분석 대상: NASDAQ + NYSE + AMEX 전체 종목
    • 분석 시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ═══════════════════════════════════════════════════════════════
 """
@@ -376,7 +376,7 @@ class StockAnalysisLogger:
                 self.info(f"   └─ 재무 데이터: {count:,}개 기업 ({coverage:.1f}% 커버리지)")
         elif step == "macro_data":
             if status == "complete":
-                self.info("   └─ 거시경제 데이터: KOSPI, USD/KRW, VIX 수집 완료")
+                self.info("   └─ 거시경제 데이터: IXIC, VIX 수집 완료")
         elif step == "price_data":
             if status == "start":
                 total = details.get('total', 0) if details else 0

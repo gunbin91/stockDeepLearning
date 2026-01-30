@@ -33,7 +33,6 @@ from flask_socketio import SocketIO, emit
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.utils
-import FinanceDataReader as fdr
 import pandas_ta as ta
 import joblib
 
@@ -370,6 +369,9 @@ def load_cached_analysis_result():
                     max_val = display_df.loc[mask, 'lgbm_pred_proba'].max()
                     if max_val <= 1.0:
                         display_df.loc[mask, 'lgbm_pred_proba'] = display_df.loc[mask, 'lgbm_pred_proba'] * 100
+            else:
+                # LGBM 컬럼이 없더라도 테이블 정렬을 위해 컬럼 생성
+                display_df['lgbm_pred_proba'] = np.nan
             
             # volatility_score가 없을 때 기본값 설정
             if 'volatility_score' not in display_df.columns:
@@ -401,11 +403,20 @@ def load_cached_analysis_result():
             rename_map = { '현재가': '현재가(USD)', '시가총액': '시가총액(억달러)',  'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(USD)'}
             display_df.rename(columns=rename_map, inplace=True)
             
-            display_columns = [ '최종순위', '시장구분', '종목명', '종목코드', '현재가(USD)_formatted', '등락율(%)', '기준일가(USD)', '최종점수(점)', '상승확률(%)', '변동성(점)', '시가총액(억달러)']
-            
-            # lgbm_pred_proba가 있으면 컬럼 목록에 추가 (이름은 그대로 유지)
-            if 'lgbm_pred_proba' in display_df.columns:
-                display_columns.append('lgbm_pred_proba')
+            display_columns = [
+                '최종순위',
+                '시장구분',
+                '종목명',
+                '종목코드',
+                '현재가(USD)_formatted',
+                '등락율(%)',
+                '기준일가(USD)',
+                '최종점수(점)',
+                '상승확률(%)',
+                'lgbm_pred_proba',
+                '변동성(점)',
+                '시가총액(억달러)'
+            ]
             
             result_df = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(USD)_formatted': '현재가(USD)'})
             
@@ -655,6 +666,7 @@ def create_stock_chart(ticker_code, stock_name):
     try:
         # NASDAQ 티커는 그대로 사용
         normalized_ticker_code = str(ticker_code).strip()
+        padded_ticker_code = normalized_ticker_code
 
         # 데이터는 2년치를 불러와서 장기 이동평균선 계산에 사용
         end_date = datetime.now()
@@ -663,7 +675,7 @@ def create_stock_chart(ticker_code, stock_name):
         # NASDAQ 일봉 데이터 수집 (티커 그대로)
         df = None
         try:
-            df = fdr.DataReader(normalized_ticker_code, start_date, end_date)
+            df = data_fetcher.fetch_daily_ohlcv(normalized_ticker_code, start_date, end_date)
         except:
             df = None
         
@@ -1457,8 +1469,7 @@ def stop_backtest():
 def get_stock_chart(ticker_code):
     """종목 차트 데이터 API"""
     try:
-        # 종목명 가져오기 (종목코드 정규화)
-        stock_list_df = data_fetcher.fetch_stock_list()
+        # 종목명 가져오기 (캐시 우선, 없으면 티커 사용)
         normalized_ticker = str(ticker_code).strip()
         # 기존 파일 호환: run_analysis에서 zfill(6)로 저장된 티커(예: 00TRSG)도 들어올 수 있음
         candidates = [normalized_ticker]
@@ -1467,12 +1478,19 @@ def get_stock_chart(ticker_code):
 
         stock_name = None
         resolved_ticker = normalized_ticker
-        for cand in candidates:
-            stock_info = stock_list_df[stock_list_df['종목코드'].astype(str).str.strip() == cand]
-            if not stock_info.empty:
-                stock_name = stock_info.iloc[0].get('종목명')
-                resolved_ticker = cand
-                break
+        try:
+            cached_features_path = os.path.join(str(path_manager.data_dir), 'cached_features.json')
+            if os.path.exists(cached_features_path):
+                cached_df = pd.read_json(cached_features_path, orient='records', dtype={'종목코드': str})
+                norm_series = cached_df['종목코드'].astype(str).str.strip()
+                for cand in candidates:
+                    row = cached_df[norm_series == cand]
+                    if not row.empty:
+                        stock_name = row.iloc[0].get('종목명')
+                        resolved_ticker = cand
+                        break
+        except Exception:
+            stock_name = None
 
         if not stock_name:
             # 종목명 조회 실패해도 차트 생성 시도 (티커 그대로 사용)

@@ -20,7 +20,6 @@ import sys
 import argparse
 from tqdm import tqdm
 import joblib
-import FinanceDataReader as fdr
 from datetime import datetime, timedelta
 import io
 import traceback
@@ -54,6 +53,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 내부 모듈 임포트
 import ensemble
+import data_fetcher
 import data_processor
 import ml_model
 from logger import (log_info, log_error, log_critical, log_warning, shutdown_logger,
@@ -546,7 +546,11 @@ def create_json_report(results, output_path=None):
     
     # NASDAQ Composite(IXIC) 데이터 가져오기 (비교용 누적 수익률)
     try:
-        ixic = fdr.DataReader('IXIC', start=results["portfolio_history"].index.min(), end=results["portfolio_history"].index.max())
+        ixic = data_fetcher.fetch_daily_ohlcv(
+            'IXIC',
+            start=results["portfolio_history"].index.min(),
+            end=results["portfolio_history"].index.max()
+        )
         ixic_cumulative = (1 + ixic['Close'].pct_change().fillna(0)).cumprod()
         
         # IXIC 초기값 기준으로 정규화 (포트폴리오와 비교 가능하도록)

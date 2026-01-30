@@ -22,15 +22,18 @@ import FinanceDataReader as fdr
 from datetime import datetime, timedelta
 import pandas_ta as ta
 import concurrent.futures
+import threading
 from tqdm import tqdm
 import os
 import gc
 import locale
+import re
 import platform
 import multiprocessing
 import time
 import json
 import urllib.request
+import re
 
 # WSL2/Linux 환경에서 multiprocessing 최적화
 # fork 방식 사용 (spawn보다 빠르고 메모리 효율적)
@@ -55,6 +58,155 @@ if platform.system() == 'Windows':
 from scoring import calculate_factor_scores
 from path_manager import path_manager
 from logger import log_info, log_critical, log_error, log_warning, log_progress
+
+# =================================================================
+# 일봉 데이터 조회 유틸 (Yahoo 우선, 실패 시 FDR 폴백)
+# - yfinance의 end는 exclusive이므로 +1일 보정
+# - 컬럼은 Open/High/Low/Close/Volume로 정규화
+# =================================================================
+_YF_LOCK = threading.Lock()
+
+def _normalize_yfinance_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    try:
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0] for c in df.columns]
+    except Exception:
+        pass
+    return df
+
+def _to_yyyy_mm_dd(dt_like):
+    try:
+        return pd.to_datetime(dt_like).strftime('%Y-%m-%d')
+    except Exception:
+        return dt_like
+
+def _is_krx_code(symbol: str) -> bool:
+    try:
+        return re.match(r'^\d{5}[0-9KLMN]$', str(symbol).strip()) is not None
+    except Exception:
+        return False
+
+def _is_yahoo_only_symbol(symbol: str) -> bool:
+    s = str(symbol).strip().upper()
+    return s in {'IXIC', '^IXIC', 'VIX', '^VIX', 'DJI', '^DJI', 'S&P500', 'US500', '^GSPC'}
+
+def _extract_batch_ticker_df(batch_df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    if batch_df is None or batch_df.empty:
+        return None
+    if not isinstance(batch_df.columns, pd.MultiIndex):
+        return batch_df.copy()
+    try:
+        if 'Open' in batch_df.columns.levels[0]:
+            df_t = batch_df.xs(ticker, level=1, axis=1)
+        elif 'Open' in batch_df.columns.levels[1]:
+            df_t = batch_df.xs(ticker, level=0, axis=1)
+        else:
+            df_t = None
+    except Exception:
+        df_t = None
+    return df_t
+
+def fetch_daily_ohlcv_batch(tickers, start=None, end=None) -> dict:
+    """
+    배치 다운로드용 일봉 OHLCV 조회 (Yahoo)
+    Returns: {ticker: df}
+    """
+    result = {str(t).strip(): None for t in tickers}
+    try:
+        import yfinance as yf
+        yf_start = _to_yyyy_mm_dd(start) if start is not None else None
+        yf_end = None
+        if end is not None:
+            try:
+                yf_end = (pd.to_datetime(end) + timedelta(days=1)).strftime('%Y-%m-%d')
+            except Exception:
+                yf_end = end
+
+        batch_symbols = " ".join([str(t).strip() for t in tickers])
+        with _YF_LOCK:
+            batch_df = yf.download(
+                batch_symbols,
+                start=yf_start,
+                end=yf_end,
+                interval='1d',
+                progress=False,
+                auto_adjust=False,
+                threads=False
+            )
+        if batch_df is None or batch_df.empty:
+            return result
+
+        for t in result.keys():
+            df_t = _extract_batch_ticker_df(batch_df, t)
+            if df_t is None or df_t.empty:
+                continue
+            df_t = df_t.copy()
+            df_t.index = pd.to_datetime(df_t.index)
+            result[t] = df_t
+        return result
+    except Exception as e:
+        log_warning(f"[Yahoo] 배치 일봉 데이터 조회 실패: {e}")
+        return result
+
+def fetch_daily_ohlcv(symbol: str, start=None, end=None) -> pd.DataFrame:
+    """
+    일봉 OHLCV 데이터 조회 (Yahoo 우선, 실패 시 FDR 폴백)
+    """
+    yf_df = None
+    try:
+        import yfinance as yf
+        yf_symbol = str(symbol).strip()
+        if yf_symbol.upper() in ('IXIC', '^IXIC'):
+            yf_symbol = '^IXIC'
+        elif yf_symbol.upper() in ('VIX', '^VIX'):
+            yf_symbol = '^VIX'
+
+        yf_start = _to_yyyy_mm_dd(start) if start is not None else None
+        yf_end = None
+        if end is not None:
+            try:
+                yf_end = (pd.to_datetime(end) + timedelta(days=1)).strftime('%Y-%m-%d')
+            except Exception:
+                yf_end = end
+
+        # yfinance는 멀티스레드 호출 시 결과가 섞일 수 있어 전역 락으로 직렬화
+        with _YF_LOCK:
+            yf_df = yf.download(
+                yf_symbol,
+                start=yf_start,
+                end=yf_end,
+                interval='1d',
+                progress=False,
+                auto_adjust=False,
+                threads=False
+            )
+        yf_df = _normalize_yfinance_columns(yf_df)
+    except Exception as e:
+        log_warning(f"[Yahoo] 일봉 데이터 조회 실패 ({symbol}): {e}")
+        yf_df = None
+
+    if yf_df is not None and not yf_df.empty:
+        try:
+            yf_df.index = pd.to_datetime(yf_df.index)
+        except Exception:
+            pass
+        return yf_df
+
+    # Yahoo 전용 심볼/미국 티커는 FDR도 Yahoo 경로를 타므로 폴백 실익이 적음
+    if (not _is_krx_code(symbol)) or _is_yahoo_only_symbol(symbol):
+        log_warning(f"[Yahoo] 일봉 데이터 조회 실패, FDR 폴백 생략 ({symbol})")
+        return None
+
+    try:
+        fdr_df = fdr.DataReader(symbol, start, end)
+        if fdr_df is not None and not fdr_df.empty:
+            fdr_df.index = pd.to_datetime(fdr_df.index)
+        return fdr_df
+    except Exception as e:
+        log_warning(f"[Fallback] 일봉 데이터 조회 실패 ({symbol}): {e}")
+        return None
 
 # =================================================================
 # 미국 시가총액 보강용 (Yahoo 차단 대비): Nasdaq Screener API
@@ -261,32 +413,23 @@ def fetch_stock_list():
             log_warning(f"중복 티커 {dup_count}개 제거됨 (종목코드 기준)")
 
         # --------------------------------------------------------------
-        # 학습/전처리 경로용 시가총액 보강 (Nasdaq Screener API)
-        # - Yahoo(yfinance/quote)는 환경에 따라 401(crumb/unauthorized)로 막힐 수 있어 배제
-        # - Screener API는 1회 호출로 다수 심볼 marketCap을 제공 → 대규모 티커에도 안정적
-        # - 원본 훼손 최소: NaN(또는 0 이하)인 티커만 보강, 실패 시 NaN 유지
+        # 학습/전처리 경로용 시가총액 보정 (Nasdaq Screener API)
+        # - 리스트 값이 부정확한 케이스가 있어 Screener 값을 우선 적용
+        # - Yahoo quote는 차단 이슈로 제외
         # --------------------------------------------------------------
         try:
-            missing_mask = stock_list['시가총액'].isna() | (pd.to_numeric(stock_list['시가총액'], errors='coerce') <= 0)
-            missing_tickers = stock_list.loc[missing_mask, '종목코드'].astype(str).str.strip().tolist()
-            if missing_tickers:
-                log_info(f"📌 시가총액 보강 필요: {len(missing_tickers):,}개 티커 (screener marketCap 조회)")
-                screener_map = _fetch_nasdaq_screener_marketcap_map()
-
-                ok = 0
-                # 티커 관례 차이 보정: '.' -> '-' (예: BRK.B -> BRK-B)
-                for t in missing_tickers:
-                    mc = screener_map.get(t)
-                    if mc is None:
-                        mc = screener_map.get(t.replace(".", "-"))
-                    if mc is not None and np.isfinite(float(mc)) and float(mc) > 0:
-                        stock_list.loc[stock_list['종목코드'] == t, '시가총액'] = float(mc)
-                        ok += 1
-
+            screener_map = _fetch_nasdaq_screener_marketcap_map()
+            tickers = stock_list['종목코드'].astype(str).str.strip()
+            mapped = tickers.map(screener_map)
+            mapped2 = tickers.str.replace('.', '-', regex=False).map(screener_map)
+            combined = mapped.combine_first(mapped2)
+            valid_mask = pd.to_numeric(combined, errors='coerce') > 0
+            if valid_mask.any():
+                stock_list.loc[valid_mask, '시가총액'] = combined[valid_mask].values
                 still_missing = int(stock_list['시가총액'].isna().sum())
-                log_info(f"✅ 시가총액 보강 완료: 성공 {ok:,}개 | 남은 NaN {still_missing:,}개")
+                log_info(f"✅ Screener 시가총액 우선 적용: {int(valid_mask.sum()):,}개 | 남은 NaN {still_missing:,}개")
         except Exception as e:
-            log_warning(f"시가총액 보강 중 오류(무시하고 진행): {e}")
+            log_warning(f"시가총액 보정 중 오류(무시하고 진행): {e}")
 
         # 시가총액 조회 불가 종목 제외
         mktcap = pd.to_numeric(stock_list['시가총액'], errors='coerce')
@@ -371,20 +514,33 @@ def _fetch_macro_data(start_date, end_date):
         
         macro_data = {}
         
+        def _log_df_meta(tag, df):
+            try:
+                cols = list(df.columns) if df is not None else []
+                idx_name = getattr(df.index, 'name', None) if df is not None else None
+                idx_type = type(df.index).__name__ if df is not None else None
+                log_info(f"{tag} 메타 | shape={getattr(df, 'shape', None)} | cols={cols} | index=({idx_type}, name={idx_name})")
+            except Exception:
+                pass
+
         try:
-            ixic = fdr.DataReader('IXIC', start_date_str, end_date_str)
+            ixic = fetch_daily_ohlcv('IXIC', start_date_str, end_date_str)
+            _log_df_meta("IXIC 원본", ixic)
             if not ixic.empty:
                 ixic_copy = ixic.copy()
                 ixic_copy.index = pd.to_datetime(ixic_copy.index, format='mixed', errors='coerce')
+                _log_df_meta("IXIC 정규화", ixic_copy)
                 macro_data['IXIC'] = ixic_copy['Close']
         except Exception as e:
             log_warning(f"IXIC 데이터 수집 실패: {e}")
         
         try:
-            vix = fdr.DataReader('^VIX', start_date_str, end_date_str)
+            vix = fetch_daily_ohlcv('^VIX', start_date_str, end_date_str)
+            _log_df_meta("VIX 원본", vix)
             if not vix.empty:
                 vix_copy = vix.copy()
                 vix_copy.index = pd.to_datetime(vix_copy.index, format='mixed', errors='coerce')
+                _log_df_meta("VIX 정규화", vix_copy)
                 macro_data['VIX'] = vix_copy['Close']
         except Exception as e:
             log_warning(f"VIX 데이터 수집 실패: {e}")
@@ -426,7 +582,18 @@ def _fetch_macro_data(start_date, end_date):
                     macro_df['IXIC_MA20_Slope'] = np.nan
             
             macro_df.reset_index(inplace=True)
-            macro_df.rename(columns={'index': 'date'}, inplace=True)
+            if 'date' not in macro_df.columns:
+                if 'index' in macro_df.columns:
+                    macro_df.rename(columns={'index': 'date'}, inplace=True)
+                elif 'Date' in macro_df.columns:
+                    macro_df.rename(columns={'Date': 'date'}, inplace=True)
+                else:
+                    datetime_cols = [c for c in macro_df.columns if np.issubdtype(macro_df[c].dtype, np.datetime64)]
+                    if datetime_cols:
+                        macro_df.rename(columns={datetime_cols[0]: 'date'}, inplace=True)
+                    else:
+                        macro_df['date'] = pd.to_datetime(macro_df.index, errors='coerce')
+            _log_df_meta("거시경제 최종", macro_df)
             log_info("✅ 거시경제 데이터 수집 완료.")
             return macro_df
         else:
@@ -436,7 +603,22 @@ def _fetch_macro_data(start_date, end_date):
         log_error(f"거시경제 데이터 수집 실패: {e}")
         return pd.DataFrame()
 
-def fetch_ticker_price_data(stock_info, start_date, end_date):
+def _prepare_price_df(ticker: str, df_price: pd.DataFrame):
+    if df_price is None or df_price.empty or len(df_price) < 251 + 60:
+        return (ticker, None)
+    if 'Close' not in df_price.columns:
+        return (ticker, None)
+    # 실데이터가 거의 없으면 실패로 처리 (상장폐지/무효 티커 방지)
+    valid_close = df_price['Close'].notna().sum()
+    if valid_close < 251 + 60:
+        return (ticker, None)
+    df_price = df_price.copy()
+    df_price.rename(columns={'Open':'시가', 'Close':'종가', 'High': '고가', 'Low': '저가', 'Volume':'거래량'}, inplace=True)
+    df = df_price[['시가', '종가', '고가', '저가', '거래량']].copy()
+    df.sort_index(inplace=True)
+    return (ticker, df)
+
+def fetch_ticker_price_data(stock_info, start_date, end_date, df_price=None):
     """
     단일 종목 주가 데이터 다운로드 함수 (I/O 작업)
     
@@ -454,21 +636,15 @@ def fetch_ticker_price_data(stock_info, start_date, end_date):
     ticker = stock_info['종목코드']
     try:
         # NASDAQ 일봉 데이터 수집 (티커 그대로)
-        df_price = None
-        
-        try:
-            df_price = fdr.DataReader(ticker, start_date, end_date)
-        except:
-            df_price = None
-        
-        # 데이터 품질 검증: 충분한 데이터가 있는지 확인
-        # 251일(1년) + 60일(추가 버퍼) = 311일 이상의 데이터 필요
-        if df_price is None or df_price.empty or len(df_price) < 251 + 60: 
+        if df_price is None:
+            try:
+                df_price = fetch_daily_ohlcv(ticker, start_date, end_date)
+            except:
+                df_price = None
+
+        ticker, df = _prepare_price_df(ticker, df_price)
+        if df is None:
             return (ticker, None)
-            
-        df_price.rename(columns={'Open':'시가', 'Close':'종가', 'High': '고가', 'Low': '저가', 'Volume':'거래량'}, inplace=True)
-        df = df_price[['시가', '종가', '고가', '저가', '거래량']].copy()
-        df.sort_index(inplace=True)
         
         # 메모리 최적화: 원본 데이터프레임 해제
         del df_price
@@ -992,7 +1168,7 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     if stock_list.empty: 
         raise ValueError("종목 리스트를 가져올 수 없습니다.")
     
-    # 미국 버전: KRX-MARCAP 대신 정적 시가총액(가능 시)을 사용
+    # 미국 버전: 정적 시가총액(가능 시)을 사용
     df_marcap_long = stock_list[['종목코드']].copy()
     df_marcap_long.rename(columns={'종목코드': 'Code'}, inplace=True)
     if '시가총액' in stock_list.columns:
@@ -1030,7 +1206,7 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     download_failed = []
     
     # 배치 단위로 처리하여 멈춘 future 문제 해결
-    batch_size = 100
+    batch_size = 50
     total_batches = (total_count + batch_size - 1) // batch_size
     download_completed = 0
     
@@ -1040,42 +1216,33 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
         batch = stock_records[batch_idx:batch_idx + batch_size]
         current_batch = batch_idx // batch_size + 1
         
-        thread_workers = min(12, len(batch))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=thread_workers) as executor:
-            future_to_stock = {executor.submit(fetch_ticker_price_data, row, start_date, end_date): row for row in batch}
-            
-            # 배치 내 완료된 future 처리
-            batch_completed = 0
-            for future in concurrent.futures.as_completed(future_to_stock):
-                try:
-                    ticker, df_price = future.result(timeout=120)  # 2분 타임아웃
-                    if df_price is not None:
-                        downloaded_data[ticker] = df_price
-                    else:
-                        download_failed.append(ticker)
-                except concurrent.futures.TimeoutError:
-                    stock_info = future_to_stock.get(future, {})
-                    ticker = stock_info.get('종목코드', 'Unknown')
-                    download_failed.append(ticker)
-                    log_warning(f"⏱️ 종목 {ticker} 전체 작업 타임아웃 (2분 초과) - 스킵하고 다음 종목으로 진행")
-                except Exception as e:
-                    stock_info = future_to_stock.get(future, {})
-                    ticker = stock_info.get('종목코드', 'Unknown')
-                    download_failed.append(ticker)
-                    log_error(f"❌ 종목 {ticker} 데이터 다운로드 중 오류: {e}")
-                
-                batch_completed += 1
-                download_completed += 1
-                log_progress("주가 데이터 다운로드", download_completed, total_count)
-            
-            # 배치 완료 로그
-            log_info(f"배치 {current_batch}/{total_batches} 완료 ({batch_completed}/{len(batch)}개 종목)")
+        batch_tickers = [str(row.get('종목코드', '')).strip() for row in batch]
+        batch_price_map = fetch_daily_ohlcv_batch(batch_tickers, start_date, end_date)
+
+        batch_completed = 0
+        for row in batch:
+            ticker = str(row.get('종목코드', '')).strip()
+            df_price = batch_price_map.get(ticker)
+            _, df_prepared = _prepare_price_df(ticker, df_price)
+            if df_prepared is not None:
+                downloaded_data[ticker] = df_prepared
+            else:
+                download_failed.append(ticker)
+
+            batch_completed += 1
+            download_completed += 1
+            log_progress("주가 데이터 다운로드", download_completed, total_count)
+
+        # 배치 완료 로그
+        log_info(f"배치 {current_batch}/{total_batches} 완료 ({batch_completed}/{len(batch)}개 종목)")
         
         # 배치 간 메모리 정리 및 API 부하 방지
         gc.collect()
         if current_batch < total_batches:
             time.sleep(0.5)  # 배치 간 0.5초 대기
     
+    # 실패 리스트 정리
+    download_failed = list({t for t in download_failed if t})
     log_info(f"✅ 데이터 다운로드 완료: {len(downloaded_data)}/{total_count}개 성공 (실패: {len(download_failed)}개)")
     
     if not downloaded_data:
@@ -1166,7 +1333,10 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
         log_warning(f"⚠️ 종목 처리 성공률이 다소 낮습니다: {success_rate:.1f}% (권장: 80% 이상)")
     
     # 동일한 방식으로 처리
-    raw_feature_df = pd.concat(all_data).reset_index()
+    raw_feature_df = pd.concat(all_data)
+    # 어떤 경우에도 date 컬럼을 보장
+    raw_feature_df['date'] = raw_feature_df.index
+    raw_feature_df = raw_feature_df.reset_index(drop=True)
     
     raw_feature_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     raw_feature_df.dropna(subset=['date', '종목코드'], inplace=True)
@@ -1179,8 +1349,10 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     
     # 거시경제 데이터 추가
     macro_df = _fetch_macro_data(start_date, end_date)
-    if not macro_df.empty:
+    if not macro_df.empty and 'date' in macro_df.columns and 'date' in raw_feature_df.columns:
         raw_feature_df = pd.merge(raw_feature_df, macro_df, on='date', how='left')
+    else:
+        log_warning("거시경제 데이터 병합 스킵: date 컬럼이 없습니다.")
     
     # Relative_Strength_20 피처는 제거됨
     

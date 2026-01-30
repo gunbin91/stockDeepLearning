@@ -19,12 +19,14 @@ import numpy as np
 import FinanceDataReader as fdr
 import pandas_ta as ta
 import concurrent.futures
+import threading
 from tqdm import tqdm
 import os
 from datetime import datetime, timedelta
 import time
 import gc
 import locale
+import re
 import platform
 from functools import lru_cache
 import json
@@ -45,6 +47,158 @@ from logger import (log_info, log_warning, log_error, log_critical, log_progress
 from exceptions import DataFetchError, DataValidationError
 
 from path_manager import path_manager
+
+# =================================================================
+# 일봉 데이터 조회 유틸 (Yahoo 우선, 실패 시 FDR 폴백)
+# - yfinance의 end는 exclusive이므로 +1일 보정
+# - 컬럼은 Open/High/Low/Close/Volume로 정규화
+# =================================================================
+_YF_LOCK = threading.Lock()
+
+def _normalize_yfinance_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    try:
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0] for c in df.columns]
+    except Exception:
+        pass
+    return df
+
+def _to_yyyy_mm_dd(dt_like):
+    try:
+        return pd.to_datetime(dt_like).strftime('%Y-%m-%d')
+    except Exception:
+        return dt_like
+
+def _is_krx_code(symbol: str) -> bool:
+    try:
+        return re.match(r'^\d{5}[0-9KLMN]$', str(symbol).strip()) is not None
+    except Exception:
+        return False
+
+def _is_yahoo_only_symbol(symbol: str) -> bool:
+    s = str(symbol).strip().upper()
+    return s in {'IXIC', '^IXIC', 'VIX', '^VIX', 'DJI', '^DJI', 'S&P500', 'US500', '^GSPC'}
+
+def _extract_batch_ticker_df(batch_df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    if batch_df is None or batch_df.empty:
+        return None
+    if not isinstance(batch_df.columns, pd.MultiIndex):
+        return batch_df.copy()
+    # level 0: fields, level 1: tickers (기본)
+    try:
+        if 'Open' in batch_df.columns.levels[0]:
+            df_t = batch_df.xs(ticker, level=1, axis=1)
+        elif 'Open' in batch_df.columns.levels[1]:
+            df_t = batch_df.xs(ticker, level=0, axis=1)
+        else:
+            df_t = None
+    except Exception:
+        df_t = None
+    return df_t
+
+def fetch_daily_ohlcv_batch(tickers, start=None, end=None) -> dict:
+    """
+    배치 다운로드용 일봉 OHLCV 조회 (Yahoo)
+    Returns: {ticker: df}
+    """
+    result = {str(t).strip(): None for t in tickers}
+    try:
+        import yfinance as yf
+        yf_start = _to_yyyy_mm_dd(start) if start is not None else None
+        yf_end = None
+        if end is not None:
+            try:
+                yf_end = (pd.to_datetime(end) + timedelta(days=1)).strftime('%Y-%m-%d')
+            except Exception:
+                yf_end = end
+
+        batch_symbols = " ".join([str(t).strip() for t in tickers])
+        with _YF_LOCK:
+            batch_df = yf.download(
+                batch_symbols,
+                start=yf_start,
+                end=yf_end,
+                interval='1d',
+                progress=False,
+                auto_adjust=False,
+                threads=False
+            )
+        if batch_df is None or batch_df.empty:
+            return result
+
+        for t in result.keys():
+            df_t = _extract_batch_ticker_df(batch_df, t)
+            if df_t is None or df_t.empty:
+                continue
+            df_t = df_t.copy()
+            df_t.index = pd.to_datetime(df_t.index)
+            result[t] = df_t
+        return result
+    except Exception as e:
+        log_warning(f"[Yahoo] 배치 일봉 데이터 조회 실패: {e}")
+        return result
+
+def fetch_daily_ohlcv(symbol: str, start=None, end=None) -> pd.DataFrame:
+    """
+    일봉 OHLCV 데이터 조회 (Yahoo 우선, 실패 시 FDR 폴백)
+    """
+    yf_df = None
+    try:
+        import yfinance as yf
+        yf_symbol = str(symbol).strip()
+        if yf_symbol.upper() in ('IXIC', '^IXIC'):
+            yf_symbol = '^IXIC'
+        elif yf_symbol.upper() in ('VIX', '^VIX'):
+            yf_symbol = '^VIX'
+
+        yf_start = _to_yyyy_mm_dd(start) if start is not None else None
+        yf_end = None
+        if end is not None:
+            try:
+                yf_end = (pd.to_datetime(end) + timedelta(days=1)).strftime('%Y-%m-%d')
+            except Exception:
+                yf_end = end
+
+        # yfinance는 멀티스레드 호출 시 결과가 섞일 수 있어 전역 락으로 직렬화
+        with _YF_LOCK:
+            yf_df = yf.download(
+                yf_symbol,
+                start=yf_start,
+                end=yf_end,
+                interval='1d',
+                progress=False,
+                auto_adjust=False,
+                threads=False
+            )
+        yf_df = _normalize_yfinance_columns(yf_df)
+    except Exception as e:
+        log_warning(f"[Yahoo] 일봉 데이터 조회 실패 ({symbol}): {e}")
+        yf_df = None
+
+    if yf_df is not None and not yf_df.empty:
+        try:
+            yf_df.index = pd.to_datetime(yf_df.index)
+        except Exception:
+            pass
+        return yf_df
+
+    # Yahoo 전용 심볼/미국 티커는 FDR도 Yahoo 경로를 타므로 폴백 실익이 적음
+    if (not _is_krx_code(symbol)) or _is_yahoo_only_symbol(symbol):
+        log_warning(f"[Yahoo] 일봉 데이터 조회 실패, FDR 폴백 생략 ({symbol})")
+        return None
+
+    try:
+        fdr_df = fdr.DataReader(symbol, start, end)
+        if fdr_df is not None and not fdr_df.empty:
+            fdr_df.index = pd.to_datetime(fdr_df.index)
+        return fdr_df
+    except Exception as e:
+        log_warning(f"[Fallback] 일봉 데이터 조회 실패 ({symbol}): {e}")
+        return None
+
+    return None
 
 # =================================================================
 # 미국 시가총액 통일 소스: Nasdaq Screener API
@@ -229,7 +383,7 @@ def get_actual_trading_date(selected_analysis_date):
     # AAPL로 실제 거래일 확인 (NASDAQ/US 기준)
     try:
         sample_fetch_start = (ny_now - timedelta(days=10)).strftime('%Y-%m-%d')
-        sample_df = fdr.DataReader('AAPL', sample_fetch_start, ny_now.strftime('%Y-%m-%d'))
+        sample_df = fetch_daily_ohlcv('AAPL', sample_fetch_start, ny_now.strftime('%Y-%m-%d'))
         if not sample_df.empty:
             sample_analysis_date_ts = pd.Timestamp(selected_analysis_date)
             sample_temp = sample_df[sample_df.index <= sample_analysis_date_ts]
@@ -347,19 +501,19 @@ def _get_stock_list_from_marcap(analysis_date=None):
 
         stock_list['상장주식수'] = np.nan
 
-        # Screener API marketCap으로 NaN만 보강
+        # Screener API marketCap 우선 적용 (리스트 값이 부정확한 경우 보정)
         try:
-            missing_mask = stock_list['시가총액_기준일'].isna() | (pd.to_numeric(stock_list['시가총액_기준일'], errors='coerce') <= 0)
-            if missing_mask.any():
-                screener_map = _get_nasdaq_screener_marketcap_map()
-                # 티커 관례 보정: '.' -> '-' (예: BRK.B -> BRK-B)
-                tickers = stock_list.loc[missing_mask, '종목코드'].astype(str).str.strip()
-                mapped = tickers.map(screener_map)
-                mapped2 = tickers.str.replace('.', '-', regex=False).map(screener_map)
-                combined = mapped.combine_first(mapped2)
-                stock_list.loc[missing_mask, '시가총액_기준일'] = combined.values
+            screener_map = _get_nasdaq_screener_marketcap_map()
+            tickers = stock_list['종목코드'].astype(str).str.strip()
+            mapped = tickers.map(screener_map)
+            mapped2 = tickers.str.replace('.', '-', regex=False).map(screener_map)
+            combined = mapped.combine_first(mapped2)
+            valid_mask = pd.to_numeric(combined, errors='coerce') > 0
+            if valid_mask.any():
+                stock_list.loc[valid_mask, '시가총액_기준일'] = combined[valid_mask].values
+                log_info(f"Screener 시가총액 우선 적용: {int(valid_mask.sum()):,}개")
         except Exception as e:
-            log_warning(f"Screener 시가총액 보강 실패(무시하고 진행): {e}")
+            log_warning(f"Screener 시가총액 보정 실패(무시하고 진행): {e}")
 
         # 시가총액 조회 불가 종목 제외
         mktcap = pd.to_numeric(stock_list['시가총액_기준일'], errors='coerce')
@@ -396,7 +550,7 @@ def _fetch_macro_data(start_date, end_date):
         macro_data = {}
         
         try:
-            ixic = fdr.DataReader('IXIC', start_date_str, end_date_str)
+            ixic = fetch_daily_ohlcv('IXIC', start_date_str, end_date_str)
             if not ixic.empty:
                 ixic_copy = ixic.copy()
                 ixic_copy.index = pd.to_datetime(ixic_copy.index, format='mixed', errors='coerce')
@@ -405,7 +559,7 @@ def _fetch_macro_data(start_date, end_date):
             log_warning(f"IXIC 데이터 수집 실패: {e}")
         
         try:
-            vix = fdr.DataReader('^VIX', start_date_str, end_date_str)
+            vix = fetch_daily_ohlcv('^VIX', start_date_str, end_date_str)
             if not vix.empty:
                 # 날짜 인덱스를 안전하게 처리 (format='mixed' 사용)
                 vix_copy = vix.copy()
@@ -462,18 +616,18 @@ def _fetch_macro_data(start_date, end_date):
         # 오류 발생 시 빈 DataFrame 반환 (분석 중단 방지)
         return pd.DataFrame()
 
-def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for_fetch, selected_analysis_date, latest_fs_df):
+def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for_fetch, selected_analysis_date, latest_fs_df, df_price_full=None):
     ticker = stock_info['종목코드']
     shares = stock_info.get('상장주식수', np.nan)
     try:
         fetch_start = (pd.to_datetime(start_date_for_fetch) - timedelta(days=60)).strftime('%Y-%m-%d')
         
         # NASDAQ 일봉 주가 데이터 수집 (티커 그대로)
-        df_price_full = None
-        try:
-            df_price_full = fdr.DataReader(ticker, fetch_start, end_date_for_fetch)
-        except:
-            df_price_full = None
+        if df_price_full is None:
+            try:
+                df_price_full = fetch_daily_ohlcv(ticker, fetch_start, end_date_for_fetch)
+            except:
+                df_price_full = None
         
         if df_price_full is None or df_price_full.empty or len(df_price_full) < 251 + 60: return None, None
         df_price_full.rename(columns={'Open':'시가', 'Close':'종가', 'High':'고가', 'Low':'저가', 'Volume':'거래량'}, inplace=True)
@@ -982,7 +1136,7 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     stock_records = stock_list.to_dict('records')
     
     # 배치 단위로 처리하여 메모리 효율성 향상
-    batch_size = 100
+    batch_size = 50
     total_batches = (len(stock_records) + batch_size - 1) // batch_size
     total_stocks = len(stock_records)
     
@@ -1003,6 +1157,15 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
             if current_batch == 1:
                 log_info("가격, 거래량, 기술적 지표 계산 중...")
             
+            # 10개 티커 배치 다운로드 (Yahoo) → 티커별 DataFrame 분리
+            try:
+                batch_tickers = [str(r.get('종목코드', '')).strip() for r in batch]
+                batch_fetch_start = (pd.to_datetime(start_date_for_fetch) - timedelta(days=60)).strftime('%Y-%m-%d')
+                batch_price_map = fetch_daily_ohlcv_batch(batch_tickers, batch_fetch_start, end_date_for_fetch)
+            except Exception as e:
+                log_warning(f"배치 일봉 다운로드 실패(단건 모드로 폴백): {e}")
+                batch_price_map = {}
+
             future_to_stock = {
                 executor.submit(
                     fetch_and_process_ticker_data,
@@ -1010,7 +1173,8 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
                     start_date_for_fetch,
                     end_date_for_fetch,
                     selected_analysis_date,
-                    latest_fs_df
+                    latest_fs_df,
+                    batch_price_map.get(str(r.get('종목코드', '')).strip())
                 ): r for r in batch
             }
             
