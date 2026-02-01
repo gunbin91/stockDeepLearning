@@ -210,6 +210,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
     portfolio = {}
     portfolio_history = []
     trade_log = []
+    trade_seq = 0
     daily_dates = data.index.get_level_values('date').unique().sort_values()
     
     # 로그: 백테스팅 날짜 범위 확인
@@ -434,6 +435,8 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             # 모든 거래 이력에 총자산 추가
             for entry in daily_trades:
                 entry['total_asset'] = total_asset
+                entry['trade_seq'] = trade_seq
+                trade_seq += 1
                 trade_log.append(entry)
         except Exception as e:
             log_critical(f"백테스팅 일별 처리 중 치명적 에러", exception=e, context={
@@ -643,11 +646,14 @@ def create_json_report(results, output_path=None):
         
         # 거래 로그를 레코드로 변환
         for _, row in trade_log_all.iterrows():
+            stock_name = row.get('종목명', 'N/A')
+            if pd.isna(stock_name):
+                stock_name = None
             record = {
                 'type': row['type'],
                 'trade_date': row['trade_date'].strftime('%Y-%m-%d') if pd.notna(row['trade_date']) else None,
                 'ticker': row['ticker'],
-                'stock_name': row.get('종목명', 'N/A'),
+                'stock_name': stock_name,
                 'buy_date': row['buy_date'].strftime('%Y-%m-%d') if pd.notna(row['buy_date']) else None,
                 'sell_date': row['sell_date'].strftime('%Y-%m-%d') if pd.notna(row['sell_date']) and 'sell_date' in row else None,
                 'holding_period': int((row['sell_date'] - row['buy_date']).days) if 'sell_date' in row and pd.notna(row['sell_date']) and pd.notna(row['buy_date']) else None,
@@ -708,6 +714,18 @@ def create_json_report(results, output_path=None):
         'trade_log': trade_log_records
     }
     
+    # JSON 안전 변환 (NaN/Infinity 제거)
+    def _sanitize_json_value(value):
+        if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
+            return None
+        if isinstance(value, dict):
+            return {k: _sanitize_json_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_sanitize_json_value(v) for v in value]
+        return value
+
+    report_data = _sanitize_json_value(report_data)
+
     # JSON 파일로 저장
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(report_data, f, ensure_ascii=False, indent=2)

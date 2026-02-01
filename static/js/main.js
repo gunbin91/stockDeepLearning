@@ -1000,6 +1000,7 @@ $(document).ready(function() {
                                     <table id="backtest_trade_table" class="table table-striped table-hover">
                                         <thead class="table-dark">
                                             <tr>
+                                                <th class="d-none">정렬순번</th>
                                                 <th>거래일</th>
                                                 <th>구분</th>
                                                 <th>종목명</th>
@@ -1045,6 +1046,7 @@ $(document).ready(function() {
                 
                 tradeLogHtml += `
                     <tr>
+                        <td class="d-none">${trade.trade_seq !== null && trade.trade_seq !== undefined ? trade.trade_seq : ''}</td>
                         <td>${trade.trade_date || 'N/A'}</td>
                         <td><span class="badge ${trade.type === 'buy' ? 'bg-primary' : 'bg-success'}">${trade.type === 'buy' ? '매수' : '매도'}</span></td>
                         <td>${trade.stock_name || 'N/A'}</td>
@@ -1091,7 +1093,7 @@ $(document).ready(function() {
             if (!$.fn.DataTable.isDataTable('#backtest_trade_table')) {
                 $('#backtest_trade_table').DataTable({
                     pageLength: 25,
-                    order: [[0, 'desc']], // 최신 거래일 순
+                    order: [[1, 'desc'], [0, 'asc']], // 최신 거래일 + 동일일 순서 보존
                     language: {
                         "lengthMenu": "페이지당 _MENU_ 개씩 보기",
                         "zeroRecords": "데이터가 없습니다",
@@ -1111,25 +1113,26 @@ $(document).ready(function() {
                     responsive: false,  // scrollX와 함께 사용 시 responsive는 false
                     autoWidth: false,
                     columnDefs: [
-                        { width: "100px", targets: 0 },  // 거래일
-                        { width: "80px", targets: 1 },   // 구분
-                        { width: "120px", targets: 2 }, // 종목명
-                        { width: "100px", targets: 3 },  // 종목코드
-                        { width: "100px", targets: 4 },  // 매수일
-                        { width: "100px", targets: 5 },  // 매도일
-                        { width: "80px", targets: 6 },   // 보유기간
-                        { width: "100px", targets: 7 },  // 매수가
-                        { width: "100px", targets: 8 },  // 매도가
-                        { width: "100px", targets: 9 },  // 수익률
-                        { width: "120px", targets: 10 }, // 실현손익
-                        { width: "120px", targets: 11 }, // 누적 실현손익
-                        { width: "120px", targets: 12 }, // 매수금액
-                        { width: "120px", targets: 13 }, // 시가총액
-                        { width: "120px", targets: 14 }, // 총자산
-                        { width: "100px", targets: 15 }, // 최종점수
-                        { width: "100px", targets: 16 }, // RF상승확률
-                        { width: "100px", targets: 17 }, // LGBM상승확률
-                        { width: "100px", targets: 18 }  // 변동성
+                        { targets: 0, visible: false, searchable: false }, // trade_seq (숨김 정렬용)
+                        { width: "100px", targets: 1 },  // 거래일
+                        { width: "80px", targets: 2 },   // 구분
+                        { width: "120px", targets: 3 }, // 종목명
+                        { width: "100px", targets: 4 },  // 종목코드
+                        { width: "100px", targets: 5 },  // 매수일
+                        { width: "100px", targets: 6 },  // 매도일
+                        { width: "80px", targets: 7 },   // 보유기간
+                        { width: "100px", targets: 8 },  // 매수가
+                        { width: "100px", targets: 9 },  // 매도가
+                        { width: "100px", targets: 10 },  // 수익률
+                        { width: "120px", targets: 11 }, // 실현손익
+                        { width: "120px", targets: 12 }, // 누적 실현손익
+                        { width: "120px", targets: 13 }, // 매수금액
+                        { width: "120px", targets: 14 }, // 시가총액
+                        { width: "120px", targets: 15 }, // 총자산
+                        { width: "100px", targets: 16 }, // 최종점수
+                        { width: "100px", targets: 17 }, // RF상승확률
+                        { width: "100px", targets: 18 }, // LGBM상승확률
+                        { width: "100px", targets: 19 }  // 변동성
                     ]
                 });
             }
