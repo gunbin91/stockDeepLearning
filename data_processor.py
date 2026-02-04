@@ -1072,21 +1072,18 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
 
         # =================================================================
         # 랭킹 제외 규칙 (요구사항 반영)
-        # - MA120/MA240의 상호 순서는 무관
-        # - MA5가 MA120, MA240 둘 다 아래에 있고,
-        # - MA5 기울기(각도)가 "하방 5도 이하"인 경우 제외
+        # - MA60이 MA120, MA240 아래에 있고
+        # - 종가가 MA60 아래에 있으면 제외
+        # - 5거래일 평균 거래대금이 2,000,000달러 미만이면 제외
         #
         # 조건:
-        #   (MA120 > MA5) & (MA240 > MA5) & (MA5_Angle_Deg <= 0)
-        #
-        # MA5_Angle_Deg 정의:
-        #   ma5 = SMA(5)
-        #   delta = (ma5_t - ma5_{t-1}) / ma5_{t-1}
-        #   angle_deg = arctan(delta) * 180/pi
-        #   (상승이면 +, 하락이면 -)
+        #   (MA60 < MA120) & (MA60 < MA240) & (Close < MA60)
+        #   OR
+        #   (거래대금_5일_평균 < 2,000,000 USD)
         # =================================================================
         try:
             ma5 = df['종가'].rolling(window=5).mean()
+            ma60_lvl = df['종가'].rolling(window=60).mean()
             ma120_lvl = df['종가'].rolling(window=120).mean()
             ma240_lvl = df['종가'].rolling(window=240).mean()
 
@@ -1094,7 +1091,10 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             delta = (ma5 - ma5_prev) / ma5_prev.replace(0, np.nan)
             df['MA5_Angle_Deg'] = np.degrees(np.arctan(delta.astype(float)))
 
-            df['Exclude_Rank'] = (ma120_lvl > ma5) & (ma240_lvl > ma5) & (df['MA5_Angle_Deg'] <= 0)
+            거래대금_5일_평균 = df['거래대금'].rolling(window=5).mean()
+            exclude_trend = (ma60_lvl < ma120_lvl) & (ma60_lvl < ma240_lvl) & (df['종가'] < ma60_lvl)
+            exclude_liquidity = 거래대금_5일_평균 < 2_000_000
+            df['Exclude_Rank'] = exclude_trend | exclude_liquidity
         except Exception:
             # 계산 실패 시에도 기존 파이프라인은 유지
             df['MA5_Angle_Deg'] = np.nan
