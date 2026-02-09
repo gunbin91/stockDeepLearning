@@ -218,23 +218,19 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
     # Optuna objective 함수 정의 (클로저로 데이터 접근)
     def objective(trial):
         """Optuna objective 함수: 하이퍼파라미터 튜닝을 위한 목적 함수"""
-        # ✅ gpuStock 스타일: 파라미터 범위 확장 및 디테일 강화
-        # 깊이는 10~30, 리프 노드는 31~150까지 확장하여 표현력 강화
-        max_depth = trial.suggest_int('max_depth', 10, 30)
-        num_leaves = trial.suggest_int('num_leaves', 31, 150)
+        # ✅ gpuStock과 동일한 하이퍼파라미터 범위 사용
         
-        # LightGBM 하이퍼파라미터 제안 (주식 예측 최적화)
+        # LightGBM 하이퍼파라미터 제안 (gpuStock scripts/train_lgbm_gpu_main.py 참조)
         model_n_jobs = -1 if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
         params = {
             'objective': 'binary',
             'metric': 'auc',
             'boosting_type': 'gbdt',
-            'num_leaves': num_leaves,
-            'max_depth': max_depth,
-            'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),
+            'num_leaves': trial.suggest_int('num_leaves', 31, 150),  # gpuStock 동일
+            'max_depth': trial.suggest_int('max_depth', 10, 30),  # gpuStock과 동일하게 10~30
+            'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True), # gpuStock 동일
             'n_estimators': 10000,
-            # ✅ 디테일 강화: 50~200 (적은 샘플로도 패턴 형성 허용)
-            'min_child_samples': trial.suggest_int('min_child_samples', 50, 200),
+            'min_child_samples': trial.suggest_int('min_child_samples', 50, 200),  # gpuStock 동일
             'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
             'min_child_weight': trial.suggest_float('min_child_weight', 1e-3, 10.0, log=True),
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
@@ -242,8 +238,9 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
             'subsample_freq': trial.suggest_int('subsample_freq', 1, 7),
             'reg_alpha': trial.suggest_float('reg_alpha', 1e-3, 10.0, log=True),
             'reg_lambda': trial.suggest_float('reg_lambda', 1e-3, 30.0, log=True),
-            # ✅ 언더샘플링을 사용하므로 scale_pos_weight는 1.0으로 고정
+            # ✅ gpuStock 동기화: 1:1 언더샘플링을 하므로 scale_pos_weight는 1.0 고정
             'scale_pos_weight': 1.0,
+            'max_bin': 255, # gpuStock 동일
             'random_state': 42,
             'n_jobs': model_n_jobs,  # LGBM 내부 멀티스레드 사용 (trial 병렬 대신 모델 병렬 권장)
             'verbose': -1  # 로그 출력 억제
@@ -350,78 +347,48 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
         # ===========================
         log_info("   🔧 최적 파라미터로 최종 모델 학습 중... (Train-only 전처리)")
         
-        # gpuStock 방식: 전체 데이터의 마지막 20%를 검증(Valid)용으로 사용하고, 나머지를 학습(Train)용으로 사용
-        # (별도의 Test 셋이 없으므로, 이 Valid 셋이 최종 성능 평가 역할도 겸함)
-        
+        # gpuStock 방식: Expanding fold의 "마지막 fold"를 최종 학습/검증에 사용
+        # (별도의 Test 셋 없음, 마지막 Val이 최종 평가 역할)
         # 인덱스 정합성 확보 (dates와 X/y가 반드시 같은 row 정렬을 공유해야 함)
-        X_train_raw = X_train_raw.reset_index(drop=True)
-        y_train = y_train.reset_index(drop=True)
-        train_dates = pd.to_datetime(train_dates).reset_index(drop=True)
+        X_train_cv = X_train_cv.reset_index(drop=True)
+        y_train_cv = y_train_cv.reset_index(drop=True)
+        train_dates_cv = pd.to_datetime(train_dates_cv).reset_index(drop=True)
 
-        X_train_raw = _sanitize_numeric_frame(X_train_raw)
-        
-        # 전체 데이터 기준 분할 (기본 80:20) + horizon purge(10거래일)로 경계 누수 방지
-        val_size = int(len(X_train_raw) * 0.2)
-        val_start_idx = max(0, len(X_train_raw) - val_size)
-        d_norm = train_dates.dt.normalize()
+        X_train_cv = _sanitize_numeric_frame(X_train_cv)
 
-        # 기본: 마지막 20%를 Val로
-        base_val_start_date = d_norm.iloc[val_start_idx] if len(d_norm) > 0 else None
-        unique_norm_dates = pd.Series(d_norm.dropna().unique()).sort_values().tolist()
+        last_tr_idx, last_va_idx = fold_indices[-1]
+        X_train_fit_raw = X_train_cv.iloc[last_tr_idx][features].copy()
+        X_val_raw = X_train_cv.iloc[last_va_idx][features].copy()
+        y_train_fit = y_train_cv.iloc[last_tr_idx].copy()
+        y_val = y_train_cv.iloc[last_va_idx].copy()
 
-        cutoff_date = None
-        if base_val_start_date is not None and base_val_start_date in unique_norm_dates:
-            try:
-                pos = unique_norm_dates.index(base_val_start_date)
-                cutoff_pos = pos - int(DEFAULT_HORIZON_TRADING_DAYS)
-                if cutoff_pos > 0:
-                    cutoff_date = unique_norm_dates[cutoff_pos]
-            except Exception:
-                cutoff_date = None
-
-        if cutoff_date is not None:
-            # Train: cutoff_date 이전, Val: base_val_start_date 이후
-            train_fit_mask = d_norm < cutoff_date
-            val_mask = d_norm >= base_val_start_date
-            embargo_mask = (d_norm >= cutoff_date) & (d_norm < base_val_start_date)
-
-            X_train_fit_raw = X_train_raw.loc[train_fit_mask].copy()
-            X_val_raw = X_train_raw.loc[val_mask].copy()
-            y_train_fit = y_train.loc[train_fit_mask].copy()
-            y_val = y_train.loc[val_mask].copy()
-
-            if embargo_mask.any():
-                log_info(
-                    f"      🧹 purge 적용: Val 시작({base_val_start_date.date()}) 직전 "
-                    f"{int(DEFAULT_HORIZON_TRADING_DAYS)}거래일 구간 {int(embargo_mask.sum()):,}행 제외"
-                )
-        else:
-            # fallback: purge 불가(기간 부족 등) 시 기존 80:20 유지
-            X_train_fit_raw = X_train_raw.iloc[:-val_size].copy()
-            X_val_raw = X_train_raw.iloc[-val_size:].copy()
-            y_train_fit = y_train.iloc[:-val_size].copy()
-            y_val = y_train.iloc[-val_size:].copy()
-        
-        log_info(f"   ✂️ 최종 학습 데이터 분할 (gpuStock 방식):")
-        log_info(f"      🔸 학습용 (Train): {len(X_train_fit_raw):,}행 (전체의 80%)")
-        log_info(f"      🔸 검증용 (Valid): {len(X_val_raw):,}행 (전체의 20% - Early Stopping 및 최종 평가용)")
+        log_info(f"   ✂️ 최종 학습 데이터 분할 (gpuStock fold 기준):")
+        log_info(f"      🔸 학습용 (Train): {len(X_train_fit_raw):,}행")
+        log_info(f"      🔸 검증용 (Valid): {len(X_val_raw):,}행 (마지막 fold)")
+        try:
+            train_min_date = train_dates_cv.iloc[last_tr_idx].min()
+            train_max_date = train_dates_cv.iloc[last_tr_idx].max()
+            val_min_date = train_dates_cv.iloc[last_va_idx].min()
+            val_max_date = train_dates_cv.iloc[last_va_idx].max()
+            log_info(f"      📅 Train: {train_min_date.date()} ~ {train_max_date.date()}")
+            log_info(f"      📅 Valid: {val_min_date.date()} ~ {val_max_date.date()}")
+        except Exception:
+            pass
 
         # 결측치 대체값은 학습용 데이터(Train)에서만 계산
         imputation_values = compute_imputation_values_train_only(X_train_fit_raw)
         X_train_fit_raw.fillna(imputation_values, inplace=True)
         X_val_raw.fillna(imputation_values, inplace=True)
 
-        # 날짜 기반 분할 검증
-        train_fit_max_date = train_dates.iloc[:-val_size].max()
-        val_min_date = train_dates.iloc[-val_size:].min()
-        if train_fit_max_date >= val_min_date:
-            log_warning(f"   ⚠️ Train/Val 분할 경고: Train 최대 날짜({train_fit_max_date}) >= Val 최소 날짜({val_min_date})")
-        else:
-            log_info(f"   ✅ Train/Val 날짜 분할 확인: Train 최대 날짜 < Val 최소 날짜")
-
-        # 스케일링은 train_fit에서만 fit (val은 transform)
+        # ✅ gpuStock 정합성: 최종 학습 시 '먼저' 1:1 언더샘플링 적용 (Scaling 전)
+        log_info("   ⚖️ '순수 학습용 데이터'에 1:1 언더샘플링 적용 중...")
+        log_info(f"      - 언더샘플링 전: {y_train_fit.value_counts().to_dict()}")
+        X_train_fit_resampled, y_train_fit_resampled = perform_undersampling(X_train_fit_raw, y_train_fit)
+        log_info(f"      - 언더샘플링 후: {y_train_fit_resampled.value_counts().to_dict()}")
+        
+        # 스케일링은 언더샘플링된 train_fit에서만 fit (val은 transform)
         scaler = StandardScaler()
-        X_train_fit_scaled = scaler.fit_transform(X_train_fit_raw)
+        X_train_fit_scaled = scaler.fit_transform(X_train_fit_resampled)
         X_val_scaled = scaler.transform(X_val_raw)
         
         # LightGBM 피처 이름 경고 방지를 위해 pandas DataFrame으로 변환
@@ -433,7 +400,7 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
         y_test = y_val
 
         # 중간 변수 메모리 해제
-        del X_train_fit_raw, X_val_raw, X_train_raw
+        del X_train_fit_raw, X_val_raw, X_train_fit_resampled
         gc.collect()
         log_memory_usage("최종 전처리 완료")
         
@@ -454,22 +421,19 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
             subsample_freq=best_params.get('subsample_freq', 1),
             reg_alpha=best_params['reg_alpha'],
             reg_lambda=best_params['reg_lambda'],
-            scale_pos_weight=1.0,  # 언더샘플링 적용 (1.0 고정)
+            # ✅ scale_pos_weight 1.0 고정 (gpuStock 동일)
+            scale_pos_weight=1.0,
+            max_bin=255, # gpuStock 동일
             random_state=42,
             n_jobs=1,
             verbose=-1
         )
         
-        # ✅ 최종 학습 시에도 1:1 언더샘플링 적용
-        log_info("   ⚖️ '순수 학습용 데이터'에 1:1 언더샘플링 적용 중...")
-        log_info(f"      - 언더샘플링 전: {y_train_fit.value_counts().to_dict()}")
-        X_train_fit_resampled, y_train_fit_resampled = perform_undersampling(X_train_fit_scaled, y_train_fit)
-        log_info(f"      - 언더샘플링 후: {y_train_fit_resampled.value_counts().to_dict()}")
-        log_info(f"   📊 언더샘플링 완료: {len(X_train_fit_scaled):,} -> {len(X_train_fit_resampled):,} 샘플 (최종 학습 데이터)")
+        log_info(f"   📊 최종 학습 데이터 준비 완료: {len(X_train_fit_scaled):,} 샘플")
 
         # Early stopping을 사용하여 학습
         best_model.fit(
-            X_train_fit_resampled, y_train_fit_resampled,
+            X_train_fit_scaled, y_train_fit_resampled,
             eval_set=[(X_val_scaled, y_val)],
             callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
         )
@@ -482,27 +446,27 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
         
         # 더 작은 파라미터 범위로 재시도 (메모리 부족 시)
         def objective_small(trial):
-            # 주식 데이터에 최적화된 파라미터 범위 설정 (축소 버전)
-            max_depth = trial.suggest_int('max_depth', 10, 24)
-            num_leaves = trial.suggest_int('num_leaves', 31, 95)
+            # gpuStock과 동일한 범위(축소 없이) 유지
             
             model_n_jobs = -1 if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
             params = {
                 'objective': 'binary',
                 'metric': 'auc',
                 'boosting_type': 'gbdt',
-                'num_leaves': num_leaves,
-                'max_depth': max_depth,
-                'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.03, log=True),
-                'n_estimators': 4000,  # early stopping으로 제어
-                'min_child_samples': trial.suggest_int('min_child_samples', 50, 200), # 디테일 강화
-                'min_split_gain': trial.suggest_float('min_split_gain', 0.05, 0.5),
-                'subsample': trial.suggest_float('subsample', 0.5, 0.85),
-                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 0.85),
+                'num_leaves': trial.suggest_int('num_leaves', 31, 150),
+                'max_depth': trial.suggest_int('max_depth', 10, 30), # gpuStock과 동일하게 10~30
+                'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),
+                'n_estimators': 10000,  # early stopping으로 제어
+                'min_child_samples': trial.suggest_int('min_child_samples', 50, 200),
+                'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
+                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
                 'subsample_freq': trial.suggest_int('subsample_freq', 1, 7),
-                'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 100.0, log=True),
-                'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 100.0, log=True),
-                'scale_pos_weight': 1.0, # 언더샘플링 고정
+                'reg_alpha': trial.suggest_float('reg_alpha', 1e-3, 10.0, log=True),
+                'reg_lambda': trial.suggest_float('reg_lambda', 1e-3, 30.0, log=True),
+                # ✅ 재시도 시에도 scale_pos_weight 튜닝 적용 해제 (1.0 고정)
+                'scale_pos_weight': 1.0,
+                'max_bin': 255,
                 'random_state': 42,
                 'n_jobs': model_n_jobs,
                 'verbose': -1
@@ -579,29 +543,38 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
         # (재시도 경로에서도) 최종 학습/평가용 Train-only 전처리
         log_info("   🔧 재시도 경로: Train-only 전처리 적용 중...")
         
-        # gpuStock 방식: 전체 데이터의 마지막 20%를 검증(Valid)용으로 사용
-        X_train_raw = _sanitize_numeric_frame(X_train_raw)
-        
-        val_size = int(len(X_train_raw) * 0.2)
-        X_train_fit_raw = X_train_raw.iloc[:-val_size].copy()
-        X_val_raw = X_train_raw.iloc[-val_size:].copy()
-        y_train_fit = y_train.iloc[:-val_size].copy()
-        y_val = y_train.iloc[-val_size:].copy()
+        # gpuStock 방식: Expanding fold의 마지막 fold를 최종 학습/검증에 사용
+        X_train_cv = _sanitize_numeric_frame(X_train_cv)
+
+        last_tr_idx, last_va_idx = fold_indices[-1]
+        X_train_fit_raw = X_train_cv.iloc[last_tr_idx][features].copy()
+        X_val_raw = X_train_cv.iloc[last_va_idx][features].copy()
+        y_train_fit = y_train_cv.iloc[last_tr_idx].copy()
+        y_val = y_train_cv.iloc[last_va_idx].copy()
 
         # 결측치 대체값은 학습용 데이터(Train)에서만 계산
         imputation_values = compute_imputation_values_train_only(X_train_fit_raw)
         X_train_fit_raw.fillna(imputation_values, inplace=True)
         X_val_raw.fillna(imputation_values, inplace=True)
 
-        train_fit_max_date = train_dates.iloc[:-val_size].max()
-        val_min_date = train_dates.iloc[-val_size:].min()
-        if train_fit_max_date >= val_min_date:
-            log_warning(f"   ⚠️ Train/Val 분할 경고: Train 최대 날짜({train_fit_max_date}) >= Val 최소 날짜({val_min_date})")
-        else:
-            log_info(f"   ✅ Train/Val 날짜 분할 확인: Train 최대 날짜 < Val 최소 날짜")
+        try:
+            train_fit_max_date = train_dates_cv.iloc[last_tr_idx].max()
+            val_min_date = train_dates_cv.iloc[last_va_idx].min()
+            if train_fit_max_date >= val_min_date:
+                log_warning(f"   ⚠️ Train/Val 분할 경고: Train 최대 날짜({train_fit_max_date}) >= Val 최소 날짜({val_min_date})")
+            else:
+                log_info(f"   ✅ Train/Val 날짜 분할 확인: Train 최대 날짜 < Val 최소 날짜")
+        except Exception:
+            pass
+
+        # ✅ gpuStock 정합성 (재시도): 최종 학습 시 '먼저' 1:1 언더샘플링 적용
+        log_info("   ⚖️ (재시도) 최종 학습 데이터에 1:1 언더샘플링 적용 중...")
+        log_info(f"      - 언더샘플링 전: {y_train_fit.value_counts().to_dict()}")
+        X_train_fit_resampled, y_train_fit_resampled = perform_undersampling(X_train_fit_raw, y_train_fit)
+        log_info(f"      - 언더샘플링 후: {y_train_fit_resampled.value_counts().to_dict()}")
 
         scaler = StandardScaler()
-        X_train_fit_scaled = scaler.fit_transform(X_train_fit_raw)
+        X_train_fit_scaled = scaler.fit_transform(X_train_fit_resampled)
         X_val_scaled = scaler.transform(X_val_raw)
         
         X_train_fit_scaled = pd.DataFrame(X_train_fit_scaled, columns=features)
@@ -611,7 +584,7 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
         X_test_scaled = X_val_scaled 
         y_test = y_val
 
-        del X_train_fit_raw, X_val_raw, X_train_raw
+        del X_train_fit_raw, X_val_raw, X_train_fit_resampled
         gc.collect()
         
         # n_estimators를 충분히 크게 설정하고 early stopping 사용
@@ -630,22 +603,19 @@ def train_evaluate_and_save_lgb_model(X, y, features, imputation_values, dates, 
             subsample_freq=best_params.get('subsample_freq', 1),
             reg_alpha=best_params['reg_alpha'],
             reg_lambda=best_params['reg_lambda'],
-            scale_pos_weight=1.0,  # 언더샘플링 적용 (1.0 고정)
+            # ✅ scale_pos_weight 1.0 고정
+            scale_pos_weight=1.0,
+            max_bin=255,
             random_state=42,
             n_jobs=1,
             verbose=-1
         )
         
-        # ✅ 최종 학습 시에도 1:1 언더샘플링 적용
-        log_info("   ⚖️ (재시도) 최종 학습 데이터에 1:1 언더샘플링 적용 중...")
-        log_info(f"      - 언더샘플링 전: {y_train_fit.value_counts().to_dict()}")
-        X_train_fit_resampled, y_train_fit_resampled = perform_undersampling(X_train_fit_scaled, y_train_fit)
-        log_info(f"      - 언더샘플링 후: {y_train_fit_resampled.value_counts().to_dict()}")
-        log_info(f"   📊 언더샘플링 완료: {len(X_train_fit_scaled):,} -> {len(X_train_fit_resampled):,} 샘플 (정상)")
+        log_info(f"   📊 (재시도) 최종 학습 데이터 준비 완료: {len(X_train_fit_scaled):,} 샘플")
 
         # Early stopping을 사용하여 학습
         best_model.fit(
-            X_train_fit_resampled, y_train_fit_resampled,
+            X_train_fit_scaled, y_train_fit_resampled,
             eval_set=[(X_val_scaled, y_val)],
             callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
         )
@@ -827,34 +797,14 @@ def main():
     parser.add_argument('--years', type=int, default=None, help='학습에 사용할 최근 N년치 데이터 (None이면 전체 데이터, 파일이 없을 때만 적용)')
     args = parser.parse_args()
     
-    # gpuStock LGBM 기준 25개 피처 리스트 (원복)
+    # gpuStock LGBM 기준 25개 피처 리스트 (완벽 동기화)
     gpu_stock_features = [
-        'log_mktcap',
-        '52주_신고가_비율',
-        'ADX_14',
-        'disparity_120',
-        'disparity_240',
-        'disparity_20',
-        'KOSPI_disparity_20',
-        'Trend_Pullback_Score',
-        'Position_Range_60',
-        'MA5_Angle_Deg',
-        'MA20_Slope',
-        'MA120_Slope',
-        'MA240_Slope',
-        'KOSPI_MA20_Slope',
-        'RVOL',
-        '시총 회전율(1W)',
-        '시총 회전율(3M)',
-        'RSI_Signal_Oscillator',
-        'ATRr_5',
-        'ATRr_20',
-        'ATRr_60',
-        'HV_Volatility_5',
-        'HV_Volatility_20',
-        'HV_Volatility_60',
-        'VWAP_Disparity_5',
-        'Max_Drawdown_20',
+        'log_mktcap', '52주_신고가_비율', 'ADX_14', 'disparity_120', 'disparity_240',
+        'disparity_20', 'KOSPI_disparity_20', 'Trend_Pullback_Score', 'Position_Range_60',
+        'MA20_Slope', 'MA120_Slope', 'MA240_Slope', 'KOSPI_MA20_Slope', 'RVOL',
+        '시총 회전율(1W)', '시총 회전율(3M)', 'RSI_Signal_Oscillator', 'ATRr_5',
+        'ATRr_20', 'ATRr_60', 'HV_Volatility_5', 'HV_Volatility_20',
+        'HV_Volatility_60', 'VWAP_Disparity_5', 'Max_Drawdown_20'
     ]
     
     # ==============================================================================

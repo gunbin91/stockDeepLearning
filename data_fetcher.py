@@ -478,16 +478,19 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             latest_data['MA5_Angle_Deg'] = np.nan
 
         # 실시간 분석/웹/랭킹 제외 플래그 (일자별로 동적 평가)
-        # - 조건: MA5 < MA120 AND MA5 < MA240 (120/240의 대소관계는 보지 않음)
-        # - 그리고 MA5_Angle_Deg <= 10
+        # - 조건: MA60 < MA120 AND MA60 < MA240 AND 종가 < MA60
         try:
+            ma60_lvl = df_for_indicators['종가'].rolling(window=60).mean()
             ma120_lvl = df_for_indicators['종가'].rolling(window=120).mean()
             ma240_lvl = df_for_indicators['종가'].rolling(window=240).mean()
-            if len(ma120_lvl) and len(ma240_lvl) and len(ma5):
+            if len(ma60_lvl) and len(ma120_lvl) and len(ma240_lvl):
+                close_last = df_for_indicators['종가'].iloc[-1]
                 latest_data['Exclude_Rank'] = bool(
-                    (ma5.iloc[-1] < ma120_lvl.iloc[-1])
-                    and (ma5.iloc[-1] < ma240_lvl.iloc[-1])
-                    and (pd.notna(latest_data.get('MA5_Angle_Deg', np.nan)) and latest_data['MA5_Angle_Deg'] <= 10)
+                    pd.notna(ma60_lvl.iloc[-1]) and pd.notna(ma120_lvl.iloc[-1]) and pd.notna(ma240_lvl.iloc[-1])
+                    and pd.notna(close_last)
+                    and (ma60_lvl.iloc[-1] < ma120_lvl.iloc[-1])
+                    and (ma60_lvl.iloc[-1] < ma240_lvl.iloc[-1])
+                    and (close_last < ma60_lvl.iloc[-1])
                 )
             else:
                 latest_data['Exclude_Rank'] = False

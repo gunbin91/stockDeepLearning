@@ -58,6 +58,47 @@ from logger import log_info, log_warning, log_error
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 
+def perform_undersampling(X, y, random_state=42):
+    """
+    1:1 언더샘플링 수행 함수
+    다수 클래스(0)를 소수 클래스(1)의 개수만큼 무작위로 줄여서 1:1 비율을 맞춥니다.
+    """
+    try:
+        if not isinstance(y, pd.Series):
+            y = pd.Series(y)
+        if isinstance(X, pd.DataFrame):
+            X = X.reset_index(drop=True)
+        y = y.reset_index(drop=True)
+
+        value_counts = y.value_counts()
+        if len(value_counts) < 2:
+            return X, y
+
+        minority_class = value_counts.idxmin()
+        majority_class = value_counts.idxmax()
+        n_minority = value_counts[minority_class]
+        n_majority = value_counts[majority_class]
+
+        if n_majority > n_minority:
+            indices = np.arange(len(y))
+            minority_indices = indices[y == minority_class]
+            majority_indices = indices[y == majority_class]
+
+            rng = np.random.RandomState(random_state)
+            rng.shuffle(majority_indices)
+            selected_majority_indices = majority_indices[:n_minority]
+
+            balanced_indices = np.concatenate([minority_indices, selected_majority_indices])
+            balanced_indices.sort()
+
+            X_resampled = X.iloc[balanced_indices].reset_index(drop=True)
+            y_resampled = y.iloc[balanced_indices].reset_index(drop=True)
+            return X_resampled, y_resampled
+
+        return X, y
+    except Exception as e:
+        log_warning(f"언더샘플링 중 오류 발생 (건너뜀): {e}")
+        return X, y
 # ============================================================
 # Horizon / Purge(embargo) 설정
 # - 본 프로젝트의 타겟은 "향후 10거래일"을 참조하여 생성됩니다.
@@ -750,8 +791,8 @@ def create_training_data(years=None):
     features = get_training_features()
     # 추가 피처(로컬 확장): 제외 조건에서 사용한 MA5 각도를 학습 피처로도 포함
     # - gpuStock 자동 동기화 리스트는 유지하되, 로컬 프로젝트에서만 덧붙입니다.
-    if 'MA5_Angle_Deg' not in features:
-        features = features + ['MA5_Angle_Deg']
+    # if 'MA5_Angle_Deg' not in features:
+    #     features = features + ['MA5_Angle_Deg']
     target = 'target'
 
     # ======================================================================
@@ -760,18 +801,17 @@ def create_training_data(years=None):
     #   메타파일로 변경을 감지해 자동 재생성합니다.
     # ======================================================================
     TARGET_SPEC = {
-        "name": "10d_drawdown_floor_-5pct_and_any_hit_+8pct__exclude_low_ma5_under_ma120_ma240_and_low_ma5_angle",
+        "name": "10d_drawdown_floor_-5pct_and_any_hit_+8pct__exclude_low_ma60_under_ma120_ma240_and_close_below_ma60",
         "horizon_trading_days": 10,
         "min_ratio_floor": 0.95,  # future_min / now >= 0.95
         "max_ratio_hit": 1.08,    # future_max / now >= 1.08
         "notes": "향후 10거래일 동안 -5% 이상 하락 없이, +8% 이상 상승 1회라도",
-        "exclude_rule": {
-            "type": "drop_samples_by_setting_target_nan",
-            "bearish_alignment": "MA5 < MA120 AND MA5 < MA240",
-            "ma5_angle_definition": "angle_deg = atan(((MA5_t - MA5_{t-1}) / MA5_{t-1})) * 180/pi",
-            "ma5_angle_deg_threshold_inclusive": 10,
-        },
-    }
+                    "exclude_condition": {
+                        "ma60_under_ma120": True,
+                        "ma60_under_ma240": True,
+                        "close_below_ma60": True,
+                        "exclude_logic": "(MA60 < MA120) AND (MA60 < MA240) AND (Close < MA60)"
+                    },    }
     training_meta_path = training_data_path.with_suffix('.meta.json')
     
     # 학습 데이터 파일이 있는지 확인
@@ -823,13 +863,13 @@ def create_training_data(years=None):
         if years is None:
             log_info("🚀 전체 기간 데이터 수집을 통해 학습 데이터 생성을 시작합니다...")
             start_date_for_cacher = '2015-01-01'
-            # 오늘 기준 2개월 전까지만 수집 (학습 데이터는 최신 데이터 제외)
-            end_date_for_cacher = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
-            log_info(f"   📅 수집 기간: {start_date_for_cacher} ~ {end_date_for_cacher} (오늘 기준 2개월 전까지)")
+            # 오늘 기준 3개월 전까지만 수집 (gpuStock과 동일)
+            end_date_for_cacher = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+            log_info(f"   📅 수집 기간: {start_date_for_cacher} ~ {end_date_for_cacher} (오늘 기준 3개월 전까지)")
         else:
             # 최근 N년치 데이터 수집
-            # 오늘 기준 2개월 전까지만 수집 (학습 데이터는 최신 데이터 제외)
-            end_date = datetime.now() - timedelta(days=60)  # 오늘 기준 2개월 전
+            # 오늘 기준 3개월 전까지만 수집 (gpuStock과 동일)
+            end_date = datetime.now() - timedelta(days=90)  # 오늘 기준 3개월 전
             start_date = end_date - timedelta(days=years * 365)
             start_date_for_cacher = start_date.strftime('%Y-%m-%d')
             end_date_for_cacher = end_date.strftime('%Y-%m-%d')
@@ -859,7 +899,7 @@ def create_training_data(years=None):
         
         if final_df is None or final_df.empty:
             log_error("데이터를 가져오는 데 실패했습니다.")
-            return None, None, None, None
+            return None, None, None, None, None
         
         # 저장할 컬럼: features + target + date, 종목코드 (메타데이터)
         save_columns = features + [target]
@@ -984,47 +1024,67 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, dates, n_jo
     log_info("🤖 모델 학습 및 평가를 시작합니다...")
     log_memory_usage("모델 학습 시작")
     
-    # 날짜 기반 데이터 분할 (미래 데이터 참조 방지)
-    log_info("   📊 날짜 기반 학습/테스트 데이터 분할 중...")
-    X_train, X_test, y_train, y_test, train_dates, test_dates = split_by_date(
-        X, y, dates,
-        test_size=0.3,
-        purge_trading_days=DEFAULT_HORIZON_TRADING_DAYS
-    )
-    log_memory_usage("데이터 분할 완료")
+    # gpuStock 방식: 전체 데이터를 학습/검증 fold로 사용
+    log_info("   📊 전체 데이터를 학습/검증용으로 사용합니다 (gpuStock 방식)")
+    X_train = X
+    y_train = y
+    train_dates = dates
+    log_info(f"      🔸 전체 학습 데이터: {len(X_train):,}행 ({train_dates.min().date()} ~ {train_dates.max().date()})")
+    log_memory_usage("데이터 준비 완료")
     check_memory_and_cleanup()
 
     # Optuna 튜닝은 "raw train" 기준으로 시간 기반 CV를 수행해야 함
     # (스케일러/중앙값을 train 전체에 미리 fit하면 CV 단계에서 누수가 발생할 수 있음)
     X_train_raw = X_train.copy()
-    X_test_raw = X_test.copy()
 
     # ======================================================================
     # ✅ Trial마다 반복되는 공통 작업 캐싱 (gpuStock 스타일)
     # - Expanding CV fold 인덱스 생성 (1회)
     # - Fold별 Train-only 중앙값(imputation) 계산 (1회)
-    # - CV에서 스케일링 제거 (RandomForest는 트리 모델이라 불필요)
     # ======================================================================
     log_info("   🧠 [CACHE] 시간 기반 Expanding CV fold/결측치 대체값을 미리 계산합니다...")
     train_dates_cv = pd.to_datetime(train_dates).reset_index(drop=True)
     y_train_cv = y_train.reset_index(drop=True)
     X_train_cv = X_train_raw.reset_index(drop=True)
 
-    fold_indices = expanding_time_series_folds(
+    fold_indices = expanding_time_series_folds_gpustock(
         train_dates_cv,
-        n_splits=3,
+        warmup_days=250,
+        val_period_days=365,
+        n_folds=3,
         purge_trading_days=DEFAULT_HORIZON_TRADING_DAYS
     )
     if not fold_indices:
         log_warning("   ⚠️ Expanding CV fold 생성 실패(데이터 기간 부족). Optuna 튜닝을 중단합니다.")
         return
 
-    cv_cache = []
+    fold_data_cache = []
     for (tr_idx, va_idx) in fold_indices:
-        X_tr_base = X_train_cv.iloc[tr_idx][features]
-        imp = compute_imputation_values_train_only(X_tr_base)
-        cv_cache.append((tr_idx, va_idx, imp))
-    log_info(f"   ✅ [CACHE] fold 캐시 준비 완료: {len(cv_cache)}개 fold")
+        X_tr = X_train_cv.iloc[tr_idx][features].copy()
+        y_tr = y_train_cv.iloc[tr_idx].copy()
+        X_va = X_train_cv.iloc[va_idx][features].copy()
+        y_va = y_train_cv.iloc[va_idx].copy()
+
+        X_tr = _sanitize_numeric_frame(X_tr)
+        X_va = _sanitize_numeric_frame(X_va)
+        imp = compute_imputation_values_train_only(X_tr)
+        X_tr.fillna(imp, inplace=True)
+        X_va.fillna(imp, inplace=True)
+
+        fold_data_cache.append((X_tr, y_tr, X_va, y_va, imp))
+
+    log_info(f"   ✅ [CACHE] fold 캐시 준비 완료: {len(fold_data_cache)}개 fold")
+
+    # --- Trial 전 언더샘플링 적용 (모든 fold의 train 데이터에 적용) ---
+    log_info("\n--- 🔄 Trial 전 언더샘플링 적용 중 (1:1 비율) ---")
+    for idx in range(len(fold_data_cache)):
+        X_tr, y_tr, X_va, y_va, imp = fold_data_cache[idx]
+        if len(pd.Series(y_tr).value_counts()) < 2:
+            log_warning(f"   ⚠️ Fold #{idx+1}에 클래스가 1개만 있어 샘플링을 건너뜁니다.")
+            continue
+
+        X_tr_resampled, y_tr_resampled = perform_undersampling(X_tr, y_tr, random_state=42 + idx * 1000)
+        fold_data_cache[idx] = (X_tr_resampled, y_tr_resampled, X_va, y_va, imp)
 
     log_info("\n학습 데이터 타겟 분포:\n" + str(y_train.value_counts(normalize=True)))
 
@@ -1036,43 +1096,45 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, dates, n_jo
     # Optuna objective 함수 정의 (클로저로 데이터 접근)
     def objective(trial):
         """Optuna objective 함수: 하이퍼파라미터 튜닝을 위한 목적 함수"""
-        # 하이퍼파라미터 제안
+        # 하이퍼파라미터 제안 (gpuStock 범위 정합)
         model_n_jobs = -1 if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
+        split_criterion = trial.suggest_categorical('split_criterion', [0, 1])
+        criterion = 'gini' if split_criterion == 0 else 'entropy'
         params = {
-            'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+            'n_estimators': trial.suggest_int('n_estimators', 200, 500),
             'max_depth': trial.suggest_categorical('max_depth', max_depth_list),
-            'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
-            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 20),
-            'max_samples': trial.suggest_categorical('max_samples', [0.7, 0.8, 0.9, None]),
-            'max_features': trial.suggest_float('max_features', 0.4, 1.0),  # 피처 선택 비율 최적화
+            'min_samples_split': trial.suggest_int('min_samples_split', 5, 50),
+            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 2, 50),
+            'max_samples': trial.suggest_categorical('max_samples', [0.7, 0.8, 0.9, 1.0]),
+            'max_features': trial.suggest_categorical('max_features', [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
+            'criterion': criterion,
             'random_state': 42,
-            'class_weight': 'balanced',
-            'oob_score': False,  # OOB 점수 비활성화로 메모리 절약
-            'n_jobs': model_n_jobs,  # RF 내부 멀티스레드 사용 (trial 병렬 대신 모델 병렬 권장)
-            'warm_start': False,  # 메모리 절약
+            'oob_score': False,
+            'n_jobs': model_n_jobs,
+            'warm_start': False,
             'bootstrap': True
         }
 
-        # 시간 기반 Expanding CV 수행 (누수 방지 + 캐시 재사용 + 스케일링 제거)
+        # 시간 기반 Expanding CV 수행 (누수 방지 + 캐시 재사용)
         scores = []
         try:
-            for (tr_idx, va_idx, imp) in cv_cache:
-                X_tr = X_train_cv.iloc[tr_idx][features].copy()
-                y_tr_fold = y_train_cv.iloc[tr_idx].copy()
-                X_va = X_train_cv.iloc[va_idx][features].copy()
-                y_va_fold = y_train_cv.iloc[va_idx].copy()
+            for fold_idx, (X_tr, y_tr_fold, X_va, y_va_fold, _) in enumerate(fold_data_cache):
+                if len(np.unique(y_va_fold)) < 2:
+                    log_warning(f"   ⚠️ Fold #{fold_idx+1} 검증 데이터에 단일 클래스만 있어 건너뜁니다.")
+                    continue
 
-                X_tr = _sanitize_numeric_frame(X_tr)
-                X_va = _sanitize_numeric_frame(X_va)
-                X_tr.fillna(imp, inplace=True)
-                X_va.fillna(imp, inplace=True)
+                scaler = StandardScaler()
+                X_tr_s = scaler.fit_transform(X_tr)
+                X_va_s = scaler.transform(X_va)
+                X_tr_s = pd.DataFrame(X_tr_s, columns=features)
+                X_va_s = pd.DataFrame(X_va_s, columns=features)
 
                 model = RandomForestClassifier(**params)
-                model.fit(X_tr, y_tr_fold)
-                y_va_proba = model.predict_proba(X_va)[:, 1]
+                model.fit(X_tr_s, y_tr_fold)
+                y_va_proba = model.predict_proba(X_va_s)[:, 1]
                 scores.append(roc_auc_score(y_va_fold, y_va_proba))
 
-                del model, X_tr, X_va, y_tr_fold, y_va_fold, y_va_proba
+                del model, X_tr_s, X_va_s, y_tr_fold, y_va_fold, y_va_proba, scaler
                 gc.collect()
 
             return float(np.mean(scores)) if scores else 0.0
@@ -1124,15 +1186,17 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, dates, n_jo
         # 더 작은 파라미터 범위로 재시도
         def objective_small(trial):
             model_n_jobs = -1 if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
+            split_criterion = trial.suggest_categorical('split_criterion', [0, 1])
+            criterion = 'gini' if split_criterion == 0 else 'entropy'
             params = {
-                'n_estimators': trial.suggest_int('n_estimators', 50, 200),
-                'max_depth': trial.suggest_categorical('max_depth', max_depth_list[:2]),
-                'min_samples_split': trial.suggest_int('min_samples_split', 2, 10),
-                'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
-                'max_samples': trial.suggest_categorical('max_samples', [0.8, 0.9]),
-                'max_features': trial.suggest_float('max_features', 0.4, 1.0),  # 피처 선택 비율 최적화
+                'n_estimators': trial.suggest_int('n_estimators', 200, 500),
+                'max_depth': trial.suggest_categorical('max_depth', max_depth_list),
+                'min_samples_split': trial.suggest_int('min_samples_split', 5, 50),
+                'min_samples_leaf': trial.suggest_int('min_samples_leaf', 2, 50),
+                'max_samples': trial.suggest_categorical('max_samples', [0.7, 0.8, 0.9, 1.0]),
+                'max_features': trial.suggest_categorical('max_features', [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
+                'criterion': criterion,
                 'random_state': 42,
-                'class_weight': 'balanced',
                 'oob_score': False,
                 'n_jobs': model_n_jobs,
                 'warm_start': False,
@@ -1140,22 +1204,22 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, dates, n_jo
             }
             try:
                 scores = []
-                for (tr_idx, va_idx, imp) in cv_cache:
-                    X_tr = X_train_cv.iloc[tr_idx][features].copy()
-                    y_tr_fold = y_train_cv.iloc[tr_idx].copy()
-                    X_va = X_train_cv.iloc[va_idx][features].copy()
-                    y_va_fold = y_train_cv.iloc[va_idx].copy()
+                for fold_idx, (X_tr, y_tr_fold, X_va, y_va_fold, _) in enumerate(fold_data_cache):
+                    if len(np.unique(y_va_fold)) < 2:
+                        log_warning(f"   ⚠️ Fold #{fold_idx+1} 검증 데이터에 단일 클래스만 있어 건너뜁니다.")
+                        continue
 
-                    X_tr = _sanitize_numeric_frame(X_tr)
-                    X_va = _sanitize_numeric_frame(X_va)
-                    X_tr.fillna(imp, inplace=True)
-                    X_va.fillna(imp, inplace=True)
+                    scaler = StandardScaler()
+                    X_tr_s = scaler.fit_transform(X_tr)
+                    X_va_s = scaler.transform(X_va)
+                    X_tr_s = pd.DataFrame(X_tr_s, columns=features)
+                    X_va_s = pd.DataFrame(X_va_s, columns=features)
 
                     model = RandomForestClassifier(**params)
-                    model.fit(X_tr, y_tr_fold)
-                    y_va_proba = model.predict_proba(X_va)[:, 1]
+                    model.fit(X_tr_s, y_tr_fold)
+                    y_va_proba = model.predict_proba(X_va_s)[:, 1]
                     scores.append(roc_auc_score(y_va_fold, y_va_proba))
-                    del model, X_tr, X_va, y_tr_fold, y_va_fold, y_va_proba
+                    del model, X_tr_s, X_va_s, y_tr_fold, y_va_fold, y_va_proba, scaler
                     gc.collect()
                 return float(np.mean(scores)) if scores else 0.0
             except Exception as e:
@@ -1191,25 +1255,33 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, dates, n_jo
         raise RuntimeError("최적 파라미터를 생성할 수 없습니다.")
     
     # ===========================
-    # 최종 학습/평가용 전처리 (Train-only)
+    # 최종 학습/평가용 전처리 (gpuStock 방식)
+    # - 전체 데이터 사용
+    # - 전체 데이터 중앙값으로 결측치 대체값 계산
+    # - 1:1 언더샘플링 후 스케일링
     # ===========================
-    log_info("\n   🔧 최종 학습/평가용 Train-only 결측치 대체 및 스케일링 적용 중...")
-    X_train_raw = _sanitize_numeric_frame(X_train_raw)
-    X_test_raw = _sanitize_numeric_frame(X_test_raw)
-    imputation_values = compute_imputation_values_train_only(X_train_raw)
-    X_train_raw.fillna(imputation_values, inplace=True)
-    X_test_raw.fillna(imputation_values, inplace=True)
+    log_info("\n   🔧 최종 학습/평가용 전처리 (전체 데이터 기준) 진행 중...")
+    X_all = _sanitize_numeric_frame(X_train_cv[features].copy())
+    y_all = y_train_cv.copy()
+
+    imputation_values = compute_imputation_values_train_only(X_all)
+    X_all.fillna(imputation_values, inplace=True)
+
+    # 최종 학습 전 1:1 언더샘플링
+    X_all_resampled, y_all_resampled = perform_undersampling(X_all, y_all, random_state=42)
+    del X_all, y_all
+    gc.collect()
 
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train_raw)
-    X_test_scaled = scaler.transform(X_test_raw)
-    del X_train_raw, X_test_raw
-    gc.collect()
+    X_all_scaled = scaler.fit_transform(X_all_resampled)
+    X_all_scaled = pd.DataFrame(X_all_scaled, columns=features)
     log_memory_usage("최종 전처리 완료")
 
     # 최종 모델 학습 (전처리 완료 후)
     log_info("   🔧 최적 파라미터로 최종 모델 학습 중...")
     model_n_jobs = -1 if n_jobs == -1 else (1 if n_jobs <= 0 else n_jobs)
+    best_split_criterion = best_params.get('split_criterion', 0)
+    best_criterion = 'gini' if best_split_criterion == 0 else 'entropy'
     best_model = RandomForestClassifier(
         n_estimators=best_params['n_estimators'],
         max_depth=best_params['max_depth'],
@@ -1217,14 +1289,14 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, dates, n_jo
         min_samples_leaf=best_params['min_samples_leaf'],
         max_samples=best_params.get('max_samples', None),
         max_features=best_params['max_features'],
+        criterion=best_criterion,
         random_state=42,
-        class_weight='balanced',
         oob_score=False,
         n_jobs=model_n_jobs,
         warm_start=False,
         bootstrap=True
     )
-    best_model.fit(X_train_scaled, y_train)
+    best_model.fit(X_all_scaled, y_all_resampled)
     log_memory_usage("최적 모델 학습 완료")
 
     log_info("\n--- 최적 파라미터 탐색 결과 ---")
@@ -1233,25 +1305,35 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, dates, n_jo
     
     # OOB 점수는 비활성화되어 있으므로 로그 제거
 
-    log_info("📊 최적 모델로 테스트 데이터 평가 중...")
+    log_info("📊 최적 모델로 마지막 Fold 검증 데이터 평가 중...")
     log_memory_usage("모델 평가 시작")
-    
+
     try:
-        y_pred = best_model.predict(X_test_scaled)
-        y_pred_proba = best_model.predict_proba(X_test_scaled)[:, 1]
+        last_tr_idx, last_va_idx = fold_indices[-1]
+        X_val_eval = _sanitize_numeric_frame(X_train_cv.iloc[last_va_idx][features].copy())
+        y_val_eval = y_train_cv.iloc[last_va_idx].copy()
+        X_val_eval.fillna(imputation_values, inplace=True)
+        X_val_eval_scaled = scaler.transform(X_val_eval)
+        X_val_eval_scaled = pd.DataFrame(X_val_eval_scaled, columns=features)
+
+        y_pred = best_model.predict(X_val_eval_scaled)
+        y_pred_proba = best_model.predict_proba(X_val_eval_scaled)[:, 1]
         log_memory_usage("모델 예측 완료")
     except MemoryError as e:
         log_error(f"모델 예측 중 메모리 부족: {e}")
         log_info("   🔄 메모리 정리 후 재시도합니다...")
         safe_memory_cleanup()
-        y_pred = best_model.predict(X_test_scaled)
-        y_pred_proba = best_model.predict_proba(X_test_scaled)[:, 1]
+        y_pred = best_model.predict(X_val_eval_scaled)
+        y_pred_proba = best_model.predict_proba(X_val_eval_scaled)[:, 1]
         log_memory_usage("재시도 후 모델 예측 완료")
 
     log_info("\n--- 최종 모델 평가 결과 ---")
-    log_info(f"ROC-AUC: {roc_auc_score(y_test, y_pred_proba):.4f}")
+    if len(np.unique(y_val_eval)) < 2:
+        log_warning("검증 데이터에 단일 클래스만 있어 ROC-AUC를 계산할 수 없습니다.")
+    else:
+        log_info(f"ROC-AUC: {roc_auc_score(y_val_eval, y_pred_proba):.4f}")
     log_info("\n분류 보고서 (Classification Report):")
-    log_info(classification_report(y_test, y_pred, target_names=['하락(0)', '상승(1)']))
+    log_info(classification_report(y_val_eval, y_pred, target_names=['하락(0)', '상승(1)']))
 
     # 피처 중요도 계산 (3가지 방식)
     log_info("\n📊 피처 중요도 계산 중...")
@@ -1262,21 +1344,21 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, dates, n_jo
     log_info("   ✅ 기본 피처 중요도 계산 완료")
     
     # 2. SHAP 중요도 계산 (1000건 계층적 샘플링)
-    # X_train_scaled와 y_train은 함수 내부에서 유지되고 있음
+    # 전체 학습 데이터 기준 SHAP 중요도 계산
     shap_importance = calculate_shap_importance(
-        best_model, 
-        X_train_scaled, 
-        y_train, 
-        features, 
+        best_model,
+        X_all_scaled,
+        y_all_resampled,
+        features,
         sample_size=1000
     )
     
-    # 3. Permutation Importance 계산 (테스트 데이터 사용)
+    # 3. Permutation Importance 계산 (마지막 Fold 검증 데이터 사용)
     perm_importance = calculate_permutation_importance(
-        best_model, 
-        X_test_scaled, 
-        y_test, 
-        features, 
+        best_model,
+        X_val_eval_scaled,
+        y_val_eval,
+        features,
         n_repeats=5
     )
     
@@ -1289,7 +1371,6 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, dates, n_jo
         'n_jobs': n_jobs,
         'max_depth_candidates': max_depth_list,
         'cv_folds': 3,
-        'test_size': 0.3,
         'scoring': 'roc_auc',
         'search_method': 'Optuna'
     }
@@ -1302,13 +1383,13 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, dates, n_jo
     }
     
     parameter_explanations = {
-        'n_estimators': 'RandomForest가 만들 트리의 개수 (100-500)',
+        'n_estimators': 'RandomForest가 만들 트리의 개수 (200-500)',
         'max_depth': '각 트리의 최대 깊이 (과적합 방지)',
-        'min_samples_split': '노드 분할에 필요한 최소 샘플 수',
-        'min_samples_leaf': '리프 노드의 최소 샘플 수',
-        'max_samples': '각 트리가 사용할 샘플 비율',
+        'min_samples_split': '노드 분할에 필요한 최소 샘플 수 (5-50)',
+        'min_samples_leaf': '리프 노드의 최소 샘플 수 (2-50)',
+        'max_samples': '각 트리가 사용할 샘플 비율 (0.7/0.8/0.9/1.0)',
         'max_features': '각 분할에서 고려할 최대 피처 비율 (0.4~1.0)',
-        'class_weight': '클래스 불균형 처리 방법'
+        'split_criterion': '분할 기준 (0: gini, 1: entropy)'
     }
     
     # 피처 중요도 구조 생성 (3가지 방식)
@@ -1361,8 +1442,8 @@ def train_evaluate_and_save_model(X, y, features, imputation_values, dates, n_jo
 def main():
     parser = argparse.ArgumentParser(description="RandomForest 모델 학습 및 하이퍼파라미터 튜닝")
     parser.add_argument('--n_jobs', type=int, default=-1, help='사용할 CPU 코어 수 (-1은 모든 코어 사용)')
-    parser.add_argument('--n_iter', type=int, default=10, help='Optuna 최적화 시도 횟수 (trials)')
-    parser.add_argument('--max_depth', type=int, nargs='+', default=[10, 20, 30], help='max_depth 후보 리스트')
+    parser.add_argument('--n_iter', type=int, default=100, help='Optuna 최적화 시도 횟수 (trials)')
+    parser.add_argument('--max_depth', type=int, nargs='+', default=[10, 15, 20, 25, 30], help='max_depth 후보 리스트')
     parser.add_argument('--years', type=int, default=None, help='학습에 사용할 최근 N년치 데이터 (None이면 전체 데이터, 파일이 없을 때만 적용)')
     args = parser.parse_args()
     

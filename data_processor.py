@@ -408,6 +408,12 @@ def _fetch_macro_data(start_date, end_date):
 
             macro_df.reset_index(inplace=True)
             macro_df.rename(columns={'index': 'date'}, inplace=True)
+            
+            # 메모리 최적화: float64 -> float32
+            float_cols = macro_df.select_dtypes(include=['float64']).columns
+            if len(float_cols) > 0:
+                macro_df[float_cols] = macro_df[float_cols].astype('float32')
+            
             log_info("✅ 거시경제 데이터 수집 완료.")
             return macro_df
         else:
@@ -866,41 +872,24 @@ def merge_and_calculate_features(args):
         df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
         
         # =================================================================
-        # 타겟 변수 생성 (요구사항)
+        # 타겟 변수 생성 (gpuStock 정합)
         # - 향후 10거래일 동안:
-        #   1) 최저 종가가 현재 종가 대비 -5% 이상 빠지지 않고 (future_min / now >= 0.95)
-        #   2) 최고 종가가 현재 종가 대비 +8% 이상을 한 번이라도 찍으면 (future_max / now >= 1.08)
-        # - 위 조건을 모두 만족하면 1, 아니면 0
-        #
-        # 주의:
-        # - "향후 10거래일"을 정확히 보장하기 위해 min_periods=10로 계산합니다.
-        # - 마지막 10거래일 구간은 미래 데이터가 부족하므로 target을 NaN으로 둡니다(학습 시 자동 제외).
+        #   1) 최저 종가가 현재 종가 대비 -5% 이상 빠지지 않고 (>= 0.95)
+        #   2) 최고 종가가 현재 종가 대비 +8% 이상을 한 번이라도 찍으면 (>= 1.08)
+        # - min_periods=1 사용 (gpuStock과 동일)
         # =================================================================
         try:
-            future_prices = df['종가'].shift(-1)
-            future_max_10d = future_prices[::-1].rolling(window=10, min_periods=10).max()[::-1]
-            future_min_10d = future_prices[::-1].rolling(window=10, min_periods=10).min()[::-1]
-
-            cond = (future_min_10d / df['종가'] >= 0.95) & (future_max_10d / df['종가'] >= 1.08)
-            valid_mask = future_max_10d.notna() & future_min_10d.notna() & df['종가'].notna()
-            df['target'] = np.where(valid_mask, cond.astype(int), np.nan)
+            min_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).min()
+            max_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).max()
+            df['target'] = ((min_price_10d / df['종가'] >= 0.95) & (max_price_10d / df['종가'] >= 1.08)).astype(int)
         except Exception as e:
             log_warning(f"target(10일/-5%방어/+8%상승) 생성 실패 ({ticker}): {e}")
-            try:
-                # 예외 상황에서는 min_periods=1로 완화하여 최대한 계산을 시도 (단, 마지막 구간 왜곡 가능)
-                future_prices = df['종가'].shift(-1)
-                future_max_10d = future_prices[::-1].rolling(window=10, min_periods=1).max()[::-1]
-                future_min_10d = future_prices[::-1].rolling(window=10, min_periods=1).min()[::-1]
-                cond = (future_min_10d / df['종가'] >= 0.95) & (future_max_10d / df['종가'] >= 1.08)
-                valid_mask = future_max_10d.notna() & future_min_10d.notna() & df['종가'].notna()
-                df['target'] = np.where(valid_mask, cond.astype(int), np.nan)
-            except Exception:
-                df['target'] = np.nan
+            df['target'] = np.nan
 
         # =================================================================
         # 학습 타겟 제외 규칙 (사용자 요청)
         # - 조건: MA5 < MA120 AND MA5 < MA240 (120/240의 대소관계는 보지 않음)
-        # - 그리고 MA5 당일 기울기(정의 A, 전일 대비 %변화 각도) <= 10도
+        # - 그리고 MA5 당일 기울기(정의 A, 전일 대비 %변화 각도) <= 1도
         # => 위 조건을 모두 만족하는 샘플은 학습 대상에서 제외(drop)하기 위해 target을 NaN 처리합니다.
         #
         # 정의 A:
@@ -910,6 +899,7 @@ def merge_and_calculate_features(args):
         # =================================================================
         try:
             ma5 = df['종가'].rolling(window=5).mean()
+            ma60_lvl = df['종가'].rolling(window=60).mean()
             ma120_lvl = df['종가'].rolling(window=120).mean()
             ma240_lvl = df['종가'].rolling(window=240).mean()
 
@@ -921,9 +911,10 @@ def merge_and_calculate_features(args):
             df['MA5_Angle_Deg'] = ma5_angle_deg
 
             # 실시간/백테스팅에서 최종순위 산정 시 제외 플래그 (일자별로 동적 평가)
-            df['Exclude_Rank'] = (ma5 < ma120_lvl) & (ma5 < ma240_lvl) & (ma5_angle_deg <= 10)
+            # 제외 조건: MA60 < MA120 & MA60 < MA240 & 종가 < MA60
+            df['Exclude_Rank'] = (ma60_lvl < ma120_lvl) & (ma60_lvl < ma240_lvl) & (df['종가'] < ma60_lvl)
 
-            exclude_mask = (ma5 < ma120_lvl) & (ma5 < ma240_lvl) & (ma5_angle_deg <= 10)
+            exclude_mask = (ma60_lvl < ma120_lvl) & (ma60_lvl < ma240_lvl) & (df['종가'] < ma60_lvl)
             if exclude_mask.any():
                 df.loc[exclude_mask, 'target'] = np.nan
         except Exception:
@@ -936,6 +927,13 @@ def merge_and_calculate_features(args):
         df['date'] = df.index
         df.set_index('date', inplace=True)
         
+        # =================================================================
+        # 메모리 최적화: float64 -> float32 변환
+        # =================================================================
+        float_cols = df.select_dtypes(include=['float64']).columns
+        if len(float_cols) > 0:
+            df[float_cols] = df[float_cols].astype('float32')
+
         return df
         
     except Exception as e:
