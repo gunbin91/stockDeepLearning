@@ -12,10 +12,33 @@
 - 시각화된 결과 보고서 생성
 """
 
+# 경고 필터를 최상단에서 설정 (다른 모듈 import 전에)
+import warnings
+import os
+
+# 환경 변수로 pandas 경고 비활성화
+os.environ['PYTHONWARNINGS'] = 'ignore::pandas.errors.Pandas4Warning'
+
+# yfinance의 pandas deprecated API 경고 무시 (yfinance 라이브러리 자체 문제)
+# 모든 방법으로 필터링 시도 - 가장 강력한 설정
+warnings.simplefilter("ignore", FutureWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+try:
+    from pandas.errors import Pandas4Warning
+    warnings.simplefilter("ignore", Pandas4Warning)
+    warnings.filterwarnings("ignore", category=Pandas4Warning)
+except (ImportError, AttributeError):
+    pass
+# 메시지 기반 필터링 (모든 변형)
+warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*")
+warnings.filterwarnings("ignore", message=".*deprecated.*")
+warnings.filterwarnings("ignore", message=".*will be removed.*")
+warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*", category=UserWarning)
+
 import pandas as pd
 import numpy as np
 import json
-import os
 import sys
 import argparse
 from tqdm import tqdm
@@ -48,8 +71,63 @@ sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
 
 
+# pandas 호환성 패치: cuDF가 pandas.api.types.is_interval을 사용하는데 최신 pandas에서는 제거됨
+def apply_pandas_compatibility_patch():
+    """pandas 최신 버전과 cuDF 호환성을 위한 패치 적용"""
+    try:
+        import pandas.api.types as pd_types
+        # is_interval이 없으면 추가 (cuDF 호환성)
+        if not hasattr(pd_types, 'is_interval'):
+            # pandas 2.0+에서는 IntervalDtype을 사용하여 체크
+            def is_interval(arr):
+                """Interval 타입 체크 함수"""
+                try:
+                    from pandas import IntervalDtype
+                    return hasattr(arr, 'dtype') and isinstance(arr.dtype, IntervalDtype)
+                except:
+                    return False
+            pd_types.is_interval = is_interval
+    except Exception as e:
+        # 패치 적용 실패해도 계속 진행 (cuDF가 직접 처리할 수 있음)
+        pass
+
+# scikit-learn 호환성 패치: cuML이 BaseEstimator._get_default_requests를 사용하는데 최신 scikit-learn에서는 제거됨
+def apply_sklearn_compatibility_patch():
+    """scikit-learn 최신 버전과 cuML 호환성을 위한 패치 적용"""
+    try:
+        from sklearn.base import BaseEstimator
+        # _get_default_requests가 없으면 추가 (cuML 호환성)
+        if not hasattr(BaseEstimator, '_get_default_requests'):
+            # scikit-learn 1.3+에서는 _get_metadata_request를 사용하거나, 없으면 빈 함수로 대체
+            if hasattr(BaseEstimator, '_get_metadata_request'):
+                # _get_metadata_request를 _get_default_requests로 별칭 생성
+                original_get_metadata_request = BaseEstimator._get_metadata_request
+                def _get_default_requests(self, *args, **kwargs):
+                    return original_get_metadata_request(self, *args, **kwargs)
+                BaseEstimator._get_default_requests = _get_default_requests
+            else:
+                # 둘 다 없으면 빈 함수로 대체
+                def _get_default_requests(self, *args, **kwargs):
+                    return {}
+                BaseEstimator._get_default_requests = _get_default_requests
+    except Exception as e:
+        # 패치 적용 실패해도 계속 진행
+        pass
+
 # 프로젝트 루트 경로를 sys.path에 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# yfinance import 전에 경고 필터 재설정 (data_fetcher가 yfinance를 사용하므로)
+# 모든 Pandas4Warning 무시
+try:
+    from pandas.errors import Pandas4Warning
+    warnings.filterwarnings("ignore", category=Pandas4Warning, module="yfinance")
+    warnings.filterwarnings("ignore", category=Pandas4Warning)
+except (ImportError, AttributeError):
+    pass
+warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*")
+warnings.filterwarnings("ignore", message=".*deprecated.*")
+warnings.filterwarnings("ignore", message=".*will be removed.*")
 
 # 내부 모듈 임포트
 import ensemble
@@ -815,6 +893,10 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             try:
                 print("  - 정식 모델 로딩 중...")
                 
+                # 호환성 패치 적용 (cuDF/cuML 로드 전에 실행)
+                apply_pandas_compatibility_patch()
+                apply_sklearn_compatibility_patch()
+                
                 # cuML 모델 파일 우선 확인, 없으면 기존 모델 파일 확인
                 model_file_path = None
                 is_cuml_model = False
@@ -832,7 +914,14 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                     log_critical("ML 모델 파일 없음", context={"cuml_file": CUML_MODEL_FILE, "legacy_file": MODEL_FILE})
                     raise FileNotFoundError(error_msg)
                 
-                model_data = joblib.load(model_file_path)
+                # scikit-learn 버전 불일치 경고 억제 (모델 로드 시)
+                with warnings.catch_warnings():
+                    try:
+                        from sklearn.exceptions import InconsistentVersionWarning
+                        warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+                    except (ImportError, AttributeError):
+                        pass
+                    model_data = joblib.load(model_file_path)
                 
                 # cuML 앙상블 모델인지 확인
                 if is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'mini_batch_ensemble':

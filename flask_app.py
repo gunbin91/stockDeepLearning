@@ -12,10 +12,71 @@ AI 기반 주식 분석 시스템 - 웹 애플리케이션
 - 종목별 상세 차트 및 데이터 조회
 """
 
-# Eventlet 몽키 패치 (최상단에 위치해야 함)
+# 경고 필터를 최상단에서 설정 (eventlet.monkey_patch() 전에)
+import warnings
+import os
+
+# 환경 변수로 pandas 경고 비활성화
+os.environ['PYTHONWARNINGS'] = 'ignore::pandas.errors.Pandas4Warning'
+
+# yfinance의 pandas deprecated API 경고 무시 (yfinance 라이브러리 자체 문제)
+# 모든 방법으로 필터링 시도 - 가장 강력한 설정
+warnings.simplefilter("ignore", FutureWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+try:
+    from pandas.errors import Pandas4Warning
+    warnings.simplefilter("ignore", Pandas4Warning)
+    warnings.filterwarnings("ignore", category=Pandas4Warning)
+except (ImportError, AttributeError):
+    pass
+# 메시지 기반 필터링 (모든 변형)
+warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*")
+warnings.filterwarnings("ignore", message=".*deprecated.*")
+warnings.filterwarnings("ignore", message=".*will be removed.*")
+warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*", category=UserWarning)
+
+# Eventlet 몽키 패치 (경고 필터 설정 후)
 # 웹소켓 통신을 위한 비동기 처리 라이브러리
 import eventlet
 eventlet.monkey_patch()
+
+# eventlet.monkey_patch() 후 경고 필터 재설정 (monkey patch가 경고 시스템을 변경할 수 있음)
+# 더 강력한 방법: 모든 경고를 무시
+warnings.simplefilter("ignore")
+warnings.filterwarnings("ignore")
+try:
+    from pandas.errors import Pandas4Warning
+    warnings.simplefilter("ignore", Pandas4Warning)
+    warnings.filterwarnings("ignore", category=Pandas4Warning)
+except (ImportError, AttributeError):
+    pass
+warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*")
+warnings.filterwarnings("ignore", message=".*deprecated.*")
+warnings.filterwarnings("ignore", message=".*will be removed.*")
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# sys.stderr를 리다이렉션하여 yfinance 경고만 필터링 (eventlet.monkey_patch()가 경고 시스템을 우회할 수 있음)
+import sys
+_original_stderr = sys.stderr
+class FilteredStderr:
+    def __init__(self, original):
+        self.original = original
+    def write(self, text):
+        # yfinance 관련 경고만 필터링 (다른 중요한 메시지는 유지)
+        if text and ("Pandas4Warning" in text or "Timestamp.utcnow" in text or 
+                     ("deprecated" in text and "yfinance" in text) or
+                     ("will be removed" in text and "Timestamp" in text)):
+            return  # 경고 메시지 필터링
+        self.original.write(text)
+    def flush(self):
+        self.original.flush()
+    def __getattr__(self, name):
+        return getattr(self.original, name)
+
+# 경고만 필터링하고 다른 stderr 출력은 유지
+sys.stderr = FilteredStderr(sys.stderr)
 
 import os
 import sys
@@ -38,6 +99,49 @@ import joblib
 
 # 프로젝트 루트를 sys.path에 추가
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+# pandas 호환성 패치: cuDF가 pandas.api.types.is_interval을 사용하는데 최신 pandas에서는 제거됨
+def apply_pandas_compatibility_patch():
+    """pandas 최신 버전과 cuDF 호환성을 위한 패치 적용"""
+    try:
+        import pandas.api.types as pd_types
+        # is_interval이 없으면 추가 (cuDF 호환성)
+        if not hasattr(pd_types, 'is_interval'):
+            # pandas 2.0+에서는 IntervalDtype을 사용하여 체크
+            def is_interval(arr):
+                """Interval 타입 체크 함수"""
+                try:
+                    from pandas import IntervalDtype
+                    return hasattr(arr, 'dtype') and isinstance(arr.dtype, IntervalDtype)
+                except:
+                    return False
+            pd_types.is_interval = is_interval
+    except Exception as e:
+        # 패치 적용 실패해도 계속 진행 (cuDF가 직접 처리할 수 있음)
+        pass
+
+# scikit-learn 호환성 패치: cuML이 BaseEstimator._get_default_requests를 사용하는데 최신 scikit-learn에서는 제거됨
+def apply_sklearn_compatibility_patch():
+    """scikit-learn 최신 버전과 cuML 호환성을 위한 패치 적용"""
+    try:
+        from sklearn.base import BaseEstimator
+        # _get_default_requests가 없으면 추가 (cuML 호환성)
+        if not hasattr(BaseEstimator, '_get_default_requests'):
+            # scikit-learn 1.3+에서는 _get_metadata_request를 사용하거나, 없으면 빈 함수로 대체
+            if hasattr(BaseEstimator, '_get_metadata_request'):
+                # _get_metadata_request를 _get_default_requests로 별칭 생성
+                original_get_metadata_request = BaseEstimator._get_metadata_request
+                def _get_default_requests(self, *args, **kwargs):
+                    return original_get_metadata_request(self, *args, **kwargs)
+                BaseEstimator._get_default_requests = _get_default_requests
+            else:
+                # 둘 다 없으면 빈 함수로 대체
+                def _get_default_requests(self, *args, **kwargs):
+                    return {}
+                BaseEstimator._get_default_requests = _get_default_requests
+    except Exception as e:
+        # 패치 적용 실패해도 계속 진행
+        pass
 
 # 기존 모듈들 임포트
 import data_fetcher
@@ -859,16 +963,29 @@ def model_analysis():
         
         # RF 모델 정보 로드 (기존 로직)
         if model_path:
-            # 메타데이터 파일 우선 로드
-            if os.path.exists(metadata_path):
+            # 호환성 패치 적용 (cuDF/cuML 로드 전에 실행)
+            apply_pandas_compatibility_patch()
+            apply_sklearn_compatibility_patch()
+            
+            # scikit-learn 버전 불일치 경고 억제 (모델 로드 시)
+            import warnings
+            with warnings.catch_warnings():
                 try:
-                    model_data = joblib.load(metadata_path)
-                    log_info("RF 메타데이터 로드 완료")
-                except Exception as e:
-                    log_warning(f"RF 메타데이터 로드 실패: {e}. 모델 파일 시도")
+                    from sklearn.exceptions import InconsistentVersionWarning
+                    warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+                except (ImportError, AttributeError):
+                    pass
+                
+                # 메타데이터 파일 우선 로드
+                if os.path.exists(metadata_path):
+                    try:
+                        model_data = joblib.load(metadata_path)
+                        log_info("RF 메타데이터 로드 완료")
+                    except Exception as e:
+                        log_warning(f"RF 메타데이터 로드 실패: {e}. 모델 파일 시도")
+                        model_data = joblib.load(model_path)
+                else:
                     model_data = joblib.load(model_path)
-            else:
-                model_data = joblib.load(model_path)
 
             # 모델 정보 추출 (RF)
             # 메타데이터 파일인지 확인 ('model' 키가 없으면 메타데이터 파일)
@@ -920,7 +1037,15 @@ def model_analysis():
         # --- 2. LGBM 모델 로드 ---
         if os.path.exists(LGBM_MODEL_PATH):
             try:
-                lgbm_data = joblib.load(LGBM_MODEL_PATH)
+                # scikit-learn 버전 불일치 경고 억제 (모델 로드 시)
+                import warnings
+                with warnings.catch_warnings():
+                    try:
+                        from sklearn.exceptions import InconsistentVersionWarning
+                        warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+                    except (ImportError, AttributeError):
+                        pass
+                    lgbm_data = joblib.load(LGBM_MODEL_PATH)
                 log_info("LGBM 메타데이터 로드 완료")
                 
                 lgbm_model_info = {
@@ -1058,6 +1183,8 @@ def start_analysis():
                 env['PYTHONIOENCODING'] = 'utf-8'
                 env['LANG'] = 'ko_KR.UTF-8'
                 env['LC_ALL'] = 'ko_KR.UTF-8'
+                # yfinance 경고 억제를 위한 환경 변수 추가
+                env['PYTHONWARNINGS'] = 'ignore::pandas.errors.Pandas4Warning'
                 
                 process = subprocess.Popen(
                     command,
@@ -1175,6 +1302,10 @@ def start_analysis():
                                 message = f"[PROGRESS] {processed_line}"
                             else:
                                 message = processed_line
+                            
+                            # yfinance 경고 메시지 필터링
+                            if 'Pandas4Warning' in message or 'Timestamp.utcnow' in message or ('deprecated' in message and 'yfinance' in message):
+                                continue  # 경고 메시지는 전송하지 않음
                             
                             # WebSocket으로 로그 전송 (터미널과 동시)
                             socketio.emit('analysis_log', {'message': message})
@@ -1334,6 +1465,8 @@ def start_backtest():
                 env['PYTHONIOENCODING'] = 'utf-8'
                 env['LANG'] = 'ko_KR.UTF-8'
                 env['LC_ALL'] = 'ko_KR.UTF-8'
+                # yfinance 경고 억제를 위한 환경 변수 추가
+                env['PYTHONWARNINGS'] = 'ignore::pandas.errors.Pandas4Warning'
                 
                 process = subprocess.Popen(
                     command,

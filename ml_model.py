@@ -17,9 +17,68 @@ import numpy as np
 import joblib
 import os
 import gc
+import warnings
+
+# scikit-learn 버전 불일치 경고 억제
+try:
+    from sklearn.exceptions import InconsistentVersionWarning
+    warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+except (ImportError, AttributeError):
+    pass
+
+# 호환성 패치를 최상단에서 적용 (cuDF/cuML import 전에 실행되어야 함)
+# scikit-learn 호환성 패치: cuML이 BaseEstimator._get_default_requests를 사용하는데 최신 scikit-learn에서는 제거됨
+def _apply_sklearn_compatibility_patch_early():
+    """scikit-learn 최신 버전과 cuML 호환성을 위한 패치 적용 (모듈 로드 전)"""
+    try:
+        from sklearn.base import BaseEstimator
+        # _get_default_requests가 없으면 추가 (cuML 호환성)
+        if not hasattr(BaseEstimator, '_get_default_requests'):
+            # scikit-learn 1.3+에서는 _get_metadata_request를 사용하거나, 없으면 빈 함수로 대체
+            if hasattr(BaseEstimator, '_get_metadata_request'):
+                # _get_metadata_request를 _get_default_requests로 별칭 생성
+                original_get_metadata_request = BaseEstimator._get_metadata_request
+                def _get_default_requests(self, *args, **kwargs):
+                    return original_get_metadata_request(self, *args, **kwargs)
+                BaseEstimator._get_default_requests = _get_default_requests
+            else:
+                # 둘 다 없으면 빈 함수로 대체
+                def _get_default_requests(self, *args, **kwargs):
+                    return {}
+                BaseEstimator._get_default_requests = _get_default_requests
+    except Exception:
+        pass
+
+# pandas 호환성 패치: cuDF가 pandas.api.types.is_interval을 사용하는데 최신 pandas에서는 제거됨
+def _apply_pandas_compatibility_patch_early():
+    """pandas 최신 버전과 cuDF 호환성을 위한 패치 적용 (모듈 로드 전)"""
+    try:
+        import pandas.api.types as pd_types
+        # is_interval이 없으면 추가 (cuDF 호환성)
+        if not hasattr(pd_types, 'is_interval'):
+            # pandas 2.0+에서는 IntervalDtype을 사용하여 체크
+            def is_interval(arr):
+                """Interval 타입 체크 함수"""
+                try:
+                    from pandas import IntervalDtype
+                    return hasattr(arr, 'dtype') and isinstance(arr.dtype, IntervalDtype)
+                except:
+                    return False
+            pd_types.is_interval = is_interval
+    except Exception:
+        pass
+
+# 모듈 로드 시점에 패치 적용
+_apply_sklearn_compatibility_patch_early()
+_apply_pandas_compatibility_patch_early()
+
 from logger import log_info, log_warning, log_error, log_critical
 from exceptions import ModelPredictionError, DataValidationError
 from path_manager import path_manager
+
+# 패치 함수를 외부에서도 사용할 수 있도록 별칭 제공
+apply_pandas_compatibility_patch = _apply_pandas_compatibility_patch_early
+apply_sklearn_compatibility_patch = _apply_sklearn_compatibility_patch_early
 
 # cuML 모델 경로 (우선 사용)
 CUML_MODEL_PATH = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
@@ -70,7 +129,19 @@ def predict_with_ml_model(df):
 
     try:
         log_info(f"🤖 머신러닝 모델 예측 중... ({len(df):,}개 종목)")
-        model_data = joblib.load(model_path)
+        # 호환성 패치 적용 (cuDF/cuML 로드 전에 실행)
+        apply_pandas_compatibility_patch()
+        apply_sklearn_compatibility_patch()
+        
+        # scikit-learn 버전 불일치 경고 억제 (모델 로드 시)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+            try:
+                from sklearn.exceptions import InconsistentVersionWarning
+                warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+            except (ImportError, AttributeError):
+                pass
+            model_data = joblib.load(model_path)
         
         # cuML 앙상블 모델인지 확인
         if is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'mini_batch_ensemble':
@@ -333,8 +404,16 @@ def predict_with_lgbm_model(df):
     try:
         log_info(f"🤖 [LGBM] 모델 예측 중... ({len(df):,}개 종목)")
         
-        # 메타데이터 로드
-        metadata = joblib.load(lgbm_meta_path)
+        # scikit-learn 버전 불일치 경고 억제 (모델 로드 시)
+        with warnings.catch_warnings():
+            try:
+                from sklearn.exceptions import InconsistentVersionWarning
+                warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+            except (ImportError, AttributeError):
+                pass
+            
+            # 메타데이터 로드
+            metadata = joblib.load(lgbm_meta_path)
         features = metadata['features']
         scaler = metadata.get('scaler')  # 스케일러 로드
         

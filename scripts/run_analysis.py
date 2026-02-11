@@ -20,6 +20,16 @@ import json
 import os
 import sys
 import time
+import warnings
+
+# yfinance의 pandas deprecated API 경고 무시 (yfinance 라이브러리 자체 문제)
+try:
+    from pandas.errors import Pandas4Warning
+    warnings.filterwarnings("ignore", category=Pandas4Warning)
+except ImportError:
+    pass
+warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*deprecated.*", category=FutureWarning)
 
 # 크로스 플랫폼 인코딩 설정
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

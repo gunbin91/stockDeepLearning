@@ -33,7 +33,20 @@ import multiprocessing
 import time
 import json
 import urllib.request
-import re
+import warnings
+
+# yfinance의 pandas deprecated API 경고 무시 (yfinance 라이브러리 자체 문제)
+# Pandas4Warning을 직접 import하여 필터링
+try:
+    from pandas.errors import Pandas4Warning
+    warnings.filterwarnings("ignore", category=Pandas4Warning)
+except ImportError:
+    # pandas 버전에 따라 Pandas4Warning이 없을 수 있음
+    pass
+# 추가로 FutureWarning도 필터링
+warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*", category=FutureWarning)
+# 더 포괄적으로 모든 Pandas4Warning 무시
+warnings.filterwarnings("ignore", message=".*deprecated.*", category=FutureWarning)
 
 # WSL2/Linux 환경에서 multiprocessing 최적화
 # fork 방식 사용 (spawn보다 빠르고 메모리 효율적)
@@ -113,99 +126,121 @@ def fetch_daily_ohlcv_batch(tickers, start=None, end=None) -> dict:
     배치 다운로드용 일봉 OHLCV 조회 (Yahoo)
     Returns: {ticker: df}
     """
-    result = {str(t).strip(): None for t in tickers}
-    try:
-        import yfinance as yf
-        yf_start = _to_yyyy_mm_dd(start) if start is not None else None
-        yf_end = None
-        if end is not None:
-            try:
-                yf_end = (pd.to_datetime(end) + timedelta(days=1)).strftime('%Y-%m-%d')
-            except Exception:
-                yf_end = end
+    # yfinance 경고 억제 (함수 전체를 감싸서)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            from pandas.errors import Pandas4Warning
+            warnings.simplefilter("ignore", Pandas4Warning)
+        except (ImportError, AttributeError):
+            pass
+        
+        result = {str(t).strip(): None for t in tickers}
+        try:
+            import yfinance as yf
+            yf_start = _to_yyyy_mm_dd(start) if start is not None else None
+            yf_end = None
+            if end is not None:
+                try:
+                    yf_end = (pd.to_datetime(end) + timedelta(days=1)).strftime('%Y-%m-%d')
+                except Exception:
+                    yf_end = end
 
-        batch_symbols = " ".join([str(t).strip() for t in tickers])
-        with _YF_LOCK:
-            batch_df = yf.download(
-                batch_symbols,
-                start=yf_start,
-                end=yf_end,
-                interval='1d',
-                progress=False,
-                auto_adjust=False,
-                threads=False
-            )
-        if batch_df is None or batch_df.empty:
+            batch_symbols = " ".join([str(t).strip() for t in tickers])
+            with _YF_LOCK:
+                batch_df = yf.download(
+                    batch_symbols,
+                    start=yf_start,
+                    end=yf_end,
+                    interval='1d',
+                    progress=False,
+                    auto_adjust=False,
+                    threads=False
+                )
+            if batch_df is None or batch_df.empty:
+                return result
+
+            for t in result.keys():
+                df_t = _extract_batch_ticker_df(batch_df, t)
+                if df_t is None or df_t.empty:
+                    continue
+                df_t = df_t.copy()
+                df_t.index = pd.to_datetime(df_t.index)
+                result[t] = df_t
             return result
-
-        for t in result.keys():
-            df_t = _extract_batch_ticker_df(batch_df, t)
-            if df_t is None or df_t.empty:
-                continue
-            df_t = df_t.copy()
-            df_t.index = pd.to_datetime(df_t.index)
-            result[t] = df_t
-        return result
-    except Exception as e:
-        log_warning(f"[Yahoo] 배치 일봉 데이터 조회 실패: {e}")
-        return result
+        except Exception as e:
+            log_warning(f"[Yahoo] 배치 일봉 데이터 조회 실패: {e}")
+            return result
 
 def fetch_daily_ohlcv(symbol: str, start=None, end=None) -> pd.DataFrame:
     """
     일봉 OHLCV 데이터 조회 (Yahoo 우선, 실패 시 FDR 폴백)
     """
-    yf_df = None
-    try:
-        import yfinance as yf
-        yf_symbol = str(symbol).strip()
-        if yf_symbol.upper() in ('IXIC', '^IXIC'):
-            yf_symbol = '^IXIC'
-        elif yf_symbol.upper() in ('VIX', '^VIX'):
-            yf_symbol = '^VIX'
-
-        yf_start = _to_yyyy_mm_dd(start) if start is not None else None
-        yf_end = None
-        if end is not None:
-            try:
-                yf_end = (pd.to_datetime(end) + timedelta(days=1)).strftime('%Y-%m-%d')
-            except Exception:
-                yf_end = end
-
-        # yfinance는 멀티스레드 호출 시 결과가 섞일 수 있어 전역 락으로 직렬화
-        with _YF_LOCK:
-            yf_df = yf.download(
-                yf_symbol,
-                start=yf_start,
-                end=yf_end,
-                interval='1d',
-                progress=False,
-                auto_adjust=False,
-                threads=False
-            )
-        yf_df = _normalize_yfinance_columns(yf_df)
-    except Exception as e:
-        log_warning(f"[Yahoo] 일봉 데이터 조회 실패 ({symbol}): {e}")
-        yf_df = None
-
-    if yf_df is not None and not yf_df.empty:
+    # yfinance 경고 억제 (함수 전체를 감싸서)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
         try:
-            yf_df.index = pd.to_datetime(yf_df.index)
-        except Exception:
+            from pandas.errors import Pandas4Warning
+            warnings.simplefilter("ignore", Pandas4Warning)
+        except (ImportError, AttributeError):
             pass
-        return yf_df
+        
+        yf_df = None
+        try:
+            import yfinance as yf
+            yf_symbol = str(symbol).strip()
+            if yf_symbol.upper() in ('IXIC', '^IXIC'):
+                yf_symbol = '^IXIC'
+            elif yf_symbol.upper() in ('VIX', '^VIX'):
+                yf_symbol = '^VIX'
 
-    # Yahoo 전용 심볼/미국 티커는 FDR도 Yahoo 경로를 타므로 폴백 실익이 적음
-    if (not _is_krx_code(symbol)) or _is_yahoo_only_symbol(symbol):
-        log_warning(f"[Yahoo] 일봉 데이터 조회 실패, FDR 폴백 생략 ({symbol})")
-        return None
+            yf_start = _to_yyyy_mm_dd(start) if start is not None else None
+            yf_end = None
+            if end is not None:
+                try:
+                    yf_end = (pd.to_datetime(end) + timedelta(days=1)).strftime('%Y-%m-%d')
+                except Exception:
+                    yf_end = end
 
-    try:
-        fdr_df = fdr.DataReader(symbol, start, end)
-        if fdr_df is not None and not fdr_df.empty:
-            fdr_df.index = pd.to_datetime(fdr_df.index)
-        return fdr_df
-    except Exception as e:
-        log_warning(f"[Fallback] 일봉 데이터 조회 실패 ({symbol}): {e}")
+            # yfinance는 멀티스레드 호출 시 결과가 섞일 수 있어 전역 락으로 직렬화
+            with _YF_LOCK:
+                yf_df = yf.download(
+                    yf_symbol,
+                    start=yf_start,
+                    end=yf_end,
+                    interval='1d',
+                    progress=False,
+                    auto_adjust=False,
+                    threads=False
+                )
+            yf_df = _normalize_yfinance_columns(yf_df)
+        except Exception as e:
+            log_warning(f"[Yahoo] 일봉 데이터 조회 실패 ({symbol}): {e}")
+            yf_df = None
+
+        if yf_df is not None and not yf_df.empty:
+            try:
+                yf_df.index = pd.to_datetime(yf_df.index)
+            except Exception:
+                pass
+            return yf_df
+
+        # Yahoo 전용 심볼/미국 티커는 FDR도 Yahoo 경로를 타므로 폴백 실익이 적음
+        if (not _is_krx_code(symbol)) or _is_yahoo_only_symbol(symbol):
+            log_warning(f"[Yahoo] 일봉 데이터 조회 실패, FDR 폴백 생략 ({symbol})")
+            return None
+
+        try:
+            fdr_df = fdr.DataReader(symbol, start, end)
+            if fdr_df is not None and not fdr_df.empty:
+                fdr_df.index = pd.to_datetime(fdr_df.index)
+            return fdr_df
+        except Exception as e:
+            log_warning(f"[Fallback] 일봉 데이터 조회 실패 ({symbol}): {e}")
+            return None
+
         return None
 
 # =================================================================
@@ -673,9 +708,19 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
     Returns:
         pandas.DataFrame: 처리된 종목 데이터
     """
-    global _global_marcap_data, _global_financial_data
-    
-    try:
+    # yfinance 경고 억제 (함수 전체를 감싸서)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            from pandas.errors import Pandas4Warning
+            warnings.simplefilter("ignore", Pandas4Warning)
+        except (ImportError, AttributeError):
+            pass
+        
+        global _global_marcap_data, _global_financial_data
+        
+        try:
         df = df_price.copy()
         
         # 전역 변수 검증
@@ -690,8 +735,20 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         else:
             if 'Marcap' in df_marcap_ticker.columns and 'date' in df_marcap_ticker.columns:
                 df_marcap_ticker.sort_values(by='date', inplace=True)
-                df = pd.merge_asof(left=df, right=df_marcap_ticker[['date', 'Marcap']], left_index=True, right_on='date', direction='backward')
-                df.rename(columns={'Marcap': '시가총액'}, inplace=True)
+                # 날짜 dtype 통일 (나노초로 통일하여 merge_asof 호환성 보장)
+                df_marcap_ticker['date'] = pd.to_datetime(df_marcap_ticker['date']).astype('datetime64[ns]')
+                if isinstance(df.index, pd.DatetimeIndex):
+                    df.index = pd.to_datetime(df.index).astype('datetime64[ns]')
+                try:
+                    df = pd.merge_asof(left=df, right=df_marcap_ticker[['date', 'Marcap']], left_index=True, right_on='date', direction='backward')
+                    df.rename(columns={'Marcap': '시가총액'}, inplace=True)
+                except Exception as e:
+                    # merge_asof 실패 시 일반 merge로 대체
+                    log_warning(f"⚠️ {ticker} 시가총액 merge_asof 실패, 일반 merge로 시도: {e}")
+                    df = df.reset_index()
+                    df = pd.merge(df, df_marcap_ticker[['date', 'Marcap']], on='date', how='left')
+                    df.rename(columns={'Marcap': '시가총액'}, inplace=True)
+                    df = df.set_index('date')
             elif 'MarketCap' in df_marcap_ticker.columns:
                 mc = pd.to_numeric(df_marcap_ticker['MarketCap'].iloc[0], errors='coerce')
                 df['시가총액'] = mc
@@ -709,8 +766,19 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             df_financial_ticker = _global_financial_data[_global_financial_data['Code'] == ticker].copy()
             if not df_financial_ticker.empty:
                 df_financial_ticker.sort_values(by='date', inplace=True)
-                df = pd.merge_asof(left=df, right=df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], 
-                                   left_index=True, right_on='date', direction='backward')
+                # 날짜 dtype 통일 (나노초로 통일하여 merge_asof 호환성 보장)
+                df_financial_ticker['date'] = pd.to_datetime(df_financial_ticker['date']).astype('datetime64[ns]')
+                if isinstance(df.index, pd.DatetimeIndex):
+                    df.index = pd.to_datetime(df.index).astype('datetime64[ns]')
+                try:
+                    df = pd.merge_asof(left=df, right=df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], 
+                                       left_index=True, right_on='date', direction='backward')
+                except Exception as e:
+                    # merge_asof 실패 시 일반 merge로 대체
+                    log_warning(f"⚠️ {ticker} 재무데이터 merge_asof 실패, 일반 merge로 시도: {e}")
+                    df = df.reset_index()
+                    df = pd.merge(df, df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], on='date', how='left')
+                    df = df.set_index('date')
                 
                 # 재무데이터가 없는 경우 기본값 설정
                 if 'PER' not in df.columns or df['PER'].isnull().all():
@@ -1139,18 +1207,18 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         # 데이터 구조 설정
         # merge_asof 후 date 컬럼이 제거되므로 다시 추가
         df['date'] = df.index
-        df.set_index('date', inplace=True)
-        
-        return df
-        
-    except Exception as e:
-        log_error(f"종목 {ticker} 피처 계산 중 오류: {e}")
-        # 오류 발생 시에도 메모리 정리
-        try:
-            gc.collect()
-        except:
-            pass
-        return None
+            df.set_index('date', inplace=True)
+            
+            return df
+            
+        except Exception as e:
+            log_error(f"종목 {ticker} 피처 계산 중 오류: {e}")
+            # 오류 발생 시에도 메모리 정리
+            try:
+                gc.collect()
+            except:
+                pass
+            return None
 
 
 
