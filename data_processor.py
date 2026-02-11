@@ -721,76 +721,83 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         global _global_marcap_data, _global_financial_data
         
         try:
-        df = df_price.copy()
-        
-        # 전역 변수 검증
-        if _global_marcap_data is None:
-            log_error(f"종목 {ticker} 피처 계산 중 오류: 전역 시가총액 데이터가 설정되지 않았습니다.")
-            return None
-        
-        # 시가총액 데이터 주입 (NASDAQ 버전: 정적 MarketCap 기반, 없으면 NaN)
-        df_marcap_ticker = _global_marcap_data[_global_marcap_data['Code'] == ticker].copy()
-        if df_marcap_ticker.empty:
-            df['시가총액'] = np.nan
-        else:
-            if 'Marcap' in df_marcap_ticker.columns and 'date' in df_marcap_ticker.columns:
-                df_marcap_ticker.sort_values(by='date', inplace=True)
-                # 날짜 dtype 통일 (나노초로 통일하여 merge_asof 호환성 보장)
-                df_marcap_ticker['date'] = pd.to_datetime(df_marcap_ticker['date']).astype('datetime64[ns]')
-                if isinstance(df.index, pd.DatetimeIndex):
-                    df.index = pd.to_datetime(df.index).astype('datetime64[ns]')
-                try:
-                    df = pd.merge_asof(left=df, right=df_marcap_ticker[['date', 'Marcap']], left_index=True, right_on='date', direction='backward')
-                    df.rename(columns={'Marcap': '시가총액'}, inplace=True)
-                except Exception as e:
-                    # merge_asof 실패 시 일반 merge로 대체
-                    log_warning(f"⚠️ {ticker} 시가총액 merge_asof 실패, 일반 merge로 시도: {e}")
-                    df = df.reset_index()
-                    df = pd.merge(df, df_marcap_ticker[['date', 'Marcap']], on='date', how='left')
-                    df.rename(columns={'Marcap': '시가총액'}, inplace=True)
-                    df = df.set_index('date')
-            elif 'MarketCap' in df_marcap_ticker.columns:
-                mc = pd.to_numeric(df_marcap_ticker['MarketCap'].iloc[0], errors='coerce')
-                df['시가총액'] = mc
-            elif '시가총액' in df_marcap_ticker.columns:
-                mc = pd.to_numeric(df_marcap_ticker['시가총액'].iloc[0], errors='coerce')
-                df['시가총액'] = mc
-            else:
+            df = df_price.copy()
+            
+            # 전역 변수 검증
+            if _global_marcap_data is None:
+                log_error(f"종목 {ticker} 피처 계산 중 오류: 전역 시가총액 데이터가 설정되지 않았습니다.")
+                return None
+            
+            # 시가총액 데이터 주입 (NASDAQ 버전: 정적 MarketCap 기반, 없으면 NaN)
+            df_marcap_ticker = _global_marcap_data[_global_marcap_data['Code'] == ticker].copy()
+            if df_marcap_ticker.empty:
                 df['시가총액'] = np.nan
+            else:
+                if 'Marcap' in df_marcap_ticker.columns and 'date' in df_marcap_ticker.columns:
+                    df_marcap_ticker.sort_values(by='date', inplace=True)
+                    # 날짜 dtype 통일 (나노초로 통일하여 merge_asof 호환성 보장)
+                    df_marcap_ticker['date'] = pd.to_datetime(df_marcap_ticker['date']).astype('datetime64[ns]')
+                    if isinstance(df.index, pd.DatetimeIndex):
+                        df.index = pd.to_datetime(df.index).astype('datetime64[ns]')
+                    try:
+                        df = pd.merge_asof(left=df, right=df_marcap_ticker[['date', 'Marcap']], left_index=True, right_on='date', direction='backward')
+                        df.rename(columns={'Marcap': '시가총액'}, inplace=True)
+                    except Exception as e:
+                        # merge_asof 실패 시 일반 merge로 대체
+                        log_warning(f"⚠️ {ticker} 시가총액 merge_asof 실패, 일반 merge로 시도: {e}")
+                        df = df.reset_index()
+                        df = pd.merge(df, df_marcap_ticker[['date', 'Marcap']], on='date', how='left')
+                        df.rename(columns={'Marcap': '시가총액'}, inplace=True)
+                        df = df.set_index('date')
+                elif 'MarketCap' in df_marcap_ticker.columns:
+                    mc = pd.to_numeric(df_marcap_ticker['MarketCap'].iloc[0], errors='coerce')
+                    df['시가총액'] = mc
+                elif '시가총액' in df_marcap_ticker.columns:
+                    mc = pd.to_numeric(df_marcap_ticker['시가총액'].iloc[0], errors='coerce')
+                    df['시가총액'] = mc
+                else:
+                    df['시가총액'] = np.nan
 
-        del df_marcap_ticker
-        gc.collect()
-        
-        # 재무데이터 병합 (백업 프로젝트와 동일한 방식, 전역 변수 사용)
-        if _global_financial_data is not None and not _global_financial_data.empty:
-            df_financial_ticker = _global_financial_data[_global_financial_data['Code'] == ticker].copy()
-            if not df_financial_ticker.empty:
-                df_financial_ticker.sort_values(by='date', inplace=True)
-                # 날짜 dtype 통일 (나노초로 통일하여 merge_asof 호환성 보장)
-                df_financial_ticker['date'] = pd.to_datetime(df_financial_ticker['date']).astype('datetime64[ns]')
-                if isinstance(df.index, pd.DatetimeIndex):
-                    df.index = pd.to_datetime(df.index).astype('datetime64[ns]')
-                try:
-                    df = pd.merge_asof(left=df, right=df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], 
-                                       left_index=True, right_on='date', direction='backward')
-                except Exception as e:
-                    # merge_asof 실패 시 일반 merge로 대체
-                    log_warning(f"⚠️ {ticker} 재무데이터 merge_asof 실패, 일반 merge로 시도: {e}")
-                    df = df.reset_index()
-                    df = pd.merge(df, df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], on='date', how='left')
-                    df = df.set_index('date')
-                
-                # 재무데이터가 없는 경우 기본값 설정
-                if 'PER' not in df.columns or df['PER'].isnull().all():
+            del df_marcap_ticker
+            gc.collect()
+            
+            # 재무데이터 병합 (백업 프로젝트와 동일한 방식, 전역 변수 사용)
+            if _global_financial_data is not None and not _global_financial_data.empty:
+                df_financial_ticker = _global_financial_data[_global_financial_data['Code'] == ticker].copy()
+                if not df_financial_ticker.empty:
+                    df_financial_ticker.sort_values(by='date', inplace=True)
+                    # 날짜 dtype 통일 (나노초로 통일하여 merge_asof 호환성 보장)
+                    df_financial_ticker['date'] = pd.to_datetime(df_financial_ticker['date']).astype('datetime64[ns]')
+                    if isinstance(df.index, pd.DatetimeIndex):
+                        df.index = pd.to_datetime(df.index).astype('datetime64[ns]')
+                    try:
+                        df = pd.merge_asof(left=df, right=df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], 
+                                           left_index=True, right_on='date', direction='backward')
+                    except Exception as e:
+                        # merge_asof 실패 시 일반 merge로 대체
+                        log_warning(f"⚠️ {ticker} 재무데이터 merge_asof 실패, 일반 merge로 시도: {e}")
+                        df = df.reset_index()
+                        df = pd.merge(df, df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], on='date', how='left')
+                        df = df.set_index('date')
+                    
+                    # 재무데이터가 없는 경우 기본값 설정
+                    if 'PER' not in df.columns or df['PER'].isnull().all():
+                        df['PER'] = np.nan
+                        df['PBR'] = np.nan
+                        df['ROE'] = np.nan
+                        df['EPS'] = np.nan
+                        df['BPS'] = np.nan
+                    
+                    # 재무데이터 메모리 해제
+                    del df_financial_ticker
+                    gc.collect()
+                else:
+                    # 재무데이터가 없는 경우 기본값 설정
                     df['PER'] = np.nan
                     df['PBR'] = np.nan
                     df['ROE'] = np.nan
                     df['EPS'] = np.nan
                     df['BPS'] = np.nan
-                
-                # 재무데이터 메모리 해제
-                del df_financial_ticker
-                gc.collect()
             else:
                 # 재무데이터가 없는 경우 기본값 설정
                 df['PER'] = np.nan
@@ -798,415 +805,375 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
                 df['ROE'] = np.nan
                 df['EPS'] = np.nan
                 df['BPS'] = np.nan
-        else:
-            # 재무데이터가 없는 경우 기본값 설정
-            df['PER'] = np.nan
-            df['PBR'] = np.nan
-            df['ROE'] = np.nan
-            df['EPS'] = np.nan
-            df['BPS'] = np.nan
-        
-        # ATR 계산 (5일, 20일, 60일)
-        try:
-            atr_5 = df.ta.atr(high='고가', low='저가', close='종가', length=5)
-            atr_20 = df.ta.atr(high='고가', low='저가', close='종가', length=20)
-            atr_60 = df.ta.atr(high='고가', low='저가', close='종가', length=60)
             
-            # ATRr_5 계산 (기준 - 1W): "최근 1주일 변동성 수준"
-            if atr_5 is not None:
-                df['ATRr_5'] = (atr_5 / df['종가']) * 100
-            else:
+            # ATR 계산 (5일, 20일, 60일)
+            try:
+                atr_5 = df.ta.atr(high='고가', low='저가', close='종가', length=5)
+                atr_20 = df.ta.atr(high='고가', low='저가', close='종가', length=20)
+                atr_60 = df.ta.atr(high='고가', low='저가', close='종가', length=60)
+                
+                # ATRr_5 계산 (기준 - 1W): "최근 1주일 변동성 수준"
+                if atr_5 is not None:
+                    df['ATRr_5'] = (atr_5 / df['종가']) * 100
+                else:
+                    df['ATRr_5'] = np.nan
+                
+                # ATRr_20 계산 (기준 - 1M)
+                if atr_20 is not None:
+                    df['ATRr_20'] = (atr_20 / df['종가']) * 100
+                else:
+                    df['ATRr_20'] = np.nan
+                
+                # ATRr_60 계산 (기준 - 3M)
+                if atr_60 is not None:
+                    df['ATRr_60'] = (atr_60 / df['종가']) * 100
+                else:
+                    df['ATRr_60'] = np.nan
+            except Exception as e:
+                log_warning(f"ATR 계산 실패 ({ticker}): {e}")
                 df['ATRr_5'] = np.nan
-            
-            # ATRr_20 계산 (기준 - 1M)
-            if atr_20 is not None:
-                df['ATRr_20'] = (atr_20 / df['종가']) * 100
-            else:
                 df['ATRr_20'] = np.nan
-            
-            # ATRr_60 계산 (기준 - 3M)
-            if atr_60 is not None:
-                df['ATRr_60'] = (atr_60 / df['종가']) * 100
-            else:
                 df['ATRr_60'] = np.nan
-        except Exception as e:
-            log_warning(f"ATR 계산 실패 ({ticker}): {e}")
-            df['ATRr_5'] = np.nan
-            df['ATRr_20'] = np.nan
-            df['ATRr_60'] = np.nan
         
-        # ATRr_14는 기존 호환성을 위해 유지 (다른 곳에서 사용할 수 있음)
-        try:
-            df.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
-        except Exception as e:
-            log_warning(f"ATRr_14 계산 실패 ({ticker}): {e}")
-            df['ATRr_14'] = np.nan
-        
-        try:
-            df.ta.obv(close='종가', volume='거래량', append=True)
-        except Exception as e:
-            log_warning(f"OBV 계산 실패 ({ticker}): {e}")
-            df['OBV'] = np.nan
-        
-        # OBV는 계산하지만 OBV_Slope 피처는 제거됨
-        
-        try:
-            df.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
-        except Exception as e:
-            log_warning(f"ADX 계산 실패 ({ticker}): {e}")
-            df['ADX_14'] = np.nan
-        
-        # RSI_14 계산
-        try:
-            rsi_14 = df.ta.rsi(close='종가', length=14)
+            # ATRr_14는 기존 호환성을 위해 유지 (다른 곳에서 사용할 수 있음)
+            try:
+                df.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
+            except Exception as e:
+                log_warning(f"ATRr_14 계산 실패 ({ticker}): {e}")
+                df['ATRr_14'] = np.nan
             
-            # RSI_Signal_Oscillator 계산: RSI_14 - RSI_14.rolling(9).mean()
-            # MACD 원리를 RSI에 적용한 것으로, 양수면 RSI가 평균을 뚫고 올라가는 중(골든크로스)
-            if rsi_14 is not None and len(rsi_14) >= 9:
-                rsi_14_ma9 = rsi_14.rolling(window=9).mean()
-                df['RSI_Signal_Oscillator'] = rsi_14 - rsi_14_ma9
-            else:
+            try:
+                df.ta.obv(close='종가', volume='거래량', append=True)
+            except Exception as e:
+                log_warning(f"OBV 계산 실패 ({ticker}): {e}")
+                df['OBV'] = np.nan
+            
+            # OBV는 계산하지만 OBV_Slope 피처는 제거됨
+            
+            try:
+                df.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
+            except Exception as e:
+                log_warning(f"ADX 계산 실패 ({ticker}): {e}")
+                df['ADX_14'] = np.nan
+            
+            # RSI_14 계산
+            try:
+                rsi_14 = df.ta.rsi(close='종가', length=14)
+                
+                # RSI_Signal_Oscillator 계산: RSI_14 - RSI_14.rolling(9).mean()
+                # MACD 원리를 RSI에 적용한 것으로, 양수면 RSI가 평균을 뚫고 올라가는 중(골든크로스)
+                if rsi_14 is not None and len(rsi_14) >= 9:
+                    rsi_14_ma9 = rsi_14.rolling(window=9).mean()
+                    df['RSI_Signal_Oscillator'] = rsi_14 - rsi_14_ma9
+                else:
+                    df['RSI_Signal_Oscillator'] = np.nan
+            except Exception as e:
+                log_warning(f"RSI 계산 실패 ({ticker}): {e}")
+                df['RSI_14'] = np.nan
                 df['RSI_Signal_Oscillator'] = np.nan
-        except Exception as e:
-            log_warning(f"RSI 계산 실패 ({ticker}): {e}")
-            df['RSI_14'] = np.nan
-            df['RSI_Signal_Oscillator'] = np.nan
-        
-        # 기존 방식과 동일한 기본 지표들만 사용 (과도한 기술적 지표 제거)
-        
-        # 거래대금 계산
-        df['거래대금'] = df['종가'] * df['거래량']
-        
-        # RVOL (상대 거래량) 계산
-        try:
-            거래량_20일_평균 = df['거래량'].rolling(window=20).mean()
-            df['RVOL'] = df['거래량'] / 거래량_20일_평균
-            # 무한대 값 처리
-            df['RVOL'] = df['RVOL'].replace([np.inf, -np.inf], np.nan)
-        except Exception as e:
-            log_warning(f"RVOL 계산 실패 ({ticker}): {e}")
-            df['RVOL'] = np.nan
-        
-        # 시총 회전율 계산
-        try:
-            # 시총 회전율(1W): 5일 평균 거래대금 / 시가총액 * 100
-            거래대금_5일_평균 = df['거래대금'].rolling(window=5).mean()
-            df['시총 회전율(1W)'] = (거래대금_5일_평균 / df['시가총액']) * 100
-            df['시총 회전율(1W)'] = df['시총 회전율(1W)'].replace([np.inf, -np.inf], np.nan)
             
-            # 시총 회전율(3M): 60일 평균 거래대금 / 시가총액 * 100
-            거래대금_60일_평균 = df['거래대금'].rolling(window=60).mean()
-            df['시총 회전율(3M)'] = (거래대금_60일_평균 / df['시가총액']) * 100
-            df['시총 회전율(3M)'] = df['시총 회전율(3M)'].replace([np.inf, -np.inf], np.nan)
-        except Exception as e:
-            log_warning(f"시총 회전율 계산 실패 ({ticker}): {e}")
-            df['시총 회전율(1W)'] = np.nan
-            df['시총 회전율(3M)'] = np.nan
-        
-        # Z_Score_20 계산 (내부용) 및 Trend_Pullback_Score 생성
-        try:
-            mean_20 = df['종가'].rolling(20).mean()
-            std_20 = df['종가'].rolling(20).std()
+            # 기존 방식과 동일한 기본 지표들만 사용 (과도한 기술적 지표 제거)
             
-            # std_20이 0인 경우 처리 (변동성이 없으면 z_score를 0으로 설정)
-            z_score_20 = (df['종가'] - mean_20) / std_20.replace(0, np.nan)
-            z_score_20 = z_score_20.fillna(0)  # std가 0인 경우 z_score를 0으로 설정
+            # 거래대금 계산
+            df['거래대금'] = df['종가'] * df['거래량']
             
-            # MA20_Slope 내부 계산용
-            ma20 = df['종가'].rolling(window=20).mean()
-            ma20_slope = calculate_normalized_linear_regression_slope(ma20, window=5)
+            # RVOL (상대 거래량) 계산
+            try:
+                거래량_20일_평균 = df['거래량'].rolling(window=20).mean()
+                df['RVOL'] = df['거래량'] / 거래량_20일_평균
+                # 무한대 값 처리
+                df['RVOL'] = df['RVOL'].replace([np.inf, -np.inf], np.nan)
+            except Exception as e:
+                log_warning(f"RVOL 계산 실패 ({ticker}): {e}")
+                df['RVOL'] = np.nan
             
-            # Trend_Pullback_Score 계산
-            # 의미: 추세 강도와 눌림 정도를 결합한 점수
-            # - 상승 추세(ma20_slope > 0) + 눌림(z_score_20 < 0): 높은 양수 점수
-            # - 상승 추세 + 과열(z_score_20 > 0): 낮은 양수 또는 0
-            # - 하락 추세(ma20_slope < 0): 음수 또는 0
-            # 기본 공식: abs(z_score_20) * ma20_slope (단, 조건에 따라 가중치 조정)
+            # 시총 회전율 계산
+            try:
+                # 시총 회전율(1W): 5일 평균 거래대금 / 시가총액 * 100
+                거래대금_5일_평균 = df['거래대금'].rolling(window=5).mean()
+                df['시총 회전율(1W)'] = (거래대금_5일_평균 / df['시가총액']) * 100
+                df['시총 회전율(1W)'] = df['시총 회전율(1W)'].replace([np.inf, -np.inf], np.nan)
+                
+                # 시총 회전율(3M): 60일 평균 거래대금 / 시가총액 * 100
+                거래대금_60일_평균 = df['거래대금'].rolling(window=60).mean()
+                df['시총 회전율(3M)'] = (거래대금_60일_평균 / df['시가총액']) * 100
+                df['시총 회전율(3M)'] = df['시총 회전율(3M)'].replace([np.inf, -np.inf], np.nan)
+            except Exception as e:
+                log_warning(f"시총 회전율 계산 실패 ({ticker}): {e}")
+                df['시총 회전율(1W)'] = np.nan
+                df['시총 회전율(3M)'] = np.nan
             
-            # NaN 값 처리
-            ma20_slope_clean = ma20_slope.fillna(0)
-            z_score_20_clean = z_score_20.fillna(0)
-            
-            # 기본 점수 계산: abs(z_score) * ma20_slope
-            base_score = np.abs(z_score_20_clean) * ma20_slope_clean
-            
-            # 조건별 가중치 적용
-            # 1. 상승 추세 + 눌림: 가중치 1.0 (가장 높은 점수)
-            # 2. 상승 추세 + 과열: 가중치 0.3 (낮은 점수)
-            # 3. 하락 추세: 가중치 0.1 또는 음수 (매우 낮은 점수)
-            
-            condition_up_pullback = (ma20_slope_clean > 0) & (z_score_20_clean < 0)  # 상승 추세 + 눌림
-            condition_up_overheat = (ma20_slope_clean > 0) & (z_score_20_clean >= 0)  # 상승 추세 + 과열
-            condition_down = (ma20_slope_clean <= 0)  # 하락 추세
-            
-            df['Trend_Pullback_Score'] = np.where(
-                condition_up_pullback,
-                base_score * 1.0,  # 상승 추세 + 눌림: 최고 점수
-                np.where(
-                    condition_up_overheat,
-                    base_score * 0.3,  # 상승 추세 + 과열: 낮은 점수
+            # Z_Score_20 계산 (내부용) 및 Trend_Pullback_Score 생성
+            try:
+                mean_20 = df['종가'].rolling(20).mean()
+                std_20 = df['종가'].rolling(20).std()
+                
+                # std_20이 0인 경우 처리 (변동성이 없으면 z_score를 0으로 설정)
+                z_score_20 = (df['종가'] - mean_20) / std_20.replace(0, np.nan)
+                z_score_20 = z_score_20.fillna(0)  # std가 0인 경우 z_score를 0으로 설정
+                
+                # MA20_Slope 내부 계산용
+                ma20 = df['종가'].rolling(window=20).mean()
+                ma20_slope = calculate_normalized_linear_regression_slope(ma20, window=5)
+                
+                # Trend_Pullback_Score 계산
+                # 의미: 추세 강도와 눌림 정도를 결합한 점수
+                # - 상승 추세(ma20_slope > 0) + 눌림(z_score_20 < 0): 높은 양수 점수
+                # - 상승 추세 + 과열(z_score_20 > 0): 낮은 양수 또는 0
+                # - 하락 추세(ma20_slope < 0): 음수 또는 0
+                # 기본 공식: abs(z_score_20) * ma20_slope (단, 조건에 따라 가중치 조정)
+                
+                # NaN 값 처리
+                ma20_slope_clean = ma20_slope.fillna(0)
+                z_score_20_clean = z_score_20.fillna(0)
+                
+                # 기본 점수 계산: abs(z_score) * ma20_slope
+                base_score = np.abs(z_score_20_clean) * ma20_slope_clean
+                
+                # 조건별 가중치 적용
+                # 1. 상승 추세 + 눌림: 가중치 1.0 (가장 높은 점수)
+                # 2. 상승 추세 + 과열: 가중치 0.3 (낮은 점수)
+                # 3. 하락 추세: 가중치 0.1 또는 음수 (매우 낮은 점수)
+                
+                condition_up_pullback = (ma20_slope_clean > 0) & (z_score_20_clean < 0)  # 상승 추세 + 눌림
+                condition_up_overheat = (ma20_slope_clean > 0) & (z_score_20_clean >= 0)  # 상승 추세 + 과열
+                condition_down = (ma20_slope_clean <= 0)  # 하락 추세
+                
+                df['Trend_Pullback_Score'] = np.where(
+                    condition_up_pullback,
+                    base_score * 1.0,  # 상승 추세 + 눌림: 최고 점수
                     np.where(
-                        condition_down,
-                        base_score * 0.1,  # 하락 추세: 매우 낮은 점수
-                        0
+                        condition_up_overheat,
+                        base_score * 0.3,  # 상승 추세 + 과열: 낮은 점수
+                        np.where(
+                            condition_down,
+                            base_score * 0.1,  # 하락 추세: 매우 낮은 점수
+                            0
+                        )
                     )
                 )
-            )
-            
-            # 원본 데이터에 NaN이 있던 위치는 NaN으로 복원
-            nan_mask = ma20_slope.isna() | z_score_20.isna()
-            df.loc[nan_mask, 'Trend_Pullback_Score'] = np.nan
-            
-        except Exception as e:
-            log_warning(f"Trend_Pullback_Score 계산 실패 ({ticker}): {e}")
-            df['Trend_Pullback_Score'] = np.nan
+                
+                # 원본 데이터에 NaN이 있던 위치는 NaN으로 복원
+                nan_mask = ma20_slope.isna() | z_score_20.isna()
+                df.loc[nan_mask, 'Trend_Pullback_Score'] = np.nan
+                    
+            except Exception as e:
+                log_warning(f"Trend_Pullback_Score 계산 실패 ({ticker}): {e}")
+                df['Trend_Pullback_Score'] = np.nan
         
-        # Position_Range_60 계산 (Donchian)
-        try:
-            high_60 = df['고가'].rolling(60).max()
-            low_60 = df['저가'].rolling(60).min()
-            range_60 = high_60 - low_60
-            df['Position_Range_60'] = np.where(range_60 != 0, (df['종가'] - low_60) / range_60, 0.5)
-            df['Position_Range_60'] = df['Position_Range_60'].clip(0, 1)
-        except Exception as e:
-            log_warning(f"Position_Range_60 계산 실패 ({ticker}): {e}")
-            df['Position_Range_60'] = np.nan
+            # Position_Range_60 계산 (Donchian)
+            try:
+                high_60 = df['고가'].rolling(60).max()
+                low_60 = df['저가'].rolling(60).min()
+                range_60 = high_60 - low_60
+                df['Position_Range_60'] = np.where(range_60 != 0, (df['종가'] - low_60) / range_60, 0.5)
+                df['Position_Range_60'] = df['Position_Range_60'].clip(0, 1)
+            except Exception as e:
+                log_warning(f"Position_Range_60 계산 실패 ({ticker}): {e}")
+                df['Position_Range_60'] = np.nan
 
-        # Max_Drawdown_20 계산 (최근 20일 최대 낙폭, %)
-        # roll_max = 고가.rolling(20).max()
-        # daily_dd = (저가 / roll_max) - 1
-        # Max_Drawdown_20 = daily_dd.rolling(20).min() * 100
-        try:
-            roll_max_20 = df['고가'].rolling(window=20).max()
-            daily_dd_20 = (df['저가'] / roll_max_20) - 1
-            df['Max_Drawdown_20'] = daily_dd_20.rolling(window=20).min() * 100
-        except Exception as e:
-            log_warning(f"Max_Drawdown_20 계산 실패 ({ticker}): {e}")
-            df['Max_Drawdown_20'] = np.nan
+            # Max_Drawdown_20 계산 (최근 20일 최대 낙폭, %)
+            # roll_max = 고가.rolling(20).max()
+            # daily_dd = (저가 / roll_max) - 1
+            # Max_Drawdown_20 = daily_dd.rolling(20).min() * 100
+            try:
+                roll_max_20 = df['고가'].rolling(window=20).max()
+                daily_dd_20 = (df['저가'] / roll_max_20) - 1
+                df['Max_Drawdown_20'] = daily_dd_20.rolling(window=20).min() * 100
+            except Exception as e:
+                log_warning(f"Max_Drawdown_20 계산 실패 ({ticker}): {e}")
+                df['Max_Drawdown_20'] = np.nan
+            
+            # 변동성(1W), 변동성(3M) 피처 제거됨 (2024년 12월)
+            
+            # Eff_Ratio_10 계산 (효율성 비율) - 2024년 12월 제거
+            # try:
+            #     change = df['종가'].diff(10).abs()
+            #     volatility = df['종가'].diff(1).abs().rolling(10).sum()
+            #     df['Eff_Ratio_10'] = change / (volatility + 1e-9)
+            #     # 무한대 값 처리
+            #     df['Eff_Ratio_10'] = df['Eff_Ratio_10'].replace([np.inf, -np.inf], np.nan)
+            # except Exception as e:
+            #     log_warning(f"Eff_Ratio_10 계산 실패 ({ticker}): {e}")
+            #     df['Eff_Ratio_10'] = np.nan
+            
+            # 재무데이터 관련 지표 (백업 프로젝트와 동일)
+            if 'PER' in df.columns and not df['PER'].isnull().all():
+                df['이익수익률'] = 1 / df['PER']  # 이익수익률 = 1/PER
+            else:
+                df['이익수익률'] = np.nan
+            
+            # 시가총액 관련 지표 (재무데이터가 없는 경우에만 간단한 계산)
+            if 'PER' not in df.columns or df['PER'].isnull().all():
+                df['PER'] = df['종가'] / (df['거래대금'] / df['거래량'])  # 간단한 PER 계산
+            if 'PBR' not in df.columns or df['PBR'].isnull().all():
+                df['PBR'] = df['종가'] / (df['시가총액'] / df['거래량'])  # 간단한 PBR 계산
         
-        # 변동성(1W), 변동성(3M) 피처 제거됨 (2024년 12월)
-        
-        # Eff_Ratio_10 계산 (효율성 비율) - 2024년 12월 제거
-        # try:
-        #     change = df['종가'].diff(10).abs()
-        #     volatility = df['종가'].diff(1).abs().rolling(10).sum()
-        #     df['Eff_Ratio_10'] = change / (volatility + 1e-9)
-        #     # 무한대 값 처리
-        #     df['Eff_Ratio_10'] = df['Eff_Ratio_10'].replace([np.inf, -np.inf], np.nan)
-        # except Exception as e:
-        #     log_warning(f"Eff_Ratio_10 계산 실패 ({ticker}): {e}")
-        #     df['Eff_Ratio_10'] = np.nan
-        
-        # 재무데이터 관련 지표 (백업 프로젝트와 동일)
-        if 'PER' in df.columns and not df['PER'].isnull().all():
-            df['이익수익률'] = 1 / df['PER']  # 이익수익률 = 1/PER
-        else:
-            df['이익수익률'] = np.nan
-        
-        # 시가총액 관련 지표 (재무데이터가 없는 경우에만 간단한 계산)
-        if 'PER' not in df.columns or df['PER'].isnull().all():
-            df['PER'] = df['종가'] / (df['거래대금'] / df['거래량'])  # 간단한 PER 계산
-        if 'PBR' not in df.columns or df['PBR'].isnull().all():
-            df['PBR'] = df['종가'] / (df['시가총액'] / df['거래량'])  # 간단한 PBR 계산
-        
-        # 핵심 피처 추가
-        # 1. log_mktcap (시가총액 로그 변환)
-        # 시가총액이 0보다 큰 경우에만 로그 적용 (경고 방지)
-        df['log_mktcap'] = np.nan  # float 타입으로 초기화
-        mask = df['시가총액'] > 0
-        df.loc[mask, 'log_mktcap'] = np.log(df.loc[mask, '시가총액'])
-        
-        
-        # 2. PBR_log (PBR 로그 변환) - 2024년 12월 제거
-        # PBR이 0보다 큰 경우에만 로그 적용 (경고 방지)
-        # df['PBR_log'] = np.nan  # float 타입으로 초기화
-        # if 'PBR' in df.columns:
-        #     pbr_mask = df['PBR'] > 0
-        #     df.loc[pbr_mask, 'PBR_log'] = np.log(df.loc[pbr_mask, 'PBR'])
-        # else:
-        #     df['PBR_log'] = np.nan
-        
-        # 2-2. [신규 추가] HV변동성(1M) (Historical Volatility 1M)
-        # 일별 로그 수익률의 20일 이동 표준편차
-        try:
-            log_ret_1d = np.log(df['종가'] / df['종가'].shift(1))
-            df['HV_Volatility_20'] = log_ret_1d.rolling(window=20).std()
-        except Exception as e:
-            log_warning(f"HV_Volatility_20 계산 실패 ({ticker}): {e}")
-            df['HV_Volatility_20'] = np.nan
-        
-        # 2-2-0. [신규 추가] HV변동성(1W) (Historical Volatility 1W)
-        try:
-            if 'log_ret_1d' not in locals():
+            # 핵심 피처 추가
+            # 1. log_mktcap (시가총액 로그 변환)
+            # 시가총액이 0보다 큰 경우에만 로그 적용 (경고 방지)
+            df['log_mktcap'] = np.nan  # float 타입으로 초기화
+            mask = df['시가총액'] > 0
+            df.loc[mask, 'log_mktcap'] = np.log(df.loc[mask, '시가총액'])
+            
+            
+            # 2. PBR_log (PBR 로그 변환) - 2024년 12월 제거
+            # PBR이 0보다 큰 경우에만 로그 적용 (경고 방지)
+            # df['PBR_log'] = np.nan  # float 타입으로 초기화
+            # if 'PBR' in df.columns:
+            #     pbr_mask = df['PBR'] > 0
+            #     df.loc[pbr_mask, 'PBR_log'] = np.log(df.loc[pbr_mask, 'PBR'])
+            # else:
+            #     df['PBR_log'] = np.nan
+            
+            # 2-2. [신규 추가] HV변동성(1M) (Historical Volatility 1M)
+            # 일별 로그 수익률의 20일 이동 표준편차
+            try:
                 log_ret_1d = np.log(df['종가'] / df['종가'].shift(1))
-            df['HV_Volatility_5'] = log_ret_1d.rolling(window=5).std()
-        except Exception as e:
-            log_warning(f"HV_Volatility_5 계산 실패 ({ticker}): {e}")
-            df['HV_Volatility_5'] = np.nan
-        
-        # 2-4. [신규 추가] HV변동성(3M) (Historical Volatility 3M)
-        # 일별 로그 수익률의 60일 이동 표준편차
-        try:
-            if 'log_ret_1d' not in locals():
-                log_ret_1d = np.log(df['종가'] / df['종가'].shift(1))
-            df['HV_Volatility_60'] = log_ret_1d.rolling(window=60).std()
-        except Exception as e:
-            log_warning(f"HV_Volatility_60 계산 실패 ({ticker}): {e}")
-            df['HV_Volatility_60'] = np.nan
+                df['HV_Volatility_20'] = log_ret_1d.rolling(window=20).std()
+            except Exception as e:
+                log_warning(f"HV_Volatility_20 계산 실패 ({ticker}): {e}")
+                df['HV_Volatility_20'] = np.nan
             
-        # 2-3. [신규 추가] VWAP Disparity(1W) (VWAP 괴리율 1주)
-        # 최근 5일 거래대금 가중 평균 가격 대비 현재가 비율
-        try:
-            tp = (df['고가'] + df['저가'] + df['종가']) / 3
-            money = tp * df['거래량']
+            # 2-2-0. [신규 추가] HV변동성(1W) (Historical Volatility 1W)
+            try:
+                if 'log_ret_1d' not in locals():
+                    log_ret_1d = np.log(df['종가'] / df['종가'].shift(1))
+                df['HV_Volatility_5'] = log_ret_1d.rolling(window=5).std()
+            except Exception as e:
+                log_warning(f"HV_Volatility_5 계산 실패 ({ticker}): {e}")
+                df['HV_Volatility_5'] = np.nan
             
-            sum_money_5 = money.rolling(window=5).sum()
-            sum_vol_5 = df['거래량'].rolling(window=5).sum()
+            # 2-4. [신규 추가] HV변동성(3M) (Historical Volatility 3M)
+            # 일별 로그 수익률의 60일 이동 표준편차
+            try:
+                if 'log_ret_1d' not in locals():
+                    log_ret_1d = np.log(df['종가'] / df['종가'].shift(1))
+                df['HV_Volatility_60'] = log_ret_1d.rolling(window=60).std()
+            except Exception as e:
+                log_warning(f"HV_Volatility_60 계산 실패 ({ticker}): {e}")
+                df['HV_Volatility_60'] = np.nan
+                
+                # 2-3. [신규 추가] VWAP Disparity(1W) (VWAP 괴리율 1주)
+                # 최근 5일 거래대금 가중 평균 가격 대비 현재가 비율
+                try:
+                    tp = (df['고가'] + df['저가'] + df['종가']) / 3
+                    money = tp * df['거래량']
+                    
+                    sum_money_5 = money.rolling(window=5).sum()
+                    sum_vol_5 = df['거래량'].rolling(window=5).sum()
+                    
+                    vwap_5 = sum_money_5 / (sum_vol_5 + 1e-9)
+                    df['VWAP_Disparity_5'] = (df['종가'] / vwap_5 - 1) * 100
+                except Exception as e:
+                    log_warning(f"VWAP_Disparity_5 계산 실패 ({ticker}): {e}")
+                    df['VWAP_Disparity_5'] = np.nan
             
-            vwap_5 = sum_money_5 / (sum_vol_5 + 1e-9)
-            df['VWAP_Disparity_5'] = (df['종가'] / vwap_5 - 1) * 100
-        except Exception as e:
-            log_warning(f"VWAP_Disparity_5 계산 실패 ({ticker}): {e}")
-            df['VWAP_Disparity_5'] = np.nan
-        
-        # 2-2. [신규 추가] HV변동성(1M) (Historical Volatility 1M)
-        # 일별 로그 수익률의 20일 이동 표준편차
-        try:
-            log_ret_1d = np.log(df['종가'] / df['종가'].shift(1))
-            df['HV_Volatility_20'] = log_ret_1d.rolling(window=20).std()
-        except Exception as e:
-            log_warning(f"HV_Volatility_20 계산 실패 ({ticker}): {e}")
-            df['HV_Volatility_20'] = np.nan
-        
-        # 2-2-0. [신규 추가] HV변동성(1W) (Historical Volatility 1W)
-        try:
-            if 'log_ret_1d' not in locals():
-                log_ret_1d = np.log(df['종가'] / df['종가'].shift(1))
-            df['HV_Volatility_5'] = log_ret_1d.rolling(window=5).std()
-        except Exception as e:
-            log_warning(f"HV_Volatility_5 계산 실패 ({ticker}): {e}")
-            df['HV_Volatility_5'] = np.nan
+            # 3. 이격도 계산 (120일, 240일) - disparity_20 제거
+            for p in [120, 240]:
+                ma = df['종가'].rolling(window=p).mean()
+                df[f'disparity_{p}'] = (df['종가'] / ma) * 100
+            # disparity_20 추가
+            try:
+                ma20 = df['종가'].rolling(window=20).mean()
+                df['disparity_20'] = (df['종가'] / ma20) * 100
+            except Exception as e:
+                log_warning(f"disparity_20 계산 실패 ({ticker}): {e}")
+                df['disparity_20'] = np.nan
             
-        # 2-3. [신규 추가] VWAP Disparity(1W) (VWAP 괴리율 1주)
-        # 최근 5일 거래대금 가중 평균 가격 대비 현재가 비율
-        try:
-            tp = (df['고가'] + df['저가'] + df['종가']) / 3
-            money = tp * df['거래량']
+            # MA120_Slope 계산 (120일 이동평균선 기울기)
+            try:
+                ma120 = df['종가'].rolling(window=120).mean()
+                df['MA120_Slope'] = calculate_normalized_linear_regression_slope(ma120, window=5)
+            except Exception as e:
+                log_warning(f"MA120_Slope 계산 실패 ({ticker}): {e}")
+                df['MA120_Slope'] = np.nan
+
+            # MA20_Slope 계산 (20일 이동평균선 기울기) - MA120/MA240과 동일한 방식
+            try:
+                ma20 = df['종가'].rolling(window=20).mean()
+                df['MA20_Slope'] = calculate_normalized_linear_regression_slope(ma20, window=5)
+            except Exception as e:
+                log_warning(f"MA20_Slope 계산 실패 ({ticker}): {e}")
+                df['MA20_Slope'] = np.nan
             
-            sum_money_5 = money.rolling(window=5).sum()
-            sum_vol_5 = df['거래량'].rolling(window=5).sum()
+            # MA240_Slope 계산 (240일 이동평균선 기울기)
+            try:
+                ma240 = df['종가'].rolling(window=240).mean()
+                df['MA240_Slope'] = calculate_normalized_linear_regression_slope(ma240, window=5)
+            except Exception as e:
+                log_warning(f"MA240_Slope 계산 실패 ({ticker}): {e}")
+                df['MA240_Slope'] = np.nan
+
+            # =================================================================
+            # 랭킹 제외 규칙 (요구사항 반영)
+            # - MA60이 MA120, MA240 아래에 있고
+            # - 종가가 MA60 아래에 있으면 제외
+            # - 5거래일 평균 거래대금이 2,000,000달러 미만이면 제외
+            #
+            # 조건:
+            #   (MA60 < MA120) & (MA60 < MA240) & (Close < MA60)
+            #   OR
+            #   (거래대금_5일_평균 < 2,000,000 USD)
+            # =================================================================
+            try:
+                ma5 = df['종가'].rolling(window=5).mean()
+                ma60_lvl = df['종가'].rolling(window=60).mean()
+                ma120_lvl = df['종가'].rolling(window=120).mean()
+                ma240_lvl = df['종가'].rolling(window=240).mean()
+
+                ma5_prev = ma5.shift(1)
+                delta = (ma5 - ma5_prev) / ma5_prev.replace(0, np.nan)
+                df['MA5_Angle_Deg'] = np.degrees(np.arctan(delta.astype(float)))
+
+                거래대금_5일_평균 = df['거래대금'].rolling(window=5).mean()
+                exclude_trend = (ma60_lvl < ma120_lvl) & (ma60_lvl < ma240_lvl) & (df['종가'] < ma60_lvl)
+                exclude_liquidity = 거래대금_5일_평균 < 2_000_000
+                df['Exclude_Rank'] = exclude_trend | exclude_liquidity
+            except Exception:
+                # 계산 실패 시에도 기존 파이프라인은 유지
+                df['MA5_Angle_Deg'] = np.nan
+                df['Exclude_Rank'] = False
+        
+            # 3. 52주 신고가 비율
+            df['52주_최고가'] = df['종가'].rolling(250).max()
+            df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
             
-            vwap_5 = sum_money_5 / (sum_vol_5 + 1e-9)
-            df['VWAP_Disparity_5'] = (df['종가'] / vwap_5 - 1) * 100
-        except Exception as e:
-            log_warning(f"VWAP_Disparity_5 계산 실패 ({ticker}): {e}")
-            df['VWAP_Disparity_5'] = np.nan
-        
-        # 3. 이격도 계산 (120일, 240일) - disparity_20 제거
-        for p in [120, 240]:
-            ma = df['종가'].rolling(window=p).mean()
-            df[f'disparity_{p}'] = (df['종가'] / ma) * 100
-        # disparity_20 추가
-        try:
-            ma20 = df['종가'].rolling(window=20).mean()
-            df['disparity_20'] = (df['종가'] / ma20) * 100
-        except Exception as e:
-            log_warning(f"disparity_20 계산 실패 ({ticker}): {e}")
-            df['disparity_20'] = np.nan
-        
-        # MA120_Slope 계산 (120일 이동평균선 기울기)
-        try:
-            ma120 = df['종가'].rolling(window=120).mean()
-            df['MA120_Slope'] = calculate_normalized_linear_regression_slope(ma120, window=5)
-        except Exception as e:
-            log_warning(f"MA120_Slope 계산 실패 ({ticker}): {e}")
-            df['MA120_Slope'] = np.nan
+            # target 변수 생성:
+            # - 향후 10거래일 동안 최저가가 현재가 대비 -5% 이하로 내려가지 않고 (>= 0.95)
+            # - 향후 10거래일 동안 최고가가 현재가 대비 +8% 이상 한 번이라도 상승하면 (>= 1.08)
+            # => 1, 아니면 0
+            min_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).min()
+            max_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).max()
+            # 조건: 최소값 >= 현재가격 * 0.95 AND 최대값 >= 현재가격 * 1.08
+            df['target'] = ((min_price_10d / df['종가'] >= 0.95) & (max_price_10d / df['종가'] >= 1.08)).astype(int)
+            
+            # 중간 변수 삭제 (메모리 최적화)
+            del min_price_10d, max_price_10d
 
-        # MA20_Slope 계산 (20일 이동평균선 기울기) - MA120/MA240과 동일한 방식
-        try:
-            ma20 = df['종가'].rolling(window=20).mean()
-            df['MA20_Slope'] = calculate_normalized_linear_regression_slope(ma20, window=5)
-        except Exception as e:
-            log_warning(f"MA20_Slope 계산 실패 ({ticker}): {e}")
-            df['MA20_Slope'] = np.nan
-        
-        # MA240_Slope 계산 (240일 이동평균선 기울기)
-        try:
-            ma240 = df['종가'].rolling(window=240).mean()
-            df['MA240_Slope'] = calculate_normalized_linear_regression_slope(ma240, window=5)
-        except Exception as e:
-            log_warning(f"MA240_Slope 계산 실패 ({ticker}): {e}")
-            df['MA240_Slope'] = np.nan
+            # =================================================================
+            # 학습 타겟 제외 규칙 (요청사항)
+            # - Exclude_Rank(True)인 샘플은 학습 데이터에서 제외(drop)하기 위해 target을 NaN 처리합니다.
+            # - 학습 스크립트(train_gpu_main.py / train_lgbm_gpu_main.py)는
+            #   full_df['target'].notna()로 먼저 필터링하므로 정상 동작합니다.
+            # =================================================================
+            try:
+                if 'Exclude_Rank' in df.columns:
+                    exclude_mask = df['Exclude_Rank'].fillna(False)
+                    if exclude_mask.any():
+                        df.loc[exclude_mask, 'target'] = np.nan
+            except Exception:
+                # 제외 규칙 적용 실패 시에도 기존 target은 유지
+                pass
 
-        # =================================================================
-        # 랭킹 제외 규칙 (요구사항 반영)
-        # - MA60이 MA120, MA240 아래에 있고
-        # - 종가가 MA60 아래에 있으면 제외
-        # - 5거래일 평균 거래대금이 2,000,000달러 미만이면 제외
-        #
-        # 조건:
-        #   (MA60 < MA120) & (MA60 < MA240) & (Close < MA60)
-        #   OR
-        #   (거래대금_5일_평균 < 2,000,000 USD)
-        # =================================================================
-        try:
-            ma5 = df['종가'].rolling(window=5).mean()
-            ma60_lvl = df['종가'].rolling(window=60).mean()
-            ma120_lvl = df['종가'].rolling(window=120).mean()
-            ma240_lvl = df['종가'].rolling(window=240).mean()
-
-            ma5_prev = ma5.shift(1)
-            delta = (ma5 - ma5_prev) / ma5_prev.replace(0, np.nan)
-            df['MA5_Angle_Deg'] = np.degrees(np.arctan(delta.astype(float)))
-
-            거래대금_5일_평균 = df['거래대금'].rolling(window=5).mean()
-            exclude_trend = (ma60_lvl < ma120_lvl) & (ma60_lvl < ma240_lvl) & (df['종가'] < ma60_lvl)
-            exclude_liquidity = 거래대금_5일_평균 < 2_000_000
-            df['Exclude_Rank'] = exclude_trend | exclude_liquidity
-        except Exception:
-            # 계산 실패 시에도 기존 파이프라인은 유지
-            df['MA5_Angle_Deg'] = np.nan
-            df['Exclude_Rank'] = False
-        
-        # 3. 52주 신고가 비율
-        df['52주_최고가'] = df['종가'].rolling(250).max()
-        df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
-        
-        # target 변수 생성:
-        # - 향후 10거래일 동안 최저가가 현재가 대비 -5% 이하로 내려가지 않고 (>= 0.95)
-        # - 향후 10거래일 동안 최고가가 현재가 대비 +8% 이상 한 번이라도 상승하면 (>= 1.08)
-        # => 1, 아니면 0
-        min_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).min()
-        max_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).max()
-        # 조건: 최소값 >= 현재가격 * 0.95 AND 최대값 >= 현재가격 * 1.08
-        df['target'] = ((min_price_10d / df['종가'] >= 0.95) & (max_price_10d / df['종가'] >= 1.08)).astype(int)
-        
-        # 중간 변수 삭제 (메모리 최적화)
-        del min_price_10d, max_price_10d
-
-        # =================================================================
-        # 학습 타겟 제외 규칙 (요청사항)
-        # - Exclude_Rank(True)인 샘플은 학습 데이터에서 제외(drop)하기 위해 target을 NaN 처리합니다.
-        # - 학습 스크립트(train_gpu_main.py / train_lgbm_gpu_main.py)는
-        #   full_df['target'].notna()로 먼저 필터링하므로 정상 동작합니다.
-        # =================================================================
-        try:
-            if 'Exclude_Rank' in df.columns:
-                exclude_mask = df['Exclude_Rank'].fillna(False)
-                if exclude_mask.any():
-                    df.loc[exclude_mask, 'target'] = np.nan
-        except Exception:
-            # 제외 규칙 적용 실패 시에도 기존 target은 유지
-            pass
-
-        df['종목코드'] = ticker
-        # 종목명 추가 (있는 경우만)
-        if stock_name is not None:
-            df['종목명'] = stock_name
-        
-        # 데이터 구조 설정
-        # merge_asof 후 date 컬럼이 제거되므로 다시 추가
-        df['date'] = df.index
+            df['종목코드'] = ticker
+            # 종목명 추가 (있는 경우만)
+            if stock_name is not None:
+                df['종목명'] = stock_name
+            
+            # 데이터 구조 설정
+            # merge_asof 후 date 컬럼이 제거되므로 다시 추가
+            df['date'] = df.index
             df.set_index('date', inplace=True)
             
             return df
