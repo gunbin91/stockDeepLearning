@@ -902,9 +902,13 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     final_df = final_df.sort_values('date')
     macro_df = macro_df.sort_index()
     
-    # 인덱스를 datetime으로 확실히 변환
+    # 인덱스를 datetime으로 확실히 변환하고 dtype 통일 (나노초로 통일)
     if not isinstance(macro_df.index, pd.DatetimeIndex):
         macro_df.index = pd.to_datetime(macro_df.index)
+    
+    # 날짜 dtype 통일 (나노초로 통일하여 merge_asof 호환성 보장)
+    final_df['date'] = pd.to_datetime(final_df['date']).astype('datetime64[ns]')
+    macro_df.index = pd.to_datetime(macro_df.index).astype('datetime64[ns]')
     
     log_info("   🔗 거시경제 지표(KOSPI, USD/KRW, VIX)를 종목 데이터와 병합 중...")
     
@@ -913,9 +917,12 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
         final_df = pd.merge_asof(final_df, macro_df, left_on='date', right_index=True, direction='backward')
     except Exception as e:
         log_warning(f"   ⚠️ merge_asof 실패, 일반 merge로 시도: {e}")
-        # 일반 merge로 대체
+        # 일반 merge로 대체 (날짜 dtype 통일 보장)
         macro_df_reset = macro_df.reset_index()
         macro_df_reset.rename(columns={'index': 'date'}, inplace=True)
+        # 날짜 dtype 통일
+        macro_df_reset['date'] = pd.to_datetime(macro_df_reset['date']).astype('datetime64[ns]')
+        final_df['date'] = pd.to_datetime(final_df['date']).astype('datetime64[ns]')
         final_df = pd.merge(final_df, macro_df_reset, on='date', how='left')
     
     # Relative_Strength_20 피처는 제거됨

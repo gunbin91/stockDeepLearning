@@ -668,7 +668,18 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             return None
             
         df_marcap_ticker.sort_values(by='date', inplace=True)
-        df = pd.merge_asof(left=df, right=df_marcap_ticker[['date', 'Marcap']], left_index=True, right_on='date', direction='backward')
+        # 날짜 dtype 통일 (나노초로 통일하여 merge_asof 호환성 보장)
+        df_marcap_ticker['date'] = pd.to_datetime(df_marcap_ticker['date']).astype('datetime64[ns]')
+        if isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index).astype('datetime64[ns]')
+        try:
+            df = pd.merge_asof(left=df, right=df_marcap_ticker[['date', 'Marcap']], left_index=True, right_on='date', direction='backward')
+        except Exception as e:
+            # merge_asof 실패 시 일반 merge로 대체
+            log_warning(f"⚠️ {ticker} 시가총액 merge_asof 실패, 일반 merge로 시도: {e}")
+            df = df.reset_index()
+            df = pd.merge(df, df_marcap_ticker[['date', 'Marcap']], on='date', how='left')
+            df = df.set_index('date')
         df.rename(columns={'Marcap': '시가총액'}, inplace=True)
         
         # 시가총액 데이터 메모리 해제
@@ -680,8 +691,19 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             df_financial_ticker = _global_financial_data[_global_financial_data['Code'] == ticker].copy()
             if not df_financial_ticker.empty:
                 df_financial_ticker.sort_values(by='date', inplace=True)
-                df = pd.merge_asof(left=df, right=df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], 
-                                   left_index=True, right_on='date', direction='backward')
+                # 날짜 dtype 통일 (나노초로 통일하여 merge_asof 호환성 보장)
+                df_financial_ticker['date'] = pd.to_datetime(df_financial_ticker['date']).astype('datetime64[ns]')
+                if isinstance(df.index, pd.DatetimeIndex):
+                    df.index = pd.to_datetime(df.index).astype('datetime64[ns]')
+                try:
+                    df = pd.merge_asof(left=df, right=df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], 
+                                       left_index=True, right_on='date', direction='backward')
+                except Exception as e:
+                    # merge_asof 실패 시 일반 merge로 대체
+                    log_warning(f"⚠️ {ticker} 재무데이터 merge_asof 실패, 일반 merge로 시도: {e}")
+                    df = df.reset_index()
+                    df = pd.merge(df, df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], on='date', how='left')
+                    df = df.set_index('date')
                 
                 # 재무데이터가 없는 경우 기본값 설정
                 if 'PER' not in df.columns or df['PER'].isnull().all():

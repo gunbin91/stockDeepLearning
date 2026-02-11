@@ -47,6 +47,50 @@ sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
 
 
+# pandas 호환성 패치: cuDF가 pandas.api.types.is_interval을 사용하는데 최신 pandas에서는 제거됨
+def apply_pandas_compatibility_patch():
+    """pandas 최신 버전과 cuDF 호환성을 위한 패치 적용"""
+    try:
+        import pandas.api.types as pd_types
+        # is_interval이 없으면 추가 (cuDF 호환성)
+        if not hasattr(pd_types, 'is_interval'):
+            # pandas 2.0+에서는 IntervalDtype을 사용하여 체크
+            def is_interval(arr):
+                """Interval 타입 체크 함수"""
+                try:
+                    from pandas import IntervalDtype
+                    return hasattr(arr, 'dtype') and isinstance(arr.dtype, IntervalDtype)
+                except:
+                    return False
+            pd_types.is_interval = is_interval
+    except Exception as e:
+        # 패치 적용 실패해도 계속 진행 (cuDF가 직접 처리할 수 있음)
+        pass
+
+# scikit-learn 호환성 패치: cuML이 BaseEstimator._get_default_requests를 사용하는데 최신 scikit-learn에서는 제거됨
+def apply_sklearn_compatibility_patch():
+    """scikit-learn 최신 버전과 cuML 호환성을 위한 패치 적용"""
+    try:
+        from sklearn.base import BaseEstimator
+        # _get_default_requests가 없으면 추가 (cuML 호환성)
+        if not hasattr(BaseEstimator, '_get_default_requests'):
+            # scikit-learn 1.3+에서는 _get_metadata_request를 사용하거나, 없으면 빈 함수로 대체
+            if hasattr(BaseEstimator, '_get_metadata_request'):
+                # _get_metadata_request를 _get_default_requests로 별칭 생성
+                original_get_metadata_request = BaseEstimator._get_metadata_request
+                def _get_default_requests(self, *args, **kwargs):
+                    return original_get_metadata_request(self, *args, **kwargs)
+                BaseEstimator._get_default_requests = _get_default_requests
+            else:
+                # 둘 다 없으면 빈 함수로 대체
+                def _get_default_requests(self, *args, **kwargs):
+                    return {}
+                BaseEstimator._get_default_requests = _get_default_requests
+    except Exception as e:
+        # 패치 적용 실패해도 계속 진행
+        pass
+
+
 # 프로젝트 루트 경로를 sys.path에 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -873,6 +917,10 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         # 모델 로딩 (강화된 에러 처리)
         try:
             print("  - 정식 모델 로딩 중...")
+            
+            # 호환성 패치 적용 (cuDF/cuML 로드 전에 실행)
+            apply_pandas_compatibility_patch()
+            apply_sklearn_compatibility_patch()
             
             # cuML 모델 파일 우선 확인, 없으면 기존 모델 파일 확인
             model_file_path = None
