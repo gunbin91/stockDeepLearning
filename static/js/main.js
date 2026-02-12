@@ -216,8 +216,7 @@ $(document).ready(function() {
                     { targets: [6], width: '90px', className: 'text-end' }, // 최종점수
                     { targets: [7], width: '100px', className: 'text-end' }, // RF상승확률
                     { targets: [8], width: '110px', className: 'text-end' }, // LGBM상승확률
-                    { targets: [9], width: '90px', className: 'text-end' }, // 변동성
-                    { targets: [10], width: '100px', className: 'text-end' }       // 시가총액
+                    { targets: [9], width: '100px', className: 'text-end' }       // 시가총액
                 ],
                 responsive: false,
                 drawCallback: function() {
@@ -1019,7 +1018,6 @@ $(document).ready(function() {
                                                 <th>최종점수</th>
                                                 <th>RF상승확률</th>
                                                 <th>LGBM상승확률</th>
-                                                <th>변동성</th>
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -1065,7 +1063,6 @@ $(document).ready(function() {
                         <td class="text-end">${trade.final_score !== null && trade.final_score !== undefined ? trade.final_score.toFixed(2) : 'N/A'}</td>
                         <td class="text-end">${trade.ml_pred_proba !== null && trade.ml_pred_proba !== undefined ? (trade.ml_pred_proba * 100).toFixed(2) + '%' : 'N/A'}</td>
                         <td class="text-end">${trade.lgbm_pred_proba !== null && trade.lgbm_pred_proba !== undefined ? (trade.lgbm_pred_proba * 100).toFixed(2) + '%' : '-'}</td>
-                        <td class="text-end">${trade.volatility_score !== null && trade.volatility_score !== undefined ? trade.volatility_score.toFixed(2) : 'N/A'}</td>
                     </tr>
                 `;
             });
@@ -1131,8 +1128,7 @@ $(document).ready(function() {
                         { width: "120px", targets: 15 }, // 총자산
                         { width: "100px", targets: 16 }, // 최종점수
                         { width: "100px", targets: 17 }, // RF상승확률
-                        { width: "100px", targets: 18 }, // LGBM상승확률
-                        { width: "100px", targets: 19 }  // 변동성
+                        { width: "100px", targets: 18 }  // LGBM상승확률
                     ]
                 });
             }
@@ -1452,8 +1448,7 @@ $(document).ready(function() {
     function addWeightsRow(key = '', value = 0) {
         const displayNameMap = {
             'ml_pred_proba': 'ml_pred_proba (RF 상승확률)',
-            'lgbm_pred_proba': 'lgbm_pred_proba (LGBM 상승확률)',
-            'volatility_score': 'volatility_score (변동성 점수)'
+            'lgbm_pred_proba': 'lgbm_pred_proba (LGBM 상승확률)'
         };
         const displayName = displayNameMap[key] || key;
         const rowHtml = `

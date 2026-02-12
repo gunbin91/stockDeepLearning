@@ -65,7 +65,6 @@ def _load_optimal_weights_safe() -> dict:
     """
     # 기본값: 기존과 동일하게 모두 계산
     weights = {
-        "volatility_score": 0.10,
         "ml_pred_proba": 0.50,
         "lgbm_pred_proba": 0.50,
     }
@@ -76,8 +75,6 @@ def _load_optimal_weights_safe() -> dict:
                 loaded = json.load(f)
             if isinstance(loaded, dict):
                 # 키 호환: lgb_pred_proba가 있을 수 있음
-                if "volatility_score" in loaded:
-                    weights["volatility_score"] = float(loaded["volatility_score"])
                 if "ml_pred_proba" in loaded:
                     weights["ml_pred_proba"] = float(loaded["ml_pred_proba"])
                 if "lgbm_pred_proba" in loaded:
@@ -162,14 +159,11 @@ def run_analysis(analysis_date_str):
 
         # 가중치 로드 (가중치 0인 항목은 계산을 스킵)
         weights = _load_optimal_weights_safe()
-        do_volatility = weights.get("volatility_score", 0) > 0
         do_rf = weights.get("ml_pred_proba", 0) > 0
         do_lgbm = weights.get("lgbm_pred_proba", 0) > 0
         log_info("⚙️ 가중치 기반 계산 스킵 설정", context={
-            "volatility_score": weights.get("volatility_score"),
             "ml_pred_proba": weights.get("ml_pred_proba"),
             "lgbm_pred_proba": weights.get("lgbm_pred_proba"),
-            "do_volatility": do_volatility,
             "do_rf": do_rf,
             "do_lgbm": do_lgbm
         })
@@ -192,17 +186,13 @@ def run_analysis(analysis_date_str):
             json.dump(market_condition, f, ensure_ascii=False, indent=4)
         log_info(f"   💾 시장 현황 데이터를 '{market_condition_path}'에 저장했습니다.")
 
-        # 팩터 점수(현재는 volatility_score) 계산은 가중치가 0이면 스킵
+        # 팩터 점수 계산 (현재는 계산할 팩터가 없음)
         log_info("📊 팩터별 점수 계산을 시작합니다...")
         try:
             import gc
             gc.collect()
 
-            if do_volatility:
-                scored_df = scoring.calculate_factor_scores(feature_df)
-            else:
-                log_info("   ⏭️ volatility_score 가중치가 0이라 팩터 점수 계산을 건너뜁니다.")
-                scored_df = feature_df.copy()
+            scored_df = scoring.calculate_factor_scores(feature_df)
 
             if scored_df is None or scored_df.empty:
                 error_msg = "팩터 점수 계산 결과가 비어있습니다."
