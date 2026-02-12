@@ -120,6 +120,7 @@
                         <th>최종점수(점)</th>
                         <th>RF상승확률(%)</th>
                         <th>LGBM상승확률(%)</th>
+                        <th>CatBoost상승확률(%)</th>
                         <th>시가총액(억)</th>
                     </tr>
                 </thead>
@@ -137,6 +138,13 @@
                         <td>
                             {% if 'lgbm_pred_proba' in row.index and row['lgbm_pred_proba'] is not none and not (row['lgbm_pred_proba'] != row['lgbm_pred_proba']) %}
                                 {{ "{:.2f}".format(row['lgbm_pred_proba']) }}
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if 'catboost_pred_proba' in row.index and row['catboost_pred_proba'] is not none and not (row['catboost_pred_proba'] != row['catboost_pred_proba']) %}
+                                {{ "{:.2f}".format(row['catboost_pred_proba']) }}
                             {% else %}
                                 <span class="text-muted">-</span>
                             {% endif %}

@@ -1,4 +1,5 @@
 {
-    "ml_pred_proba": 0.4,
-    "lgbm_pred_proba": 0.6
+    "ml_pred_proba": 0.0,
+    "lgbm_pred_proba": 0.5,
+    "catboost_pred_proba": 0.5
 }

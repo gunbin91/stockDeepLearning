@@ -50,6 +50,20 @@
       <i class="fas fa-bolt me-2"></i>LightGBM (LGBM)
     </button>
   </li>
+  <li class="nav-item" role="presentation">
+    <button
+      class="nav-link"
+      id="catboost-tab"
+      data-bs-toggle="tab"
+      data-bs-target="#catboost-pane"
+      type="button"
+      role="tab"
+      aria-controls="catboost-pane"
+      aria-selected="false"
+    >
+      <i class="fas fa-cat me-2"></i>CatBoost
+    </button>
+  </li>
   </ul>
 
 <div class="tab-content" id="modelSelectTabContent">
@@ -779,6 +793,353 @@
     </div>
     {% endif %}
   </div>
+
+  <!-- CatBoost 탭 콘텐츠 -->
+  <div class="tab-pane fade" id="catboost-pane" role="tabpanel" aria-labelledby="catboost-tab">
+    {% if not catboost_model_info %}
+    <div class="alert alert-warning" role="alert">
+      <i class="fas fa-exclamation-circle me-2"></i>CatBoost 모델 정보가 없습니다. 모델을 학습해주세요.
+    </div>
+    {% else %}
+    
+    <!-- 모델 개요 -->
+    <div class="card mb-4">
+      <div class="card-header">
+        <h5 class="mb-0">
+          <i class="fas fa-info-circle text-info me-2"></i>모델 개요 (CatBoost)
+        </h5>
+      </div>
+      <div class="card-body">
+            <div class="row">
+          <div class="col-md-4">
+            <div class="card bg-light">
+              <div class="card-body">
+                <h6 class="card-title">
+                  <i class="fas fa-trophy text-warning me-2"></i>최고 성능
+                </h6>
+                <h3 class="mb-1 text-success">
+                  {% if catboost_model_info.best_score %}{{ catboost_model_info.best_score | round(4) }}{% else %}N/A{% endif %}
+                </h3>
+                <small class="text-muted">ROC-AUC 점수</small>
+              </div>
+              </div>
+            </div>
+          <div class="col-md-4">
+            <div class="card bg-light">
+              <div class="card-body">
+                <h6 class="card-title">
+                  <i class="fas fa-redo text-primary me-2"></i>Best Iteration
+                </h6>
+                <h3 class="mb-1">
+                  {{ catboost_model_info.best_iteration or 'N/A' }}
+                </h3>
+                <small class="text-muted">최적 학습 횟수</small>
+          </div>
+        </div>
+          </div>
+          <div class="col-md-4">
+            <div class="card bg-light">
+              <div class="card-body">
+                <h6 class="card-title">
+                  <i class="fas fa-list text-info me-2"></i>탐색 범위
+                </h6>
+                <h3 class="mb-1">
+                  {% if catboost_model_info.trials_completed is not none %}
+                    {{ catboost_model_info.trials_completed }}회
+                  {% elif catboost_model_info.n_trials is not none %}
+                    {{ catboost_model_info.n_trials }}회
+                  {% else %}
+                    N/A
+                  {% endif %}
+                </h3>
+                <small class="text-muted">Optuna Trial 수</small>
+              </div>
+            </div>
+          </div>
+</div>
+
+        <div class="row mt-3">
+          <div class="col-12">
+            <div class="card bg-light mb-3">
+              <div class="card-body">
+                <h6 class="card-title">
+                  <i class="fas fa-calendar text-info me-2"></i>최종 학습일
+                </h6>
+                <p class="card-text mb-0">{{ catboost_model_info.last_modified }}</p>
+              </div>
+            </div>
+          </div>
+          <div class="col-12">
+            <div class="card bg-light">
+              <div class="card-body">
+                <h6 class="card-title">
+                  <i class="fas fa-file-code text-warning me-2"></i>모델 파일 경로
+                </h6>
+                <code>{{ catboost_model_info.model_path }}</code>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 최적 파라미터 -->
+<div class="card mb-4">
+  <div class="card-header">
+    <h5 class="mb-0">
+          <i class="fas fa-cogs text-primary me-2"></i>최적 파라미터 (CatBoost)
+        </h5>
+      </div>
+      <div class="card-body">
+        <div class="row">
+          {% for param, value in catboost_model_info.params.items() %}
+          <div class="col-md-4 mb-2">
+            <div class="d-flex justify-content-between align-items-center border-bottom pb-1">
+              <span class="fw-bold">{{ param }}</span>
+              <span class="badge bg-secondary">{{ value }}</span>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <!-- 피처 중요도 -->
+    <div class="card mb-4">
+      <div class="card-header">
+        <h5 class="mb-0">
+          <i class="fas fa-chart-bar text-warning me-2"></i>피처 중요도 (CatBoost)
+    </h5>
+  </div>
+  <div class="card-body">
+    <!-- 탭 네비게이션 -->
+        <ul class="nav nav-tabs mb-4" id="catboostFeatureTabs" role="tablist">
+      <li class="nav-item" role="presentation">
+        <button
+          class="nav-link active"
+              id="catboost-default-tab"
+          data-bs-toggle="tab"
+              data-bs-target="#catboost-default-pane"
+          type="button"
+          role="tab"
+              aria-controls="catboost-default-pane"
+          aria-selected="true"
+        >
+              <i class="fas fa-star me-2"></i>기본 중요도
+        </button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button
+          class="nav-link"
+              id="catboost-shap-tab"
+          data-bs-toggle="tab"
+              data-bs-target="#catboost-shap-pane"
+          type="button"
+          role="tab"
+              aria-controls="catboost-shap-pane"
+          aria-selected="false"
+        >
+              <i class="fas fa-chart-line me-2"></i>SHAP 중요도
+        </button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button
+          class="nav-link"
+              id="catboost-perm-tab"
+          data-bs-toggle="tab"
+              data-bs-target="#catboost-perm-pane"
+          type="button"
+          role="tab"
+              aria-controls="catboost-perm-pane"
+          aria-selected="false"
+        >
+              <i class="fas fa-random me-2"></i>순열 중요도
+        </button>
+      </li>
+    </ul>
+
+        <div class="tab-content" id="catboostFeatureTabContent">
+          <!-- 기본 중요도 탭 -->
+          <div class="tab-pane fade show active" id="catboost-default-pane" role="tabpanel" aria-labelledby="catboost-default-tab">
+            <div class="alert alert-info mb-3">
+              <i class="fas fa-info-circle me-2"></i>
+              <strong>기본 중요도:</strong> CatBoost 모델의 피처 중요도를 나타냅니다. 
+              이 값은 피처가 모델 예측에 기여한 정도를 나타냅니다. 
+              값이 클수록 해당 피처가 모델 예측에 더 중요합니다.
+            </div>
+            <div class="mb-4">
+              <canvas id="catboost_default_chart" width="400" height="200"></canvas>
+            </div>
+        
+            <div class="accordion" id="catboostDefaultAccordion">
+              <div class="accordion-item">
+                <h2 class="accordion-header">
+                  <button
+                    class="accordion-button collapsed"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#catboostDefaultDetails"
+                  >
+                    <i class="fas fa-table me-2"></i>상세 데이터 보기
+          </button>
+                </h2>
+                <div
+                  id="catboostDefaultDetails"
+                  class="accordion-collapse collapse"
+                  data-bs-parent="#catboostDefaultAccordion"
+                >
+                  <div class="accordion-body">
+                    <div class="table-responsive">
+                      <table class="table table-striped" id="catboost_default_table">
+                        <thead class="table-dark">
+                          <tr>
+                            <th>피처 (Feature)</th>
+                            <th>중요도 (Importance)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% if catboost_model_info.default_importances %}
+                            {% for feature, importance in catboost_model_info.default_importances %}
+                            <tr>
+                              <td>{{ feature }}</td>
+                              <td>
+                                {% if importance >= 1000 %}
+                                  {{ "{:,.2f}".format(importance) }}
+                                {% else %}
+                                  {{ "{:.6f}".format(importance) }}
+                                {% endif %}
+                              </td>
+                            </tr>
+                            {% endfor %}
+                          {% else %}
+                            <tr>
+                              <td class="text-center text-muted" colspan="2">기본 중요도 정보가 없습니다.</td>
+                            </tr>
+                          {% endif %}
+                        </tbody>
+                      </table>
+        </div>
+                  </div>
+                </div>
+          </div>
+        </div>
+      </div>
+
+          <!-- SHAP 중요도 탭 -->
+          <div class="tab-pane fade" id="catboost-shap-pane" role="tabpanel" aria-labelledby="catboost-shap-tab">
+            <div class="mb-4">
+              <canvas id="catboost_shap_chart" width="400" height="200"></canvas>
+        </div>
+        
+            <div class="accordion" id="catboostShapAccordion">
+              <div class="accordion-item">
+                <h2 class="accordion-header">
+                  <button
+                    class="accordion-button collapsed"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#catboostShapDetails"
+                  >
+                    <i class="fas fa-table me-2"></i>상세 데이터 보기
+          </button>
+                </h2>
+                <div
+                  id="catboostShapDetails"
+                  class="accordion-collapse collapse"
+                  data-bs-parent="#catboostShapAccordion"
+                >
+                  <div class="accordion-body">
+                    <div class="table-responsive">
+                      <table class="table table-striped" id="catboost_shap_table">
+                        <thead class="table-dark">
+                          <tr>
+                            <th>피처 (Feature)</th>
+                            <th>중요도 (Importance)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% if catboost_model_info.shap_importances %}
+                            {% for feature, importance in catboost_model_info.shap_importances %}
+                            <tr>
+                              <td>{{ feature }}</td>
+                              <td>{{ "{:.6f}".format(importance) }}</td>
+                            </tr>
+                            {% endfor %}
+                          {% else %}
+                            <tr>
+                              <td class="text-center text-muted" colspan="2">SHAP 중요도 정보가 없습니다.</td>
+                            </tr>
+                          {% endif %}
+                        </tbody>
+                      </table>
+        </div>
+          </div>
+        </div>
+      </div>
+    </div>
+          </div>
+
+          <!-- 순열 중요도 탭 -->
+          <div class="tab-pane fade" id="catboost-perm-pane" role="tabpanel" aria-labelledby="catboost-perm-tab">
+            <div class="mb-4">
+              <canvas id="catboost_perm_chart" width="400" height="200"></canvas>
+            </div>
+        
+            <div class="accordion" id="catboostPermAccordion">
+              <div class="accordion-item">
+                <h2 class="accordion-header">
+                  <button
+                    class="accordion-button collapsed"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#catboostPermDetails"
+                  >
+                    <i class="fas fa-table me-2"></i>상세 데이터 보기
+                  </button>
+                </h2>
+                <div
+                  id="catboostPermDetails"
+                  class="accordion-collapse collapse"
+                  data-bs-parent="#catboostPermAccordion"
+                >
+                  <div class="accordion-body">
+                    <div class="table-responsive">
+                      <table class="table table-striped" id="catboost_perm_table">
+                        <thead class="table-dark">
+                          <tr>
+                            <th>피처 (Feature)</th>
+                            <th>중요도 (Importance)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% if catboost_model_info.permutation_importances %}
+                            {% for feature, importance in catboost_model_info.permutation_importances %}
+                            <tr>
+                              <td>{{ feature }}</td>
+                              <td>{{ "{:.6f}".format(importance) }}</td>
+                            </tr>
+                            {% endfor %}
+                          {% else %}
+                            <tr>
+                              <td class="text-center text-muted" colspan="2">순열 중요도 정보가 없습니다.</td>
+                            </tr>
+                          {% endif %}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
 </div>
 
 {% endblock %} 
@@ -903,6 +1264,46 @@
         let lgbmShapChart = createChart('lgbm_shap_chart', lgbmShapData, 'LGBM SHAP Importance');
         let lgbmPermChart = createChart('lgbm_perm_chart', lgbmPermData, 'LGBM Permutation Importance');
         
+        // CatBoost 차트 생성
+        {% if catboost_model_info %}
+        const catboostDefaultData = {{ catboost_model_info.default_importances | tojson if catboost_model_info.default_importances else '[]' }};
+        const catboostShapData = {{ catboost_model_info.shap_importances | tojson if catboost_model_info.shap_importances else '[]' }};
+        const catboostPermData = {{ catboost_model_info.permutation_importances | tojson if catboost_model_info.permutation_importances else '[]' }};
+        
+        let catboostDefaultChart = createChart('catboost_default_chart', catboostDefaultData, 'CatBoost Default Importance');
+        let catboostShapChart = createChart('catboost_shap_chart', catboostShapData, 'CatBoost SHAP Importance');
+        let catboostPermChart = createChart('catboost_perm_chart', catboostPermData, 'CatBoost Permutation Importance');
+        
+        // CatBoost DataTables 초기화
+        if (!$.fn.DataTable.isDataTable('#catboost_default_table')) {
+            $('#catboost_default_table').DataTable({
+                pageLength: 10,
+                order: [[1, 'desc']],
+                language: {
+                    url: '//cdn.datatables.net/plug-ins/1.13.7/i18n/ko.json'
+                }
+            });
+        }
+        if (!$.fn.DataTable.isDataTable('#catboost_shap_table')) {
+            $('#catboost_shap_table').DataTable({
+                pageLength: 10,
+                order: [[1, 'desc']],
+                language: {
+                    url: '//cdn.datatables.net/plug-ins/1.13.7/i18n/ko.json'
+                }
+            });
+        }
+        if (!$.fn.DataTable.isDataTable('#catboost_perm_table')) {
+            $('#catboost_perm_table').DataTable({
+                pageLength: 10,
+                order: [[1, 'desc']],
+                language: {
+                    url: '//cdn.datatables.net/plug-ins/1.13.7/i18n/ko.json'
+                }
+            });
+        }
+        {% endif %}
+        
         // LGBM DataTables 초기화
         if (!$.fn.DataTable.isDataTable('#lgbm_default_table')) {
             $('#lgbm_default_table').DataTable({
@@ -956,6 +1357,11 @@
           if (e.target.id === 'lgbm-default-tab' && lgbmDefaultChart) lgbmDefaultChart.resize();
           if (e.target.id === 'lgbm-shap-tab' && lgbmShapChart) lgbmShapChart.resize();
           if (e.target.id === 'lgbm-perm-tab' && lgbmPermChart) lgbmPermChart.resize();
+          {% if catboost_model_info %}
+          if (e.target.id === 'catboost-default-tab' && catboostDefaultChart) catboostDefaultChart.resize();
+          if (e.target.id === 'catboost-shap-tab' && catboostShapChart) catboostShapChart.resize();
+          if (e.target.id === 'catboost-perm-tab' && catboostPermChart) catboostPermChart.resize();
+          {% endif %}
       });
 
       // --- 상관관계 계산 버튼 ---

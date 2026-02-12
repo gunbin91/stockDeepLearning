@@ -67,6 +67,7 @@ def _load_optimal_weights_safe() -> dict:
     weights = {
         "ml_pred_proba": 0.50,
         "lgbm_pred_proba": 0.50,
+        "catboost_pred_proba": 0.0,
     }
     try:
         weights_path = str(path_manager.get_weights_path())
@@ -81,6 +82,8 @@ def _load_optimal_weights_safe() -> dict:
                     weights["lgbm_pred_proba"] = float(loaded["lgbm_pred_proba"])
                 elif "lgb_pred_proba" in loaded:
                     weights["lgbm_pred_proba"] = float(loaded["lgb_pred_proba"])
+                if "catboost_pred_proba" in loaded:
+                    weights["catboost_pred_proba"] = float(loaded["catboost_pred_proba"])
     except Exception as e:
         log_warning(f"가중치 파일 로드 실패(기본값 사용): {e}")
     return weights
@@ -161,11 +164,14 @@ def run_analysis(analysis_date_str):
         weights = _load_optimal_weights_safe()
         do_rf = weights.get("ml_pred_proba", 0) > 0
         do_lgbm = weights.get("lgbm_pred_proba", 0) > 0
+        do_catboost = weights.get("catboost_pred_proba", 0) > 0
         log_info("⚙️ 가중치 기반 계산 스킵 설정", context={
             "ml_pred_proba": weights.get("ml_pred_proba"),
             "lgbm_pred_proba": weights.get("lgbm_pred_proba"),
+            "catboost_pred_proba": weights.get("catboost_pred_proba"),
             "do_rf": do_rf,
-            "do_lgbm": do_lgbm
+            "do_lgbm": do_lgbm,
+            "do_catboost": do_catboost
         })
 
         actual_date_str = actual_analysis_date.strftime('%Y-%m-%d')
@@ -251,11 +257,33 @@ def run_analysis(analysis_date_str):
                 lgbm_predicted_df = feature_df[['종목코드']].copy()
                 lgbm_predicted_df['lgbm_pred_proba'] = float('nan')
 
+            # 모델 예측 시도 (CatBoost) - 가중치가 0이면 스킵
+            if do_catboost:
+                log_info("   🤖 [CatBoost] 모델 로딩 및 예측 중...")
+                try:
+                    catboost_predicted_df = ml_model.predict_with_catboost_model(feature_df)
+                    if not catboost_predicted_df.empty and 'catboost_pred_proba' in catboost_predicted_df.columns:
+                        log_info(f"   ✅ [CatBoost] 예측 완료: {len(catboost_predicted_df):,}개 종목")
+                    else:
+                        log_warning("   ⚠️ [CatBoost] 예측 결과가 비어있거나 유효하지 않습니다.")
+                except Exception as e:
+                    log_warning(f"   ⚠️ [CatBoost] 예측 중 오류 (건너뜀): {e}")
+                    catboost_predicted_df = pd.DataFrame()
+            else:
+                log_info("   ⏭️ [CatBoost] 가중치가 0이라 예측을 건너뜁니다.")
+                catboost_predicted_df = feature_df[['종목코드']].copy()
+                catboost_predicted_df['catboost_pred_proba'] = float('nan')
+
             # 예측 결과 병합
             # RF 결과에 LGBM 결과 병합
             if lgbm_predicted_df is not None and not lgbm_predicted_df.empty:
                 ml_predicted_df = pd.merge(ml_predicted_df, lgbm_predicted_df, on='종목코드', how='left')
                 log_info("   📊 [통합] RF 및 LGBM 예측 결과 병합 완료")
+            
+            # CatBoost 결과 병합
+            if catboost_predicted_df is not None and not catboost_predicted_df.empty:
+                ml_predicted_df = pd.merge(ml_predicted_df, catboost_predicted_df, on='종목코드', how='left')
+                log_info("   📊 [통합] CatBoost 예측 결과 병합 완료")
 
             # 예측 결과 검증
             if '종목코드' not in ml_predicted_df.columns:
@@ -270,6 +298,9 @@ def run_analysis(analysis_date_str):
             # lgbm_pred_proba는 가중치가 0이면 NaN으로 존재하도록 유지(호환성)
             if 'lgbm_pred_proba' not in ml_predicted_df.columns:
                 ml_predicted_df['lgbm_pred_proba'] = float('nan')
+            # catboost_pred_proba는 가중치가 0이면 NaN으로 존재하도록 유지(호환성)
+            if 'catboost_pred_proba' not in ml_predicted_df.columns:
+                ml_predicted_df['catboost_pred_proba'] = float('nan')
                 
             log_info(f"   ✅ ML 모델 예측 완료: {len(ml_predicted_df):,}개 종목")
             

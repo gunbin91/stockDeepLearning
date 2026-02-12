@@ -131,7 +131,7 @@ def _validate_and_prepare_weights(payload: dict):
         raise ValueError("요청 바디가 비어있습니다.")
 
     # 프로젝트 호환 팩터(컬럼)만 수정 가능: 추후 팩터 추가 시 이 목록만 확장
-    allowed_keys = {'ml_pred_proba', 'lgbm_pred_proba'}
+    allowed_keys = {'ml_pred_proba', 'lgbm_pred_proba', 'catboost_pred_proba'}
 
     # 입력 포맷 호환: {weights: {...}, normalize: true/false} 또는 {...} 직접
     if isinstance(payload, dict) and 'weights' in payload and isinstance(payload.get('weights'), dict):
@@ -263,6 +263,8 @@ def moment_filter(value, format_string='YYYY-MM-DD'):
 CUML_MODEL_PATH = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
 # LightGBM 모델 경로
 LGBM_MODEL_PATH = str(path_manager.data_dir / 'lgbm_model_metadata.joblib')
+# CatBoost 모델 경로
+CATBOOST_MODEL_PATH = str(path_manager.data_dir / 'catboost_model_metadata.joblib')
 # 기존 모델 경로 (fallback)
 MODEL_PATH = str(path_manager.get_model_path())
 
@@ -396,6 +398,16 @@ def load_cached_analysis_result():
                     if max_val <= 1.0:
                         display_df.loc[mask, 'lgbm_pred_proba'] = display_df.loc[mask, 'lgbm_pred_proba'] * 100
             
+            # catboost_pred_proba가 있으면 백분율로 변환 (0-1 범위를 0-100으로)
+            if 'catboost_pred_proba' in display_df.columns:
+                # NaN이 아닌 값만 처리
+                mask = display_df['catboost_pred_proba'].notna()
+                if mask.any():
+                    # 최대값이 1.0 이하이면 0-1 범위로 가정하고 백분율로 변환
+                    max_val = display_df.loc[mask, 'catboost_pred_proba'].max()
+                    if max_val <= 1.0:
+                        display_df.loc[mask, 'catboost_pred_proba'] = display_df.loc[mask, 'catboost_pred_proba'] * 100
+            
             display_df['등락율'] = ((display_df['현재가'] - display_df['기준일가']) / display_df['기준일가']) * 100
             display_df['현재가(원)_formatted'] = display_df.apply(format_price_with_change, axis=1)
             
@@ -415,6 +427,10 @@ def load_cached_analysis_result():
             # lgbm_pred_proba가 있으면 컬럼 목록에 추가 (이름은 그대로 유지)
             if 'lgbm_pred_proba' in display_df.columns:
                 display_columns.append('lgbm_pred_proba')
+            
+            # catboost_pred_proba가 있으면 컬럼 목록에 추가 (이름은 그대로 유지)
+            if 'catboost_pred_proba' in display_df.columns:
+                display_columns.append('catboost_pred_proba')
             
             result_df = display_df[[col for col in display_columns if col in display_df.columns] + ['등락율']].rename(columns={'현재가(원)_formatted': '현재가(원)'})
             
@@ -824,6 +840,7 @@ def model_analysis():
     """학습 모델 분석 페이지"""
     model_info = None
     lgbm_model_info = None
+    catboost_model_info = None
     error = None
     
     try:
@@ -988,7 +1005,84 @@ def model_analysis():
                 log_warning(f"LGBM 정보 로드 실패: {e}")
                 lgbm_model_info = None
 
-        if model_info is None and lgbm_model_info is None:
+        # --- 3. CatBoost 모델 로드 ---
+        if os.path.exists(CATBOOST_MODEL_PATH):
+            try:
+                catboost_data = joblib.load(CATBOOST_MODEL_PATH)
+                log_info("CatBoost 메타데이터 로드 완료")
+                
+                catboost_model_info = {
+                    'model_type': 'CatBoost (GPU)',
+                    'model_path': str(path_manager.data_dir / 'catboost_model.cbm'),
+                    'last_modified': datetime.fromtimestamp(os.path.getmtime(CATBOOST_MODEL_PATH)).strftime('%Y-%m-%d %H:%M:%S'),
+                    'features': catboost_data.get('features', []),
+                    'params': catboost_data.get('best_params', {}),
+                    'best_score': catboost_data.get('best_score', None),
+                    'best_iteration': catboost_data.get('best_iteration', None),
+                    # 모델 분석 페이지 표기용 (탐색 범위)
+                    'n_trials': catboost_data.get('n_trials', None),
+                    'trials_completed': catboost_data.get('trials_completed', None),
+                }
+                
+                # 기본 중요도: 모델에서 직접 가져오기
+                try:
+                    from catboost import CatBoostClassifier
+                    catboost_model_file = path_manager.data_dir / 'catboost_model.cbm'
+                    if catboost_model_file.exists():
+                        model = CatBoostClassifier()
+                        model.load_model(str(catboost_model_file))
+                        feature_importance = model.get_feature_importance()
+                        features = catboost_model_info['features']
+                        if len(features) == len(feature_importance):
+                            # 튜플 리스트로 변환 [(feature, importance), ...]
+                            importance_list = list(zip(features, feature_importance.tolist()))
+                            # 중요도 높은 순서대로 정렬 (내림차순)
+                            importance_list.sort(key=lambda x: x[1], reverse=True)
+                            catboost_model_info['default_importances'] = importance_list
+                        else:
+                            catboost_model_info['default_importances'] = None
+                    else:
+                        catboost_model_info['default_importances'] = None
+                except Exception as e:
+                    log_warning(f"CatBoost 기본 중요도 로드 실패: {e}")
+                    catboost_model_info['default_importances'] = None
+                
+                # SHAP 및 Permutation 중요도: CSV 파일에서 로드
+                fi_path = path_manager.data_dir / 'catboost_feature_importance.csv'
+                if fi_path.exists():
+                    try:
+                        fi_df = pd.read_csv(fi_path)
+                        
+                        # SHAP 중요도
+                        if 'shap_importance' in fi_df.columns:
+                            shap_df = fi_df[['feature', 'shap_importance']].sort_values(by='shap_importance', ascending=False)
+                            catboost_model_info['shap_importances'] = list(shap_df.itertuples(index=False, name=None))
+                        else:
+                            catboost_model_info['shap_importances'] = None
+                            
+                        # 순열 중요도
+                        if 'permutation_importance' in fi_df.columns:
+                            perm_df = fi_df[['feature', 'permutation_importance']].sort_values(by='permutation_importance', ascending=False)
+                            catboost_model_info['permutation_importances'] = list(perm_df.itertuples(index=False, name=None))
+                        else:
+                            catboost_model_info['permutation_importances'] = None
+                            
+                    except Exception as e:
+                        log_warning(f"CatBoost 중요도 CSV 파일 처리 중 오류: {e}")
+                        catboost_model_info['shap_importances'] = None
+                        catboost_model_info['permutation_importances'] = None
+                else:
+                    catboost_model_info['shap_importances'] = None
+                    catboost_model_info['permutation_importances'] = None
+                
+                # 기본적으로 기본 중요도를 feature_importances로 설정 (하위 호환성)
+                catboost_model_info['feature_importances'] = catboost_model_info.get('default_importances') or catboost_model_info.get('shap_importances')
+                    
+            except Exception as e:
+                log_warning(f"CatBoost 정보 로드 실패: {e}")
+                catboost_model_info = None
+
+        if model_info is None and lgbm_model_info is None and catboost_model_info is None:
              error = "학습된 모델 정보를 찾을 수 없습니다."
 
     except FileNotFoundError:
@@ -1000,7 +1094,7 @@ def model_analysis():
         import traceback
         log_error(f"모델 분석 페이지 오류: {traceback.format_exc()}")
     
-    return render_template('model_analysis.html', model_info=model_info, lgbm_model_info=lgbm_model_info, error=error)
+    return render_template('model_analysis.html', model_info=model_info, lgbm_model_info=lgbm_model_info, catboost_model_info=catboost_model_info, error=error)
 
 @app.route('/backtest')
 def backtest():
@@ -1621,7 +1715,7 @@ def get_weights():
         if isinstance(file_weights, dict):
             merged.update(file_weights)
 
-        allowed_keys = ['ml_pred_proba', 'lgbm_pred_proba']
+        allowed_keys = ['ml_pred_proba', 'lgbm_pred_proba', 'catboost_pred_proba']
         # UI 혼란 방지: 허용된 키만 반환/표시
         merged_filtered = {k: merged.get(k, 0.0) for k in allowed_keys}
         file_weights_filtered = {k: (file_weights or {}).get(k, 0.0) for k in allowed_keys}

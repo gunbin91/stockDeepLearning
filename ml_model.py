@@ -446,3 +446,99 @@ def predict_with_lgbm_model(df):
         log_error(traceback.format_exc())
         result_df['lgbm_pred_proba'] = np.nan
         return result_df
+
+def predict_with_catboost_model(df):
+    """
+    CatBoost 모델을 사용한 상승 확률 예측 함수
+    
+    Args:
+        df: 분석할 종목 데이터가 포함된 데이터프레임
+        
+    Returns:
+        pandas.DataFrame: 종목코드와 CatBoost 예측 확률(catboost_pred_proba)이 포함된 데이터프레임
+    """
+    if df.empty:
+        log_warning("입력 데이터프레임이 비어있습니다 (CatBoost).")
+        return pd.DataFrame(columns=['종목코드', 'catboost_pred_proba'])
+
+    try:
+        from catboost import CatBoostClassifier
+    except ImportError:
+        log_error("CatBoost 패키지가 설치되지 않았습니다.")
+        return pd.DataFrame(columns=['종목코드', 'catboost_pred_proba'])
+
+    result_df = df[['종목코드']].copy()
+    
+    # 모델 경로
+    model_dir = path_manager.data_dir
+    catboost_model_path = model_dir / 'catboost_model.cbm'
+    catboost_meta_path = model_dir / 'catboost_model_metadata.joblib'
+    
+    if not catboost_model_path.exists() or not catboost_meta_path.exists():
+        log_warning("CatBoost 모델 파일이 없어 예측을 건너뜁니다.")
+        result_df['catboost_pred_proba'] = np.nan
+        return result_df
+
+    try:
+        log_info(f"🤖 [CatBoost] 모델 예측 중... ({len(df):,}개 종목)")
+        
+        # 메타데이터 로드
+        metadata = joblib.load(catboost_meta_path)
+        features = metadata['features']
+        scaler = metadata.get('scaler')  # 스케일러 로드
+        
+        # 모델 로드
+        model = CatBoostClassifier()
+        model.load_model(str(catboost_model_path))
+        
+        # 피처 준비 (순서 중요)
+        available_features = [f for f in features if f in df.columns]
+        missing_features = [f for f in features if f not in df.columns]
+        
+        if missing_features:
+            log_warning(f"   ⚠️ [CatBoost] 피처 부족: {len(missing_features)}개")
+            
+        if not available_features:
+            log_error("   ❌ [CatBoost] 사용 가능한 피처가 없습니다.")
+            result_df['catboost_pred_proba'] = np.nan
+            return result_df
+            
+        X_pred = df[available_features].copy()
+        
+        # CatBoost는 NaN 처리가 가능하지만, 무한대 값은 처리 필요
+        numeric_cols = X_pred.select_dtypes(include=[np.number]).columns
+        X_pred[numeric_cols] = X_pred[numeric_cols].replace([np.inf, -np.inf], np.nan)
+        
+        # 스케일링 적용 (학습 시 사용한 스케일러 필수)
+        if scaler:
+            try:
+                # NaN이 있으면 스케일러가 에러를 낼 수 있으므로, 
+                # 학습 데이터의 중앙값 등으로 채워야 하지만, 
+                # 여기서는 일단 0으로 채우거나 그대로 진행 (StandardScaler는 NaN 허용 안 함)
+                # -> CatBoost는 NaN을 허용하지만 Scaler는 아님.
+                # -> Scaler 사용 전 NaN 처리 필요.
+                X_pred = X_pred.fillna(0) # 임시로 0으로 채움 (더 정교한 방법 필요할 수 있음)
+                X_pred_scaled = scaler.transform(X_pred)
+            except Exception as e:
+                log_warning(f"   ⚠️ [CatBoost] 스케일링 실패: {e}, 원본 데이터 사용")
+                X_pred_scaled = X_pred
+        else:
+            X_pred_scaled = X_pred
+        
+        # 예측
+        y_pred_proba = model.predict_proba(X_pred_scaled)[:, 1]  # 클래스 1의 확률
+        
+        result_df['catboost_pred_proba'] = y_pred_proba
+        
+        avg_proba = np.mean(y_pred_proba)
+        high_proba = np.sum(y_pred_proba > 0.7)
+        log_info(f"   ✅ [CatBoost] 예측 완료 (평균: {avg_proba:.3f}, 고확률: {high_proba:,}개)")
+        
+        return result_df
+        
+    except Exception as e:
+        log_error(f"   ❌ [CatBoost] 예측 실패: {e}")
+        import traceback
+        log_error(traceback.format_exc())
+        result_df['catboost_pred_proba'] = np.nan
+        return result_df

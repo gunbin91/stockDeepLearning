@@ -71,6 +71,24 @@ def calculate_final_score(df):
             'ml_pred_proba': 0.5,    # RF 50%
             'lgbm_pred_proba': 0.5   # LGBM 50%
         }
+    
+    # CatBoost 결과가 있으면 가중치 분산 (기본값)
+    if 'catboost_pred_proba' in final_df.columns:
+        log_info("[INFO] CatBoost 예측 결과 발견 - 가중치 자동 조정")
+        # 기존 모델 개수에 따라 가중치 분산
+        if 'lgbm_pred_proba' in final_df.columns:
+            # RF, LGBM, CatBoost 모두 있는 경우
+            factor_weights = {
+                'ml_pred_proba': 0.333,      # RF 33.3%
+                'lgbm_pred_proba': 0.333,    # LGBM 33.3%
+                'catboost_pred_proba': 0.334 # CatBoost 33.4%
+            }
+        else:
+            # RF, CatBoost만 있는 경우
+            factor_weights = {
+                'ml_pred_proba': 0.5,        # RF 50%
+                'catboost_pred_proba': 0.5   # CatBoost 50%
+            }
 
     # 최적화된 가중치 파일이 있으면 불러오기
     script_dir = os.path.dirname(__file__)
@@ -85,6 +103,23 @@ def calculate_final_score(df):
                  ml_weight = loaded_weights.get('ml_pred_proba', 0.90)
                  loaded_weights['ml_pred_proba'] = ml_weight / 2
                  loaded_weights['lgbm_pred_proba'] = ml_weight / 2
+            
+            # 파일에 CatBoost 가중치가 없고 데이터에는 CatBoost가 있다면 기본 비율 유지하면서 로드된 값 반영
+            if 'catboost_pred_proba' in final_df.columns and 'catboost_pred_proba' not in loaded_weights:
+                # 기존 모델들의 가중치를 고려하여 CatBoost에 할당
+                ml_weight = loaded_weights.get('ml_pred_proba', 0.90)
+                lgbm_weight = loaded_weights.get('lgbm_pred_proba', 0.0)
+                
+                if lgbm_weight > 0:
+                    # RF, LGBM, CatBoost 모두 있는 경우 - 3등분
+                    total_weight = ml_weight + lgbm_weight
+                    loaded_weights['ml_pred_proba'] = total_weight / 3
+                    loaded_weights['lgbm_pred_proba'] = total_weight / 3
+                    loaded_weights['catboost_pred_proba'] = total_weight / 3
+                else:
+                    # RF, CatBoost만 있는 경우 - 반으로 나눔
+                    loaded_weights['ml_pred_proba'] = ml_weight / 2
+                    loaded_weights['catboost_pred_proba'] = ml_weight / 2
             
             factor_weights.update(loaded_weights)
         log_info("[OK] 최적화된 가중치 적용")
@@ -104,7 +139,7 @@ def calculate_final_score(df):
     log_info("   📊 정규화 값 계산 중...")
     cached_norms = {}
     for factor in active_factors.keys():
-        if factor in ['ml_pred_proba', 'lgbm_pred_proba']:
+        if factor in ['ml_pred_proba', 'lgbm_pred_proba', 'catboost_pred_proba']:
             source_series = final_df[factor] * 100
         else:
             source_series = final_df[factor]
@@ -131,7 +166,7 @@ def calculate_final_score(df):
     # 각 팩터의 점수를 0-100점으로 정규화하여 공정한 비교가 가능하도록 함
     # 벡터화 연산을 사용하여 대용량 데이터 처리 성능 향상
     for factor in active_factors.keys():
-        if factor in ['ml_pred_proba', 'lgbm_pred_proba']:
+        if factor in ['ml_pred_proba', 'lgbm_pred_proba', 'catboost_pred_proba']:
             # 예측 확률은 0-1 범위이므로 100을 곱하여 0-100 범위로 변환
             source_series = final_df[factor] * 100
         else:
