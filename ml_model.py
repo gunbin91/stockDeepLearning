@@ -135,7 +135,6 @@ def predict_with_ml_model(df):
         
         # scikit-learn 버전 불일치 경고 억제 (모델 로드 시)
         with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
             try:
                 from sklearn.exceptions import InconsistentVersionWarning
                 warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
