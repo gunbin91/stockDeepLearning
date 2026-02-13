@@ -145,6 +145,22 @@ class StockAnalysisLogger:
         )
         console_handler.setFormatter(console_formatter)
         
+        # 에러 핸들러 추가 (detached 버퍼 에러 무시)
+        def handle_error(record):
+            """에러 핸들러 - detached 버퍼 에러 무시"""
+            try:
+                import sys
+                # 버퍼 상태 확인
+                if hasattr(sys.stdout, 'closed') and sys.stdout.closed:
+                    return
+                if hasattr(sys.stdout, 'buffer') and hasattr(sys.stdout.buffer, 'closed') and sys.stdout.buffer.closed:
+                    return
+            except:
+                pass
+        
+        # 핸들러에 에러 핸들러 설정
+        console_handler.handleError = lambda record: None  # 에러 무시
+        
         # 핸들러 추가
         self.logger.addHandler(file_handler)
         self.logger.addHandler(console_handler)
@@ -222,6 +238,18 @@ class StockAnalysisLogger:
                 
                 # 로그 레벨에 따라 적절한 메서드 호출 (각 호출을 try-except로 감싸기)
                 try:
+                    # 핸들러가 유효한지 먼저 확인
+                    for handler in self.logger.handlers:
+                        if isinstance(handler, logging.StreamHandler):
+                            try:
+                                # stream이 유효한지 확인
+                                if hasattr(handler.stream, 'closed') and handler.stream.closed:
+                                    continue
+                                if hasattr(handler.stream, 'buffer') and hasattr(handler.stream.buffer, 'closed') and handler.stream.buffer.closed:
+                                    continue
+                            except (AttributeError, ValueError, OSError):
+                                continue
+                    
                     if level == "INFO":
                         self.logger.info(full_message)
                     elif level == "WARNING":
@@ -238,7 +266,11 @@ class StockAnalysisLogger:
                     # logging 핸들러가 detached 버퍼에 쓰려고 할 때 발생하는 에러
                     if "underlying buffer has been detached" in str(log_error) or "closed" in str(log_error).lower():
                         return  # 조용히 무시
-                    raise  # 다른 에러는 다시 발생
+                    # 다른 에러도 무시 (최적화 중에는 로깅 에러가 발생해도 계속 진행)
+                    return
+                except Exception as log_error:
+                    # 모든 로깅 에러 무시 (최적화 중 안정성을 위해)
+                    return
                     
         except (ValueError, OSError) as e:
             # 버퍼가 닫혔거나 분리된 경우 무시 (프로세스 종료 시 발생할 수 있음)

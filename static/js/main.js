@@ -606,6 +606,11 @@ $(document).ready(function() {
             deleteBacktestCache();
         });
         
+        // 가중치 최적화 버튼
+        $('#optimize_weights_btn').on('click', function() {
+            startWeightOptimization();
+        });
+        
         // 모달이 열릴 때 서버 상태 확인 및 날짜 기본값 설정
         $('#backtest_modal').on('show.bs.modal', function() {
             // 날짜 필드 기본값 설정 (시작일: 1년 전, 종료일: 오늘)
@@ -855,6 +860,232 @@ $(document).ready(function() {
             error: function(xhr) {
                 const error = JSON.parse(xhr.responseText);
                 showToast('캐시 파일 삭제 중 오류: ' + error.error, 'danger');
+            }
+        });
+    }
+    
+    function startWeightOptimization() {
+        // 백테스팅이 실행 중이면 거부
+        if (window.backtestRunning) {
+            showToast('백테스팅이 실행 중입니다. 완료될 때까지 기다려주세요.', 'warning');
+            return;
+        }
+        
+        // 확인 메시지
+        if (!confirm('가중치 최적화를 시작하시겠습니까?\n\n여러 가중치 조합을 테스트하므로 시간이 오래 걸릴 수 있습니다.')) {
+            return;
+        }
+        
+        // 백테스팅 파라미터 수집 (디폴트 값)
+        const backtestParams = {
+            capital: parseInt($('#modal_capital').val()) || 10000000,
+            max_hold: parseInt($('#modal_max_hold').val()) || 7,
+            take_profit: parseFloat($('#modal_take_profit').val()) || 8.0,
+            stop_loss: parseFloat($('#modal_stop_loss').val()) || 8.0,
+            top_n: parseInt($('#modal_top_n').val()) || 5,
+            buy_universe: parseInt($('#modal_buy_universe').val()) || 20,
+            transaction_fee: parseFloat($('#modal_transaction_fee').val()) || 0.015,
+            start_date: $('#modal_start_date').val(),
+            end_date: $('#modal_end_date').val(),
+            use_cache: true  // 캐시 사용 강제
+        };
+        
+        // 진행 모달 표시
+        $('#optimize_weights_modal').modal('show');
+        $('#optimize_progress_bar').css('width', '0%').text('0%');
+        $('#current_weights_display').text('초기화 중...');
+        $('#optimize_status_text').text('가중치 조합 생성 중...');
+        
+        // WebSocket 이벤트 리스너 설정 (한 번만)
+        if (socket && !window.optimizeListenersSetup) {
+            window.optimizeListenersSetup = true;
+            
+            // 진행률 업데이트
+            socket.on('optimize_progress', function(data) {
+                const progress = data.progress || 0;
+                const current = data.current || 0;
+                const total = data.total || 0;
+                const weights = data.current_weights || {};
+                
+                $('#optimize_progress_bar').css('width', progress + '%').text(progress + '%');
+                $('#optimize_status_text').text(
+                    `가중치 조합 테스트 중... (${current}/${total})`
+                );
+                
+                if (weights && Object.keys(weights).length > 0) {
+                    const mlWeight = (weights.ml_pred_proba || 0).toFixed(1);
+                    const lgbmWeight = (weights.lgbm_pred_proba || 0).toFixed(1);
+                    const catboostWeight = (weights.catboost_pred_proba || 0).toFixed(1);
+                    $('#current_weights_display').text(
+                        `ML: ${mlWeight}, LGBM: ${lgbmWeight}, CatBoost: ${catboostWeight}`
+                    );
+                }
+            });
+            
+            // 최적화 완료
+            socket.on('optimize_complete', function(response) {
+                if (response.success) {
+                    $('#optimize_weights_modal').modal('hide');
+                    if (response.successful === 0 && response.error_message) {
+                        // 모든 테스트 실패 시 에러 메시지 표시
+                        const errorMsg = '가중치 최적화 실패\n\n' + response.error_message + '\n\n서버 로그를 확인해주세요.';
+                        const errorHtml = `
+                            <div class="modal fade" id="optimize_error_modal" tabindex="-1">
+                                <div class="modal-dialog">
+                                    <div class="modal-content">
+                                        <div class="modal-header bg-danger text-white">
+                                            <h5 class="modal-title">가중치 최적화 실패</h5>
+                                            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                                        </div>
+                                        <div class="modal-body">
+                                            <p class="text-danger">모든 가중치 조합 테스트가 실패했습니다.</p>
+                                            <label class="form-label">에러 메시지 (복사 가능):</label>
+                                            <textarea class="form-control" rows="10" readonly style="font-family: monospace; font-size: 0.875rem;">${errorMsg}</textarea>
+                                        </div>
+                                        <div class="modal-footer">
+                                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">닫기</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                        $('body').append(errorHtml);
+                        $('#optimize_error_modal').modal('show');
+                        $('#optimize_error_modal').on('hidden.bs.modal', function() {
+                            $(this).remove();
+                        });
+                        return;
+                    }
+                    showOptimizationResults(response);
+                } else {
+                    showToast('가중치 최적화 실패: ' + (response.error || '알 수 없는 오류'), 'danger');
+                    $('#optimize_weights_modal').modal('hide');
+                }
+            });
+        }
+        
+        // 최적화 시작 (비동기)
+        $.ajax({
+            url: '/api/optimize_weights',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify(backtestParams),
+            timeout: 10000,  // 시작 요청만 10초 타임아웃
+            success: function(response) {
+                // 시작 성공, 진행률은 WebSocket으로 받음
+                showToast('가중치 최적화가 시작되었습니다.', 'info');
+            },
+            error: function(xhr) {
+                let errorMsg = '알 수 없는 오류';
+                try {
+                    const error = JSON.parse(xhr.responseText);
+                    errorMsg = error.error || errorMsg;
+                } catch (e) {
+                    errorMsg = xhr.statusText || errorMsg;
+                }
+                showToast('가중치 최적화 시작 실패: ' + errorMsg, 'danger');
+                $('#optimize_weights_modal').modal('hide');
+            }
+        });
+    }
+    
+    function showOptimizationResults(response) {
+        const results = response.results || [];
+        const totalTested = response.total_tested || 0;
+        const successful = response.successful || 0;
+        
+        // 요약 텍스트 업데이트
+        $('#optimize_summary_text').text(
+            `총 ${totalTested}개 조합 중 ${successful}개 성공, Top 20 결과 표시`
+        );
+        
+        // 결과 테이블 생성
+        const tbody = $('#optimize_results_table');
+        tbody.empty();
+        
+        if (results.length === 0) {
+            tbody.append('<tr><td colspan="10" class="text-center">결과가 없습니다.</td></tr>');
+        } else {
+            results.forEach(function(result, index) {
+                const weights = result.weights || {};
+                const mlWeight = (weights.ml_pred_proba || 0).toFixed(1);
+                const lgbmWeight = (weights.lgbm_pred_proba || 0).toFixed(1);
+                const catboostWeight = (weights.catboost_pred_proba || 0).toFixed(1);
+                const totalReturn = ((result.total_return || 0) * 100).toFixed(2);
+                const winRate = ((result.win_rate || 0) * 100).toFixed(2);
+                const annualReturn = ((result.annual_return || 0) * 100).toFixed(2);
+                const sharpeRatio = (result.sharpe_ratio || 0).toFixed(3);
+                const mdd = ((result.mdd || 0) * 100).toFixed(2);
+                
+                const row = $('<tr>');
+                row.append($('<td>').text(index + 1));
+                row.append($('<td>').text(mlWeight));
+                row.append($('<td>').text(lgbmWeight));
+                row.append($('<td>').text(catboostWeight));
+                row.append($('<td>').html('<strong class="text-primary">' + totalReturn + '%</strong>'));
+                row.append($('<td>').text(winRate + '%'));
+                row.append($('<td>').text(annualReturn + '%'));
+                row.append($('<td>').text(sharpeRatio));
+                row.append($('<td>').text(mdd + '%'));
+                
+                const selectBtn = $('<button>')
+                    .addClass('btn btn-sm btn-success')
+                    .html('<i class="fas fa-check me-1"></i>선택')
+                    .on('click', function() {
+                        applyOptimizedWeights(weights, totalReturn);
+                    });
+                row.append($('<td>').append(selectBtn));
+                
+                tbody.append(row);
+            });
+        }
+        
+        // 결과 모달 표시
+        $('#optimize_results_modal').modal('show');
+    }
+    
+    function applyOptimizedWeights(weights, totalReturn) {
+        const mlWeight = (weights.ml_pred_proba || 0).toFixed(1);
+        const lgbmWeight = (weights.lgbm_pred_proba || 0).toFixed(1);
+        const catboostWeight = (weights.catboost_pred_proba || 0).toFixed(1);
+        
+        const confirmMsg = `다음 가중치로 변경하시겠습니까?\n\n` +
+            `ML: ${mlWeight}\n` +
+            `LGBM: ${lgbmWeight}\n` +
+            `CatBoost: ${catboostWeight}\n\n` +
+            `예상 총수익률: ${totalReturn}%`;
+        
+        if (!confirm(confirmMsg)) {
+            return;
+        }
+        
+        // 가중치 저장
+        $.ajax({
+            url: '/api/weights',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify(weights),
+            success: function(response) {
+                if (response.success) {
+                    showToast('가중치가 성공적으로 변경되었습니다.', 'success');
+                    $('#optimize_results_modal').modal('hide');
+                    // 페이지 새로고침하여 변경사항 반영
+                    setTimeout(function() {
+                        location.reload();
+                    }, 1000);
+                } else {
+                    showToast('가중치 변경 실패: ' + (response.error || '알 수 없는 오류'), 'danger');
+                }
+            },
+            error: function(xhr) {
+                let errorMsg = '알 수 없는 오류';
+                try {
+                    const error = JSON.parse(xhr.responseText);
+                    errorMsg = error.error || errorMsg;
+                } catch (e) {
+                    errorMsg = xhr.statusText || errorMsg;
+                }
+                showToast('가중치 변경 실패: ' + errorMsg, 'danger');
             }
         });
     }

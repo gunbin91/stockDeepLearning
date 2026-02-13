@@ -20,6 +20,9 @@
         <button type="button" class="btn btn-outline-secondary btn-lg ms-2 btn-edit-weights" id="edit_weights_btn_backtest">
             <i class="fas fa-sliders-h me-2"></i>가중치 수정
         </button>
+        <button type="button" class="btn btn-success btn-lg ms-2" id="optimize_weights_btn">
+            <i class="fas fa-search me-2"></i>가중치 최적화
+        </button>
     </div>
 </div>
 
@@ -182,6 +185,97 @@
                         </button>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 가중치 최적화 진행 모달 -->
+<div class="modal fade" id="optimize_weights_modal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-search text-success me-2"></i>가중치 최적화 진행 중
+                </h5>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info" role="alert">
+                    <i class="fas fa-info-circle me-2"></i>여러 가중치 조합을 테스트하고 있습니다. 완료될 때까지 기다려주세요.
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">진행률</label>
+                    <div class="progress" style="height: 25px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                             role="progressbar" 
+                             id="optimize_progress_bar" 
+                             style="width: 0%">
+                            0%
+                        </div>
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">현재 테스트 중인 가중치</label>
+                    <div class="alert alert-light" id="current_weights_display">
+                        대기 중...
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <small class="text-muted" id="optimize_status_text">
+                        초기화 중...
+                    </small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" id="cancel_optimize_btn" disabled>
+                    <i class="fas fa-times me-1"></i>취소 (진행 중에는 취소 불가)
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 가중치 최적화 결과 모달 -->
+<div class="modal fade" id="optimize_results_modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-trophy text-warning me-2"></i>가중치 최적화 결과 (Top 20)
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-success" role="alert">
+                    <i class="fas fa-check-circle me-2"></i>
+                    <span id="optimize_summary_text">테스트 완료</span>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-hover table-striped">
+                        <thead class="table-dark">
+                            <tr>
+                                <th style="width: 50px;">순위</th>
+                                <th>ML 가중치</th>
+                                <th>LGBM 가중치</th>
+                                <th>CatBoost 가중치</th>
+                                <th>총수익률</th>
+                                <th>승률</th>
+                                <th>연환산 수익률</th>
+                                <th>샤프 비율</th>
+                                <th>최대 낙폭</th>
+                                <th style="width: 100px;">선택</th>
+                            </tr>
+                        </thead>
+                        <tbody id="optimize_results_table">
+                            <!-- 결과가 여기에 동적으로 추가됩니다 -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                    <i class="fas fa-times me-1"></i>닫기
+                </button>
             </div>
         </div>
     </div>

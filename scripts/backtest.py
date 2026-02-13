@@ -168,10 +168,27 @@ def save_backtest_cache(data, start_date, end_date):
         # 데이터 저장 (인덱스 포함)
         data_reset = data.reset_index()
         data_reset.to_feather(cache_file)
-        # 메타데이터 저장
+        # 메타데이터 저장 (날짜 안전하게 처리)
+        start_date_str = None
+        end_date_str = None
+        if start_date:
+            try:
+                start_date_obj = pd.to_datetime(start_date)
+                if pd.notna(start_date_obj):
+                    start_date_str = start_date_obj.strftime('%Y-%m-%d')
+            except (ValueError, AttributeError):
+                pass
+        if end_date:
+            try:
+                end_date_obj = pd.to_datetime(end_date)
+                if pd.notna(end_date_obj):
+                    end_date_str = end_date_obj.strftime('%Y-%m-%d')
+            except (ValueError, AttributeError):
+                pass
+        
         meta = {
-            'start_date': pd.to_datetime(start_date).strftime('%Y-%m-%d'),
-            'end_date': pd.to_datetime(end_date).strftime('%Y-%m-%d'),
+            'start_date': start_date_str,
+            'end_date': end_date_str,
             'created_at': datetime.now().isoformat(),
             'data_rows': len(data),
             'data_columns': list(data.columns)
@@ -751,8 +768,9 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             # 디버깅: 매일 시작 시 현금 및 포트폴리오 상태 로깅 (샘플링)
             if i % 100 == 0 or i == 0 or i == total_dates - 1:
                 portfolio_value_before = sum(info['buy_price'] * info['shares'] for info in portfolio.values())
+                date_str = date.strftime('%Y-%m-%d') if pd.notna(date) else str(date)
                 log_info(f"백테스팅 진행 상황", context={
-                    "date": date.strftime('%Y-%m-%d'),
+                    "date": date_str,
                     "cash": f"{cash:,.0f}원",
                     "portfolio_count": len(portfolio),
                     "portfolio_value_estimate": f"{portfolio_value_before:,.0f}원",
@@ -763,8 +781,11 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         
         try:
             # 로그: 현재 처리 중인 날짜 (9월 17일 이후만)
-            if date >= pd.to_datetime('2025-09-17'):
-                print(f"🔍 백테스팅 처리 중: {date.strftime('%Y-%m-%d')}")
+            if pd.notna(date) and date >= pd.to_datetime('2025-09-17'):
+                try:
+                    print(f"🔍 백테스팅 처리 중: {date.strftime('%Y-%m-%d')}")
+                except (AttributeError, ValueError):
+                    print(f"🔍 백테스팅 처리 중: {date}")
             daily_trades = []
             
             # 포트폴리오 매도 처리
@@ -854,8 +875,11 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                         pass
                 
                 # 로그: 9월 17일 이후 데이터 확인
-                if date >= pd.to_datetime('2025-09-17'):
-                    print(f"🔍 {date.strftime('%Y-%m-%d')} 데이터: 전체 {len(daily_data)}개, 거래가능 {len(daily_data_tradable)}개")
+                if pd.notna(date) and date >= pd.to_datetime('2025-09-17'):
+                    try:
+                        print(f"🔍 {date.strftime('%Y-%m-%d')} 데이터: 전체 {len(daily_data)}개, 거래가능 {len(daily_data_tradable)}개")
+                    except (AttributeError, ValueError):
+                        print(f"🔍 {date} 데이터: 전체 {len(daily_data)}개, 거래가능 {len(daily_data_tradable)}개")
                 
                 # 1. 전체 거래 가능 종목 중에서 '최종 점수' 기준으로 상위 buy_universe_rank에 드는 종목들만 매수 고려 대상이 됩니다.
                 overall_top_universe = daily_data_tradable.nlargest(buy_universe_rank, 'final_score')
@@ -941,8 +965,9 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             
             # 디버깅: 거래가 발생한 날짜에 상세 로깅
             if len(daily_trades) > 0:
+                date_str = date.strftime('%Y-%m-%d') if pd.notna(date) else str(date)
                 log_info(f"거래 발생일 상세 정보", context={
-                    "date": date.strftime('%Y-%m-%d'),
+                    "date": date_str,
                     "cash": f"{cash:,.0f}원",
                     "portfolio_value": f"{current_portfolio_value:,.0f}원",
                     "total_asset": f"{total_asset:,.0f}원",
@@ -968,14 +993,24 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             continue
             
         # 로그: 9월 17일 이후 포트폴리오 상태
-        if date >= pd.to_datetime('2025-09-17'):
-            print(f"🔍 {date.strftime('%Y-%m-%d')} 포트폴리오: 보유종목 {len(portfolio)}개, 현금 {cash:,.0f}원, 총자산 {total_asset:,.0f}원")
+        if pd.notna(date) and date >= pd.to_datetime('2025-09-17'):
+            try:
+                print(f"🔍 {date.strftime('%Y-%m-%d')} 포트폴리오: 보유종목 {len(portfolio)}개, 현금 {cash:,.0f}원, 총자산 {total_asset:,.0f}원")
+            except (AttributeError, ValueError):
+                print(f"🔍 {date} 포트폴리오: 보유종목 {len(portfolio)}개, 현금 {cash:,.0f}원, 총자산 {total_asset:,.0f}원")
             
     portfolio_ts = pd.Series(portfolio_history, index=daily_dates)
     
     # 로그: 백테스팅 완료 후 최종 상태
-    print(f"🔍 백테스팅 완료: 총 거래일 {len(portfolio_ts)}개, 최종 자산 {portfolio_ts.iloc[-1]:,.0f}원")
-    print(f"🔍 마지막 거래일: {portfolio_ts.index[-1].strftime('%Y-%m-%d')}")
+    if not portfolio_ts.empty:
+        print(f"🔍 백테스팅 완료: 총 거래일 {len(portfolio_ts)}개, 최종 자산 {portfolio_ts.iloc[-1]:,.0f}원")
+        last_date = portfolio_ts.index[-1]
+        if pd.notna(last_date):
+            print(f"🔍 마지막 거래일: {last_date.strftime('%Y-%m-%d')}")
+        else:
+            print(f"🔍 마지막 거래일: NaT")
+    else:
+        print(f"🔍 백테스팅 완료: 포트폴리오 히스토리가 비어있습니다.")
     
     # 정합성 검증
     log_info("백테스팅 정합성 검증 시작")
@@ -1065,7 +1100,11 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         if len(extreme_changes) > 0:
             log_warning(f"급격한 자산 변화 발견: {len(extreme_changes)}일 (100% 이상 변화)")
             for date, change in extreme_changes.head(5).items():
-                log_warning(f"  {date.strftime('%Y-%m-%d')}: {change:.2%} 변화")
+                if pd.notna(date):
+                    try:
+                        log_warning(f"  {date.strftime('%Y-%m-%d')}: {change:.2%} 변화")
+                    except (AttributeError, ValueError):
+                        log_warning(f"  {date}: {change:.2%} 변화")
     
     if validation_errors:
         log_error("정합성 검증 실패", context={"errors": validation_errors})
@@ -1115,22 +1154,40 @@ def create_json_report(results, output_path=None):
         return
 
     # 포트폴리오 히스토리: 실제 총자산 값(원 단위) 저장
-    portfolio_dates = [d.strftime('%Y-%m-%d') for d in results["portfolio_history"].index]
-    portfolio_values = [float(v) for v in results["portfolio_history"].values]
+    portfolio_dates = []
+    portfolio_values = []
+    if not results["portfolio_history"].empty:
+        for d in results["portfolio_history"].index:
+            if pd.notna(d):
+                try:
+                    portfolio_dates.append(d.strftime('%Y-%m-%d'))
+                except (AttributeError, ValueError):
+                    portfolio_dates.append(str(d))
+        portfolio_values = [float(v) for v in results["portfolio_history"].values]
     
     # KOSPI 데이터 가져오기 (비교용 누적 수익률)
-    try:
-        kospi = fdr.DataReader('KS11', start=results["portfolio_history"].index.min(), end=results["portfolio_history"].index.max())
-        kospi_cumulative = (1 + kospi['Close'].pct_change().fillna(0)).cumprod()
-        
-        # KOSPI 초기값 기준으로 정규화 (포트폴리오와 비교 가능하도록)
-        initial_capital = float(results.get('initial_capital', 0))
-        kospi_values = [float(v * initial_capital) for v in kospi_cumulative.values]
-        kospi_dates = [d.strftime('%Y-%m-%d') for d in kospi_cumulative.index]
-    except Exception as e:
-        log_warning(f"KOSPI 데이터 로딩 실패: {e}")
-        kospi_dates = []
-        kospi_values = []
+    kospi_dates = []
+    kospi_values = []
+    if not results["portfolio_history"].empty:
+        try:
+            min_date = results["portfolio_history"].index.min()
+            max_date = results["portfolio_history"].index.max()
+            if pd.notna(min_date) and pd.notna(max_date):
+                kospi = fdr.DataReader('KS11', start=min_date, end=max_date)
+                kospi_cumulative = (1 + kospi['Close'].pct_change().fillna(0)).cumprod()
+                
+                # KOSPI 초기값 기준으로 정규화 (포트폴리오와 비교 가능하도록)
+                initial_capital = float(results.get('initial_capital', 0))
+                kospi_values = [float(v * initial_capital) for v in kospi_cumulative.values]
+                kospi_dates = []
+                for d in kospi_cumulative.index:
+                    if pd.notna(d):
+                        try:
+                            kospi_dates.append(d.strftime('%Y-%m-%d'))
+                        except (AttributeError, ValueError):
+                            kospi_dates.append(str(d))
+        except Exception as e:
+            log_warning(f"KOSPI 데이터 로딩 실패: {e}")
     
     # 거래 로그 처리
     trade_log_all = results['trade_log'].copy()
@@ -1200,8 +1257,8 @@ def create_json_report(results, output_path=None):
         'metadata': {
             'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'test_period': {
-                'start_date': results["portfolio_history"].index.min().strftime('%Y-%m-%d'),
-                'end_date': results["portfolio_history"].index.max().strftime('%Y-%m-%d'),
+                'start_date': None,
+                'end_date': None,
                 'total_days': len(results["portfolio_history"])
             },
             'cache_info': results.get('cache_info', {
@@ -1260,7 +1317,7 @@ def create_json_report(results, output_path=None):
     return report_data
 
 
-def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate, start_date=None, end_date=None, use_cache=False):
+def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate, start_date=None, end_date=None, use_cache=False, shutdown_logger_after=True):
     """최종 백테스팅 실행 - 강화된 에러 처리
     
     Args:
@@ -1274,6 +1331,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         start_date: 테스트 시작일 (YYYY-MM-DD 형식, None이면 기본값 사용)
         end_date: 테스트 종료일 (YYYY-MM-DD 형식, None이면 기본값 사용)
         use_cache: 캐시 사용 여부 (True면 캐시 파일 사용/생성, False면 실시간 분석)
+        shutdown_logger_after: 백테스팅 완료 후 logger 종료 여부 (기본값: True, 최적화 시 False로 설정)
     """
     start_time = time.time()
     
@@ -1341,7 +1399,10 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         
         # 데이터 로딩 (강화된 에러 처리)
         # Warmup 기간 400일 유지
-        backtest_start_date_with_warmup = (pd.to_datetime(start_date) - timedelta(days=400)).strftime('%Y-%m-%d')
+        start_date_obj = pd.to_datetime(start_date)
+        if pd.isna(start_date_obj):
+            raise ValueError(f"시작일이 올바르지 않습니다: {start_date}")
+        backtest_start_date_with_warmup = (start_date_obj - timedelta(days=400)).strftime('%Y-%m-%d')
         cache_used = False
         cache_meta = None
         
@@ -1646,19 +1707,24 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         
         log_info(f"\n✅ 백테스팅 완료. JSON 리포트 파일이 생성되었습니다.")
         
-        # 로거 종료
-        try:
-            shutdown_logger()
-        except Exception:
-            pass
+        # 로거 종료 (선택적)
+        if shutdown_logger_after:
+            try:
+                shutdown_logger()
+            except Exception:
+                pass
+        
+        # 백테스팅 결과 반환
+        return backtest_results
             
     except Exception as e:
         log_critical("최종 백테스팅 실행 중 치명적 에러", exception=e)
-        # 로거 종료
-        try:
-            shutdown_logger()
-        except Exception:
-            pass
+        # 로거 종료 (선택적)
+        if shutdown_logger_after:
+            try:
+                shutdown_logger()
+            except Exception:
+                pass
         raise
 
 if __name__ == '__main__':

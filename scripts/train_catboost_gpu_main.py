@@ -999,22 +999,13 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
                 
         wrapper = CatBoostWrapper(final_model)
         
-        # 커스텀 스코어러: predict_proba를 명시적으로 사용하여 roc_auc 계산
-        from sklearn.metrics import make_scorer, roc_auc_score
-        
-        def roc_auc_scorer(estimator, X, y):
-            """predict_proba를 사용하는 커스텀 roc_auc 스코어러"""
-            y_pred_proba = estimator.predict_proba(X)[:, 1]
-            return roc_auc_score(y, y_pred_proba)
-        
-        custom_scorer = make_scorer(roc_auc_scorer, greater_is_better=True)
-        
         # roc_auc 점수 기준으로 중요도 계산
+        # sklearn의 기본 'roc_auc' 스코어러 사용 (predict_proba 자동 사용)
         # n_repeats=5 정도로 빠르게
         log_info(f"   [PERM] 순열 중요도 계산 시작 (n_repeats=5)...")
         results = permutation_importance(
             wrapper, X_eval, y_eval, 
-            scoring=custom_scorer, n_repeats=5, random_state=42, n_jobs=1
+            scoring='roc_auc', n_repeats=5, random_state=42, n_jobs=1
         )
         
         feature_importances['permutation_importance'] = results.importances_mean
