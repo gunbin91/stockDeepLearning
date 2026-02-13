@@ -116,8 +116,397 @@ MODEL_FILE = str(path_manager.get_model_path())
 JSON_REPORT_FILE = str(path_manager.data_dir / 'backtest_report.json')
 TOP_N_STOCKS = 5
 
-def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, buy_universe_rank, transaction_fee_rate):
-    """상세 백테스팅 실행 - 강화된 에러 처리"""
+# --- 백테스팅 캐시 관련 함수 ---
+
+def get_cache_path():
+    """백테스팅 캐시 파일 경로 반환 (단일 파일)"""
+    cache_dir = path_manager.data_dir / 'backtest_cache'
+    cache_dir.mkdir(exist_ok=True)
+    cache_file = cache_dir / 'backtest_cache.feather'
+    meta_file = cache_dir / 'backtest_cache_meta.json'
+    return cache_file, meta_file
+
+def load_backtest_cache():
+    """백테스팅 캐시 로드 (단일 파일)"""
+    try:
+        cache_file, meta_file = get_cache_path()
+        if cache_file.exists() and meta_file.exists():
+            # 메타데이터 로드
+            with open(meta_file, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+            # 데이터 로드
+            data = pd.read_feather(cache_file)
+            # final_score는 가중치에 따라 달라지므로 캐시에서 제거
+            if 'final_score' in data.columns:
+                data = data.drop(columns=['final_score'])
+                log_info("  - 캐시 파일에서 final_score 제거 (가중치에 따라 재계산 필요)")
+            # 인덱스 복원 (date, 종목코드) - 하지만 date 컬럼은 유지
+            if 'date' in data.columns and '종목코드' in data.columns:
+                # date 컬럼을 datetime으로 변환
+                data['date'] = pd.to_datetime(data['date'])
+                # 인덱스 설정하되 date 컬럼은 유지
+                data = data.set_index(['date', '종목코드'])
+                # date 컬럼을 인덱스에서 가져와서 컬럼으로 추가 (컬럼 접근을 위해)
+                data['date'] = data.index.get_level_values('date')
+            log_info(f"📦 백테스팅 캐시 파일 로드 완료", context={
+                "cache_file": str(cache_file),
+                "start_date": meta.get('start_date'),
+                "end_date": meta.get('end_date'),
+                "created_at": meta.get('created_at'),
+                "data_rows": len(data)
+            })
+            return data, meta
+        return None, None
+    except Exception as e:
+        log_warning(f"⚠️ 백테스팅 캐시 로드 실패: {e}")
+        return None, None
+
+def save_backtest_cache(data, start_date, end_date):
+    """백테스팅 캐시 저장 (팩터 점수 계산 완료된 데이터, 단일 파일)"""
+    try:
+        cache_file, meta_file = get_cache_path()
+        # 데이터 저장 (인덱스 포함)
+        data_reset = data.reset_index()
+        data_reset.to_feather(cache_file)
+        # 메타데이터 저장
+        meta = {
+            'start_date': pd.to_datetime(start_date).strftime('%Y-%m-%d'),
+            'end_date': pd.to_datetime(end_date).strftime('%Y-%m-%d'),
+            'created_at': datetime.now().isoformat(),
+            'data_rows': len(data),
+            'data_columns': list(data.columns)
+        }
+        with open(meta_file, 'w', encoding='utf-8') as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        log_info(f"💾 백테스팅 캐시 파일 저장 완료", context={
+            "cache_file": str(cache_file),
+            "start_date": meta['start_date'],
+            "end_date": meta['end_date'],
+            "data_rows": len(data)
+        })
+        return True
+    except Exception as e:
+        log_error(f"백테스팅 캐시 저장 실패: {e}")
+        return False
+
+def delete_backtest_cache():
+    """백테스팅 캐시 파일 삭제 (단일 파일)"""
+    try:
+        cache_file, meta_file = get_cache_path()
+        deleted = False
+        if cache_file.exists():
+            cache_file.unlink()
+            deleted = True
+            log_info(f"🗑️ 백테스팅 캐시 파일 삭제: {cache_file}")
+        if meta_file.exists():
+            meta_file.unlink()
+            deleted = True
+            log_info(f"🗑️ 백테스팅 캐시 메타데이터 삭제: {meta_file}")
+        return deleted
+    except Exception as e:
+        log_error(f"백테스팅 캐시 삭제 실패: {e}")
+        return False
+
+def get_backtest_cache_info():
+    """백테스팅 캐시 파일 정보 반환 (단일 파일)"""
+    try:
+        cache_file, meta_file = get_cache_path()
+        if cache_file.exists() and meta_file.exists():
+            with open(meta_file, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+            return {
+                'start_date': meta.get('start_date'),
+                'end_date': meta.get('end_date'),
+                'created_at': meta.get('created_at'),
+                'data_rows': meta.get('data_rows', 0),
+                'cache_file': str(cache_file),
+                'meta_file': str(meta_file)
+            }
+        return None
+    except Exception as e:
+        log_error(f"백테스팅 캐시 정보 조회 실패: {e}")
+        return None
+
+def _load_ml_models(force_all=False, weights=None):
+    """모델들을 한 번만 로드하여 반환 (성능 최적화)"""
+    loaded_models = {
+        'ml': None,
+        'lgbm': None,
+        'catboost': None
+    }
+    
+    # 가중치 확인
+    rf_weight = 0.0
+    lgbm_weight = 0.0
+    catboost_weight = 0.0
+    
+    if isinstance(weights, dict):
+        rf_weight = float(weights.get('ml_pred_proba', 0.0))
+        lgbm_weight = float(weights.get('lgbm_pred_proba', weights.get('lgb_pred_proba', 0.0)))
+        catboost_weight = float(weights.get('catboost_pred_proba', 0.0))
+    
+    # ML 모델 로드 (필요한 경우)
+    if force_all or rf_weight > 0:
+        try:
+            from path_manager import path_manager
+            import ml_model
+            ml_model.apply_pandas_compatibility_patch()
+            ml_model.apply_sklearn_compatibility_patch()
+            
+            CUML_MODEL_PATH = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
+            LEGACY_MODEL_PATH = str(path_manager.get_model_path())
+            
+            model_path = None
+            is_cuml_model = False
+            
+            if os.path.exists(CUML_MODEL_PATH):
+                model_path = CUML_MODEL_PATH
+                is_cuml_model = True
+            elif os.path.exists(LEGACY_MODEL_PATH):
+                model_path = LEGACY_MODEL_PATH
+                is_cuml_model = False
+            else:
+                log_warning("ML 모델 파일을 찾을 수 없습니다.")
+                model_path = None
+            
+            if model_path:
+                model_data = joblib.load(model_path)
+                
+                if is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'mini_batch_ensemble':
+                    from ml_model_wrapper import EnsembleModelWrapper
+                    models = model_data['models']
+                    scaler = model_data['scaler']
+                    features = model_data['features']
+                    imputation_values = model_data['imputation_values']
+                    model = EnsembleModelWrapper(models, scaler)
+                elif is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'single_model':
+                    model = model_data['model']
+                    features = model_data['features']
+                    scaler = model_data['scaler']
+                    imputation_values = model_data['imputation_values']
+                else:
+                    model = model_data['model']
+                    features = model_data['features']
+                    scaler = model_data['scaler']
+                    imputation_values = model_data['imputation_values']
+                    if 'cuml' in str(type(model)).lower():
+                        is_cuml_model = True
+                
+                loaded_models['ml'] = {
+                    'model': model,
+                    'features': features,
+                    'scaler': scaler,
+                    'imputation_values': imputation_values,
+                    'is_cuml_model': is_cuml_model
+                }
+                log_info("✅ ML 모델 로드 완료")
+        except Exception as e:
+            log_warning(f"⚠️ ML 모델 로드 실패: {e}")
+    
+    # LGBM 모델 로드 (필요한 경우)
+    if force_all or lgbm_weight > 0:
+        try:
+            from path_manager import path_manager
+            import lightgbm as lgb
+            
+            model_dir = path_manager.data_dir
+            lgbm_model_path = model_dir / 'lgbm_model.txt'
+            lgbm_meta_path = model_dir / 'lgbm_model_metadata.joblib'
+            
+            if lgbm_model_path.exists() and lgbm_meta_path.exists():
+                metadata = joblib.load(lgbm_meta_path)
+                features = metadata['features']
+                scaler = metadata.get('scaler')
+                model = lgb.Booster(model_file=str(lgbm_model_path))
+                
+                loaded_models['lgbm'] = {
+                    'model': model,
+                    'features': features,
+                    'scaler': scaler
+                }
+                log_info("✅ LGBM 모델 로드 완료")
+        except Exception as e:
+            log_warning(f"⚠️ LGBM 모델 로드 실패: {e}")
+    
+    # CatBoost 모델 로드 (필요한 경우)
+    if force_all or catboost_weight > 0:
+        try:
+            from path_manager import path_manager
+            from catboost import CatBoostClassifier
+            
+            model_dir = path_manager.data_dir
+            catboost_model_path = model_dir / 'catboost_model.cbm'
+            catboost_meta_path = model_dir / 'catboost_model_metadata.joblib'
+            
+            if catboost_model_path.exists() and catboost_meta_path.exists():
+                metadata = joblib.load(catboost_meta_path)
+                features = metadata['features']
+                scaler = metadata.get('scaler')
+                model = CatBoostClassifier()
+                model.load_model(str(catboost_model_path))
+                
+                loaded_models['catboost'] = {
+                    'model': model,
+                    'features': features,
+                    'scaler': scaler
+                }
+                log_info("✅ CatBoost 모델 로드 완료")
+        except Exception as e:
+            log_warning(f"⚠️ CatBoost 모델 로드 실패: {e}")
+    
+    return loaded_models
+
+def _predict_with_loaded_ml_model(df, model_info):
+    """로드된 ML 모델을 사용하여 예측"""
+    if model_info is None:
+        return pd.DataFrame(columns=['종목코드', 'ml_pred_proba'])
+    
+    model = model_info['model']
+    features = model_info['features']
+    scaler = model_info['scaler']
+    imputation_values = model_info.get('imputation_values')
+    is_cuml_model = model_info.get('is_cuml_model', False)
+    
+    result_df = df[['종목코드']].copy()
+    
+    available_features = [f for f in features if f in df.columns]
+    if not available_features:
+        result_df['ml_pred_proba'] = np.nan
+        return result_df
+    
+    X_pred = df[available_features].copy()
+    
+    if imputation_values:
+        available_imputation = {k: v for k, v in imputation_values.items() if k in available_features}
+        X_pred.fillna(available_imputation, inplace=True)
+    else:
+        X_pred.fillna(0, inplace=True)
+    
+    # 스케일링
+    use_scaler = scaler is not None
+    if use_scaler:
+        try:
+            if is_cuml_model:
+                import cudf
+                X_pred_ordered = X_pred[available_features]
+                X_pred_cudf = cudf.from_pandas(X_pred_ordered)
+                X_pred_scaled = scaler.transform(X_pred_cudf)
+            else:
+                X_pred_scaled = scaler.transform(X_pred)
+        except Exception:
+            X_pred_scaled = X_pred.values if not is_cuml_model else cudf.from_pandas(X_pred[available_features])
+    else:
+        if is_cuml_model:
+            import cudf
+            X_pred_scaled = cudf.from_pandas(X_pred[available_features])
+        else:
+            X_pred_scaled = X_pred.values
+    
+    # 예측
+    try:
+        pred_proba = model.predict_proba(X_pred_scaled)
+        
+        if isinstance(pred_proba, np.ndarray):
+            y_pred_proba = pred_proba[:, 1] if pred_proba.ndim == 2 else pred_proba
+        elif hasattr(pred_proba, 'iloc'):
+            if hasattr(pred_proba.iloc[:, 1], 'to_pandas'):
+                y_pred_proba = pred_proba.iloc[:, 1].to_pandas().values
+            else:
+                y_pred_proba = pred_proba.iloc[:, 1].values
+        else:
+            y_pred_proba = pred_proba[:, 1] if hasattr(pred_proba, '__getitem__') else pred_proba
+        
+        result_df['ml_pred_proba'] = y_pred_proba
+    except Exception as e:
+        log_warning(f"⚠️ ML 예측 실패: {e}")
+        result_df['ml_pred_proba'] = np.nan
+    
+    return result_df
+
+def _predict_with_loaded_lgbm_model(df, model_info):
+    """로드된 LGBM 모델을 사용하여 예측"""
+    if model_info is None:
+        return pd.DataFrame(columns=['종목코드', 'lgbm_pred_proba'])
+    
+    model = model_info['model']
+    features = model_info['features']
+    scaler = model_info.get('scaler')
+    
+    result_df = df[['종목코드']].copy()
+    
+    available_features = [f for f in features if f in df.columns]
+    if not available_features:
+        result_df['lgbm_pred_proba'] = np.nan
+        return result_df
+    
+    X_pred = df[available_features].copy()
+    numeric_cols = X_pred.select_dtypes(include=[np.number]).columns
+    X_pred[numeric_cols] = X_pred[numeric_cols].replace([np.inf, -np.inf], np.nan)
+    
+    if scaler:
+        try:
+            X_pred = X_pred.fillna(0)
+            X_pred_scaled = scaler.transform(X_pred)
+        except Exception:
+            X_pred_scaled = X_pred
+    else:
+        X_pred_scaled = X_pred
+    
+    try:
+        y_pred = model.predict(X_pred_scaled)
+        result_df['lgbm_pred_proba'] = y_pred
+    except Exception as e:
+        log_warning(f"⚠️ LGBM 예측 실패: {e}")
+        result_df['lgbm_pred_proba'] = np.nan
+    
+    return result_df
+
+def _predict_with_loaded_catboost_model(df, model_info):
+    """로드된 CatBoost 모델을 사용하여 예측"""
+    if model_info is None:
+        return pd.DataFrame(columns=['종목코드', 'catboost_pred_proba'])
+    
+    model = model_info['model']
+    features = model_info['features']
+    scaler = model_info.get('scaler')
+    
+    result_df = df[['종목코드']].copy()
+    
+    available_features = [f for f in features if f in df.columns]
+    if not available_features:
+        result_df['catboost_pred_proba'] = np.nan
+        return result_df
+    
+    X_pred = df[available_features].copy()
+    numeric_cols = X_pred.select_dtypes(include=[np.number]).columns
+    X_pred[numeric_cols] = X_pred[numeric_cols].replace([np.inf, -np.inf], np.nan)
+    
+    if scaler:
+        try:
+            X_pred = X_pred.fillna(0)
+            X_pred_scaled = scaler.transform(X_pred)
+        except Exception:
+            X_pred_scaled = X_pred
+    else:
+        X_pred_scaled = X_pred
+    
+    try:
+        y_pred_proba = model.predict_proba(X_pred_scaled)[:, 1]
+        result_df['catboost_pred_proba'] = y_pred_proba
+    except Exception as e:
+        log_warning(f"⚠️ CatBoost 예측 실패: {e}")
+        result_df['catboost_pred_proba'] = np.nan
+    
+    return result_df
+
+def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, buy_universe_rank, transaction_fee_rate, save_cache=False, cache_start_date=None, cache_end_date=None):
+    """상세 백테스팅 실행 - 강화된 에러 처리
+    
+    Args:
+        save_cache: 캐시 저장 여부
+        cache_start_date: 캐시 저장 시 시작일
+        cache_end_date: 캐시 저장 시 종료일
+    """
     try:
         log_info("백테스팅 시작", context={
             "initial_capital": initial_capital,
@@ -126,7 +515,20 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             "data_rows": len(data)
         })
         
+        # 캐시 저장 시에는 가중치와 상관없이 모든 모델의 상승확률을 계산
+        force_all_predictions = save_cache
+        
+        # 모델들을 한 번만 로드 (성능 최적화)
+        log_info("📦 모델 로딩 중...")
+        loaded_models = _load_ml_models(force_all=force_all_predictions, weights=weights)
+        log_info("✅ 모델 로딩 완료")
+        
         final_df_list = []
+        # reset_index() 전에 인덱스의 date가 컬럼에도 있으면 컬럼의 date 제거 (중복 방지)
+        if isinstance(data.index, pd.MultiIndex) and 'date' in data.index.names:
+            if 'date' in data.columns:
+                # 인덱스의 date를 사용하므로 컬럼의 date 제거
+                data = data.drop(columns=['date'])
         data_reset = data.reset_index()
         
         # 일별 최종 점수 계산 (에러 처리 강화)
@@ -138,7 +540,39 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             try:
                 daily_data_copy = daily_data.copy()
 
+                # 가중치 기반 스킵: RF(ML) 가중치가 0이면 예측을 수행하지 않음 (호환성: 컬럼은 NaN으로 유지)
+                # 단, 캐시 저장 시에는 강제로 모든 예측 수행
+                rf_weight = 0.0
+                try:
+                    if isinstance(weights, dict):
+                        if 'ml_pred_proba' in weights:
+                            rf_weight = float(weights.get('ml_pred_proba', 0.0))
+                except Exception:
+                    rf_weight = 0.0
+
+                # RF(ML) 예측 추가 (ml_pred_proba 컬럼이 없는 경우)
+                if 'ml_pred_proba' not in daily_data_copy.columns:
+                    if force_all_predictions or rf_weight > 0:
+                        try:
+                            ml_predicted_df = _predict_with_loaded_ml_model(daily_data_copy, loaded_models['ml'])
+                            if not ml_predicted_df.empty and 'ml_pred_proba' in ml_predicted_df.columns:
+                                # ML 예측 결과 병합
+                                daily_data_copy = pd.merge(
+                                    daily_data_copy,
+                                    ml_predicted_df[['종목코드', 'ml_pred_proba']],
+                                    on='종목코드',
+                                    how='left'
+                                )
+                        except Exception as e:
+                            # ML 예측 실패 시 경고만 출력하고 계속 진행
+                            log_warning(f"   ⚠️ [RF/ML] 예측 실패 (날짜: {date}): {e}")
+                            daily_data_copy['ml_pred_proba'] = np.nan
+                    else:
+                        # 스킵 시에도 컬럼은 유지
+                        daily_data_copy['ml_pred_proba'] = np.nan
+
                 # 가중치 기반 스킵: LGBM 가중치가 0이면 예측을 수행하지 않음 (호환성: 컬럼은 NaN으로 유지)
+                # 단, 캐시 저장 시에는 강제로 모든 예측 수행
                 lgbm_weight = 0.0
                 try:
                     if isinstance(weights, dict):
@@ -151,9 +585,9 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
 
                 # LGBM 예측 추가 (lgbm_pred_proba 컬럼이 없는 경우)
                 if 'lgbm_pred_proba' not in daily_data_copy.columns:
-                    if lgbm_weight > 0:
+                    if force_all_predictions or lgbm_weight > 0:
                         try:
-                            lgbm_predicted_df = ml_model.predict_with_lgbm_model(daily_data_copy)
+                            lgbm_predicted_df = _predict_with_loaded_lgbm_model(daily_data_copy, loaded_models['lgbm'])
                             if not lgbm_predicted_df.empty and 'lgbm_pred_proba' in lgbm_predicted_df.columns:
                                 # LGBM 예측 결과 병합
                                 daily_data_copy = pd.merge(
@@ -171,6 +605,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                         daily_data_copy['lgbm_pred_proba'] = np.nan
                 
                 # 가중치 기반 스킵: CatBoost 가중치가 0이면 예측을 수행하지 않음 (호환성: 컬럼은 NaN으로 유지)
+                # 단, 캐시 저장 시에는 강제로 모든 예측 수행
                 catboost_weight = 0.0
                 try:
                     if isinstance(weights, dict):
@@ -181,9 +616,9 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
 
                 # CatBoost 예측 추가 (catboost_pred_proba 컬럼이 없는 경우)
                 if 'catboost_pred_proba' not in daily_data_copy.columns:
-                    if catboost_weight > 0:
+                    if force_all_predictions or catboost_weight > 0:
                         try:
-                            catboost_predicted_df = ml_model.predict_with_catboost_model(daily_data_copy)
+                            catboost_predicted_df = _predict_with_loaded_catboost_model(daily_data_copy, loaded_models['catboost'])
                             if not catboost_predicted_df.empty and 'catboost_pred_proba' in catboost_predicted_df.columns:
                                 # CatBoost 예측 결과 병합
                                 daily_data_copy = pd.merge(
@@ -276,6 +711,17 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             "final_scores_count": len(final_scores_df),
             "merged_data_rows": len(data)
         })
+        
+        # 캐시 저장 (팩터 점수 계산 완료된 데이터, final_score는 제외)
+        # final_score는 가중치에 따라 달라지므로 캐시에 저장하지 않음
+        if save_cache and cache_start_date and cache_end_date:
+            try:
+                # final_score 컬럼을 제거한 데이터로 캐시 저장
+                cache_data = data.drop(columns=['final_score'], errors='ignore')
+                save_backtest_cache(cache_data, cache_start_date, cache_end_date)
+                print(f"💾 백테스팅 캐시 파일 생성: {cache_start_date} ~ {cache_end_date} (final_score 제외)")
+            except Exception as e:
+                log_warning(f"⚠️ 백테스팅 캐시 저장 실패: {e}")
         
     except Exception as e:
         log_critical("백테스팅 초기화 중 치명적 에러", exception=e)
@@ -757,7 +1203,13 @@ def create_json_report(results, output_path=None):
                 'start_date': results["portfolio_history"].index.min().strftime('%Y-%m-%d'),
                 'end_date': results["portfolio_history"].index.max().strftime('%Y-%m-%d'),
                 'total_days': len(results["portfolio_history"])
-            }
+            },
+            'cache_info': results.get('cache_info', {
+                'used': False,
+                'start_date': None,
+                'end_date': None,
+                'created_at': None
+            })
         },
         'performance_metrics': {
             'initial_capital': float(results.get('initial_capital', 0)),
@@ -808,7 +1260,7 @@ def create_json_report(results, output_path=None):
     return report_data
 
 
-def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate, start_date=None, end_date=None):
+def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate, start_date=None, end_date=None, use_cache=False):
     """최종 백테스팅 실행 - 강화된 에러 처리
     
     Args:
@@ -821,6 +1273,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         transaction_fee_rate: 거래 수수료율
         start_date: 테스트 시작일 (YYYY-MM-DD 형식, None이면 기본값 사용)
         end_date: 테스트 종료일 (YYYY-MM-DD 형식, None이면 기본값 사용)
+        use_cache: 캐시 사용 여부 (True면 캐시 파일 사용/생성, False면 실시간 분석)
     """
     start_time = time.time()
     
@@ -842,6 +1295,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         log_info(f"   └─ 손절 기준: -{stop_loss_pct}%")
         log_info(f"   └─ 거래 수수료: {transaction_fee_rate}%")
         log_info(f"   └─ 테스트 기간: {start_date} ~ {end_date}")
+        log_info(f"   └─ 캐시 사용: {'예' if use_cache else '아니오'}")
         
         log_info("1. 최종 백테스트 시작...")
         
@@ -887,55 +1341,78 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         
         # 데이터 로딩 (강화된 에러 처리)
         # Warmup 기간 400일 유지
+        backtest_start_date_with_warmup = (pd.to_datetime(start_date) - timedelta(days=400)).strftime('%Y-%m-%d')
+        cache_used = False
+        cache_meta = None
+        
         try:
-            backtest_start_date_with_warmup = (pd.to_datetime(start_date) - timedelta(days=400)).strftime('%Y-%m-%d')
-            log_info("백테스팅 데이터 로딩 시작", context={
-                "test_start_date": start_date,
-                "test_end_date": end_date,
-                "data_start_date": backtest_start_date_with_warmup,
-                "data_end_date": end_date,
-                "warmup_days": 400
-            })
-            log_info(f"   📅 테스트 기간: {start_date} ~ {end_date}")
-            log_info(f"   📅 데이터 수집 기간: {backtest_start_date_with_warmup} ~ {end_date} (Warmup 400일 포함)")
+            # 캐시 사용 여부 확인
+            if use_cache:
+                cached_data, cache_meta = load_backtest_cache()
+                if cached_data is not None and cache_meta is not None:
+                    test_data = cached_data
+                    cache_used = True
+                    log_info("📦 백테스팅 캐시 파일 사용", context={
+                        "start_date": cache_meta.get('start_date'),
+                        "end_date": cache_meta.get('end_date'),
+                        "created_at": cache_meta.get('created_at'),
+                        "data_rows": len(test_data)
+                    })
+                    print(f"📦 백테스팅 캐시 파일 사용: {cache_meta.get('start_date')} ~ {cache_meta.get('end_date')} (생성일: {cache_meta.get('created_at')})")
+                else:
+                    log_info("백테스팅 캐시 파일이 없습니다. 데이터 수집을 시작합니다.")
+                    print("📦 백테스팅 캐시 파일이 없습니다. 데이터 수집을 시작합니다.")
             
-            # 팩터 점수 계산은 현재 계산할 팩터가 없으므로 스킵
-            test_data = data_processor.get_preprocessed_data(
-                backtest_start_date_with_warmup,
-                end_date,
-                skip_factor_scores=True
-            )
-            
-            # 즉시 빈 데이터 검증 (초기 수집/병합 실패 조기 발견)
-            if test_data is None or test_data.empty:
-                log_critical("백테스팅 데이터가 비어있습니다", context={
-                    "start_date": backtest_start_date_with_warmup,
-                    "end_date": end_date,
-                    "hint": "가격/재무 수집 실패 또는 날짜 구간에 데이터 부재"
+            # 캐시를 사용하지 않거나 캐시 파일이 없는 경우 데이터 수집
+            if not cache_used:
+                log_info("백테스팅 데이터 로딩 시작", context={
+                    "test_start_date": start_date,
+                    "test_end_date": end_date,
+                    "data_start_date": backtest_start_date_with_warmup,
+                    "data_end_date": end_date,
+                    "warmup_days": 400,
+                    "use_cache": use_cache
                 })
-                raise ValueError("백테스팅 데이터가 비어있습니다")
-            
-            # 데이터 품질 검증 추가
-            total_rows = len(test_data)
-            valid_rows = len(test_data.dropna(subset=['종목코드', 'date']))
-            data_quality = valid_rows / total_rows * 100 if total_rows > 0 else 0
-            
-            log_info(f"📊 백테스팅 데이터 품질: {valid_rows:,}/{total_rows:,}개 유효 행 ({data_quality:.1f}%)")
-            
-            if data_quality < 50:
-                log_critical("백테스팅 데이터 품질이 너무 낮습니다", context={
-                    "data_quality": data_quality,
-                    "valid_rows": valid_rows,
-                    "total_rows": total_rows
-                })
-                raise ValueError(f"백테스팅 데이터 품질이 너무 낮습니다: {data_quality:.1f}%")
-            elif data_quality < 80:
-                log_warning(f"⚠️ 백테스팅 데이터 품질이 낮습니다: {data_quality:.1f}% (권장: 90% 이상)")
+                log_info(f"   📅 테스트 기간: {start_date} ~ {end_date}")
+                log_info(f"   📅 데이터 수집 기간: {backtest_start_date_with_warmup} ~ {end_date} (Warmup 400일 포함)")
                 
-            log_info("백테스팅 데이터 로딩 완료", context={
-                "data_rows": len(test_data),
-                "data_columns": list(test_data.columns)
-            })
+                # 팩터 점수 계산은 현재 계산할 팩터가 없으므로 스킵
+                test_data = data_processor.get_preprocessed_data(
+                    backtest_start_date_with_warmup,
+                    end_date,
+                    skip_factor_scores=True
+                )
+                
+                # 즉시 빈 데이터 검증 (초기 수집/병합 실패 조기 발견)
+                if test_data is None or test_data.empty:
+                    log_critical("백테스팅 데이터가 비어있습니다", context={
+                        "start_date": backtest_start_date_with_warmup,
+                        "end_date": end_date,
+                        "hint": "가격/재무 수집 실패 또는 날짜 구간에 데이터 부재"
+                    })
+                    raise ValueError("백테스팅 데이터가 비어있습니다")
+                
+                # 데이터 품질 검증 추가
+                total_rows = len(test_data)
+                valid_rows = len(test_data.dropna(subset=['종목코드', 'date']))
+                data_quality = valid_rows / total_rows * 100 if total_rows > 0 else 0
+                
+                log_info(f"📊 백테스팅 데이터 품질: {valid_rows:,}/{total_rows:,}개 유효 행 ({data_quality:.1f}%)")
+                
+                if data_quality < 50:
+                    log_critical("백테스팅 데이터 품질이 너무 낮습니다", context={
+                        "data_quality": data_quality,
+                        "valid_rows": valid_rows,
+                        "total_rows": total_rows
+                    })
+                    raise ValueError(f"백테스팅 데이터 품질이 너무 낮습니다: {data_quality:.1f}%")
+                elif data_quality < 80:
+                    log_warning(f"⚠️ 백테스팅 데이터 품질이 낮습니다: {data_quality:.1f}% (권장: 90% 이상)")
+                    
+                log_info("백테스팅 데이터 로딩 완료", context={
+                    "data_rows": len(test_data),
+                    "data_columns": list(test_data.columns)
+                })
             
         except Exception as e:
             log_critical("백테스팅 데이터 로딩 실패", exception=e, context={
@@ -1029,239 +1506,25 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             log_critical("ML 모델 로딩 실패", exception=e, context={"model_file": model_file_path if 'model_file_path' in locals() else "Unknown"})
             raise
         
-        # ML 예측 적용 (강화된 에러 처리) - 가중치 0이면 스킵
-        try:
-            if not do_rf:
-                log_info("⏭️ RF(ml_pred_proba) 가중치가 0이라 예측을 건너뜁니다.")
-                test_data['ml_pred_proba'] = np.nan
-            else:
-                print("  - 테스트 데이터에 ML 예측 적용 중...")
-                log_info("ML 예측 적용 시작", context={
-                    "data_rows": len(test_data),
-                    "features": features
-                })
-                
-                # 모델이 기대하는 피처만 선택 (데이터에 있는 피처만 사용)
-                # 중요: 모델이 저장된 피처 순서를 정확히 따라야 함
-                available_features = [f for f in features if f in test_data.columns]
-                missing_features = [f for f in features if f not in test_data.columns]
-                
-                if missing_features:
-                    log_warning(f"   ⚠️ 필요한 피처 부족: {len(missing_features)}개 - {missing_features[:5]}{'...' if len(missing_features) > 5 else ''}")
-                    if len(available_features) == 0:
-                        log_error("   ❌ 사용 가능한 피처가 없습니다. 예측을 수행할 수 없습니다.")
-                        raise ValueError("모델이 기대하는 피처가 데이터에 없습니다.")
-                    log_info(f"   ℹ️ 사용 가능한 피처 {len(available_features)}개로 예측 진행")
-                
-                # 모델의 피처 수 확인 (cuML 모델은 n_features_in_ 속성 확인)
-                # 주의: cuML 모델은 내부적으로 학습 시 사용된 피처 수를 저장하므로 정확히 일치해야 함
-                model_expected_features = None
-                try:
-                    if hasattr(model, 'n_features_in_'):
-                        model_expected_features = model.n_features_in_
-                    elif hasattr(model, 'n_features_'):
-                        model_expected_features = model.n_features_
-                    # cuML 모델의 경우 내부 모델에서 확인
-                    elif hasattr(model, 'cuml_model') and hasattr(model.cuml_model, 'n_features_in_'):
-                        model_expected_features = model.cuml_model.n_features_in_
-                    # EnsembleModelWrapper의 경우 내부 모델들 확인
-                    elif hasattr(model, 'models') and len(model.models) > 0:
-                        first_model = model.models[0]
-                        if hasattr(first_model, 'n_features_in_'):
-                            model_expected_features = first_model.n_features_in_
-                except Exception:
-                    pass  # 모델 피처 수 확인 실패는 무시
-                
-                # 가장 먼저 확인: 모델이 저장된 features 리스트와 실제 모델의 피처 수가 일치하는지 확인
-                # 이게 불일치하면 근본적인 문제이므로 먼저 체크
-                if model_expected_features is not None and model_expected_features != len(features):
-                    log_error(f"   ❌ 심각한 불일치: 모델 내부는 {model_expected_features}개 피처를 기대하지만, 저장된 features 리스트는 {len(features)}개입니다.")
-                    log_error(f"   ❌ 저장된 features: {features}")
-                    log_error(f"   ❌ 이 모델은 피처 수가 불일치합니다. 모델을 다시 학습해야 합니다.")
-                    error_msg = f"모델 내부 피처 수({model_expected_features})와 저장된 features 리스트({len(features)})가 일치하지 않습니다. 모델을 다시 학습해야 합니다."
-                    log_critical(error_msg)
-                    raise ValueError(error_msg)
-                
-                # 모델이 기대하는 피처 수와 사용 가능한 피처 수가 일치하는지 확인
-                if model_expected_features is not None and model_expected_features != len(available_features):
-                    log_error(f"   ❌ 모델 피처 수 불일치: 모델은 {model_expected_features}개를 기대하지만 데이터는 {len(available_features)}개입니다.")
-                    log_error(f"   ❌ 모델이 저장된 features 리스트: {len(features)}개 - {features}")
-                    log_error(f"   ❌ 사용 가능한 features: {len(available_features)}개 - {available_features}")
-                    if model_expected_features > len(available_features):
-                        error_msg = f"모델은 {model_expected_features}개 피처를 기대하지만 {len(available_features)}개만 제공되었습니다. 모델을 다시 학습해야 합니다."
-                        log_critical(error_msg)
-                        raise ValueError(error_msg)
-                    else:
-                        log_warning(f"   ⚠️ 모델이 기대하는 피처 수({model_expected_features})가 제공된 피처 수({len(available_features)})보다 적습니다. 예측을 시도하지만 오류가 발생할 수 있습니다.")
-                
-                # 사용 가능한 피처만 선택 (모델이 저장된 순서대로)
-                test_data_for_pred = test_data[available_features].copy()
-                
-                # imputation_values 로드 (모델 데이터에서)
-                imputation_values = None
-                if 'imputation_values' in model_data and model_data['imputation_values']:
-                    imputation_values = model_data['imputation_values']
-                
-                # imputation_values가 있으면 사용, 없으면 0으로 채움
-                if imputation_values:
-                    available_imputation = {k: v for k, v in imputation_values.items() if k in available_features}
-                    test_data_for_pred.fillna(available_imputation, inplace=True)
-                else:
-                    test_data_for_pred.fillna(0, inplace=True)
-                
-                # 스케일러의 피처 수 확인 (cuML scaler는 n_features_in_ 속성 사용)
-                scaler_expected_features = None
-                if scaler and hasattr(scaler, 'n_features_in_'):
-                    scaler_expected_features = scaler.n_features_in_
-                elif scaler and hasattr(scaler, 'mean_'):
-                    # cuML StandardScaler는 mean_ 속성의 길이로 피처 수 확인 가능
-                    scaler_expected_features = len(scaler.mean_) if hasattr(scaler.mean_, '__len__') else None
-                
-                # 현재 데이터의 피처 수
-                current_features_count = len(available_features)
-                
-                # 스케일러와 데이터의 피처 수가 일치하는지 확인
-                use_scaler = scaler is not None
-                if scaler_expected_features is not None and scaler_expected_features != current_features_count:
-                    log_warning(f"스케일러 피처 수 불일치: 스케일러는 {scaler_expected_features}개를 기대하지만 데이터는 {current_features_count}개입니다. 스케일링을 건너뜁니다.")
-                    use_scaler = False
-                
-                # cuML 모델인 경우 cuDF DataFrame으로 변환 필요
-                if is_cuml_model:
-                    import cudf
-                    # cuML scaler인지 확인
-                    if use_scaler and hasattr(scaler, 'transform'):
-                        # cuML scaler는 cuDF DataFrame을 받아야 함
-                        try:
-                            # 모델이 저장된 피처 순서대로 컬럼 정렬 (중요: 순서가 정확히 일치해야 함)
-                            test_data_ordered = test_data_for_pred[available_features]
-                            test_data_cudf = cudf.from_pandas(test_data_ordered)
-                            X_test_scaled_cudf = scaler.transform(test_data_cudf)
-                            # cuML 모델은 cuDF DataFrame을 받을 수 있음
-                            X_test_scaled = X_test_scaled_cudf
-                        except ImportError:
-                            log_warning("cuDF를 사용할 수 없습니다. 원본 데이터 사용")
-                            test_data_ordered = test_data_for_pred[available_features]
-                            X_test_scaled = cudf.from_pandas(test_data_ordered)
-                        except Exception as e:
-                            log_warning(f"cuML 스케일링 오류: {e}, 원본 데이터 사용")
-                            test_data_ordered = test_data_for_pred[available_features]
-                            X_test_scaled = cudf.from_pandas(test_data_ordered)
-                    else:
-                        # 스케일러를 사용하지 않음 (피처 수 불일치 또는 스케일러 없음)
-                        # cuML 모델은 cuDF DataFrame을 기대하므로 변환
-                        # 모델이 저장된 피처 순서대로 컬럼 정렬 (중요: 순서가 정확히 일치해야 함)
-                        test_data_ordered = test_data_for_pred[available_features]
-                        X_test_scaled = cudf.from_pandas(test_data_ordered)
-                elif use_scaler:
-                    # sklearn scaler (sklearn 모델)
-                    try:
-                        X_test_scaled = scaler.transform(test_data_for_pred)
-                    except Exception as e:
-                        log_warning(f"sklearn 스케일링 오류: {e}, 원본 데이터 사용")
-                        X_test_scaled = test_data_for_pred.values
-                else:
-                    # 스케일러를 사용하지 않음 (sklearn 모델)
-                    X_test_scaled = test_data_for_pred.values
-                
-                # 예측 수행 (큰 데이터셋의 경우 배치 처리)
-                # cuDF DataFrame인 경우 len() 사용, numpy 배열인 경우 shape[0] 사용
-                if hasattr(X_test_scaled, '__len__'):
-                    test_size = len(X_test_scaled)
-                elif hasattr(X_test_scaled, 'shape'):
-                    test_size = X_test_scaled.shape[0]
-                else:
-                    test_size = test_data_for_pred.shape[0]
-                
-                if test_size > 1000000 and is_cuml_model:
-                    log_info(f"   [PRED] 큰 데이터셋 ({test_size:,}행) - 배치 처리로 예측")
-                    batch_size = 500000  # 배치 크기
-                    num_batches = (test_size + batch_size - 1) // batch_size
-                    
-                    pred_proba_list = []
-                    for batch_idx in range(num_batches):
-                        start_idx = batch_idx * batch_size
-                        end_idx = min((batch_idx + 1) * batch_size, test_size)
-                        
-                        # cuDF DataFrame인 경우 iloc 사용
-                        if hasattr(X_test_scaled, 'iloc'):
-                            X_batch = X_test_scaled.iloc[start_idx:end_idx]
-                        else:
-                            # numpy 배열인 경우
-                            X_batch = X_test_scaled[start_idx:end_idx]
-                        
-                        try:
-                            batch_proba = model.predict_proba(X_batch)
-                            # 결과 처리
-                            if isinstance(batch_proba, np.ndarray):
-                                if batch_proba.ndim == 2:
-                                    pred_proba_list.append(batch_proba[:, 1])
-                                else:
-                                    pred_proba_list.append(batch_proba)
-                            else:
-                                # cuDF Series나 다른 형태
-                                if hasattr(batch_proba, 'iloc'):
-                                    pred_proba_list.append(batch_proba.iloc[:, 1].to_pandas().values if hasattr(batch_proba.iloc[:, 1], 'to_pandas') else batch_proba.iloc[:, 1].values)
-                                else:
-                                    pred_proba_list.append(batch_proba[:, 1] if hasattr(batch_proba, '__getitem__') else batch_proba)
-                            
-                            del X_batch, batch_proba
-                            # 배치 간 메모리 정리
-                            if batch_idx < num_batches - 1:
-                                enhanced_gpu_memory_cleanup(force_defrag=False) if 'enhanced_gpu_memory_cleanup' in globals() else None
-                        except Exception as e:
-                            log_error(f"   ❌ 배치 {batch_idx+1}/{num_batches} 예측 실패: {e}")
-                            # 실패한 배치는 중립값(0.5)으로 채움
-                            batch_len = end_idx - start_idx
-                            pred_proba_list.append(np.full(batch_len, 0.5))
-                            del X_batch
-                            enhanced_gpu_memory_cleanup(force_defrag=False) if 'enhanced_gpu_memory_cleanup' in globals() else None
-                    
-                    # 배치 결과 합치기
-                    pred_proba = np.concatenate(pred_proba_list)
-                    del pred_proba_list
-                else:
-                    # 작은 데이터셋은 한 번에 처리
-                    pred_proba = model.predict_proba(X_test_scaled)
-                
-                # 반환 형태에 따라 처리 (cuML 모델은 cuDF DataFrame 반환)
-                if isinstance(pred_proba, np.ndarray):
-                    if pred_proba.ndim == 2:
-                        test_data['ml_pred_proba'] = pred_proba[:, 1]
-                    else:
-                        test_data['ml_pred_proba'] = pred_proba
-                elif hasattr(pred_proba, 'iloc'):
-                    # cuDF DataFrame인 경우
-                    if hasattr(pred_proba.iloc[:, 1], 'to_pandas'):
-                        test_data['ml_pred_proba'] = pred_proba.iloc[:, 1].to_pandas().values
-                    elif hasattr(pred_proba.iloc[:, 1], 'to_numpy'):
-                        test_data['ml_pred_proba'] = pred_proba.iloc[:, 1].to_numpy()
-                    else:
-                        test_data['ml_pred_proba'] = pred_proba.iloc[:, 1].values
-                else:
-                    # 기타 형태는 그대로 사용
-                    test_data['ml_pred_proba'] = pred_proba[:, 1] if hasattr(pred_proba, '__getitem__') else pred_proba
-                
-                log_info("ML 예측 적용 완료", context={
-                    "predictions_count": len(test_data['ml_pred_proba']),
-                    "prediction_range": f"{test_data['ml_pred_proba'].min():.3f} ~ {test_data['ml_pred_proba'].max():.3f}"
-                })
-            
-        except Exception as e:
-            log_critical("ML 예측 적용 실패", exception=e, context={
-                "features": features,
-                "data_shape": test_data.shape
-            })
-            raise
-
-        # LGBM은 일자별 최종 점수 계산 단계에서 필요할 때만 붙이도록 run_detailed_backtest에서 처리합니다.
+        # ML 예측은 일자별 최종 점수 계산 단계에서 필요할 때만 붙이도록 run_detailed_backtest에서 처리합니다.
         # (가중치 0이면 run_detailed_backtest에서 스킵)
+        # 전체 데이터에 대한 ML 예측은 제거하고 일별로 처리하도록 변경하여 성능 개선
     
         # 데이터 전처리 (강화된 에러 처리)
         try:
-            # 테스트 기간에 맞게 데이터 필터링
-            test_data = test_data[(test_data['date'] >= pd.to_datetime(start_date)) & 
-                                  (test_data['date'] <= pd.to_datetime(end_date))]
+            # 캐시에서 로드한 경우 인덱스가 이미 설정되어 있을 수 있음
+            if isinstance(test_data.index, pd.MultiIndex) and 'date' in test_data.index.names:
+                # 인덱스가 이미 설정되어 있으면 date 컬럼이 없을 수 있으므로 인덱스에서 가져옴
+                if 'date' not in test_data.columns:
+                    test_data['date'] = test_data.index.get_level_values('date')
+                # 테스트 기간에 맞게 데이터 필터링
+                test_data = test_data[(test_data['date'] >= pd.to_datetime(start_date)) & 
+                                      (test_data['date'] <= pd.to_datetime(end_date))]
+            else:
+                # 일반 데이터 로드의 경우
+                # 테스트 기간에 맞게 데이터 필터링
+                test_data = test_data[(test_data['date'] >= pd.to_datetime(start_date)) & 
+                                      (test_data['date'] <= pd.to_datetime(end_date))]
             
             # 로그: 백테스팅용 데이터 상태 확인
             log_info(f"🔍 백테스팅용 데이터: {len(test_data):,}개 행")
@@ -1276,8 +1539,17 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             # <<< 팩터 점수 계산 루프가 필요 없어짐 >>>
             log_info("  - 팩터 점수는 데이터 로딩 시 이미 계산되었습니다.")
             
-            test_data.set_index(['date', '종목코드'], inplace=True)
-            test_data.sort_index(inplace=True)
+            # 캐시에서 로드한 경우 final_score가 없을 수 있으므로 다시 계산 필요
+            # final_score는 가중치에 따라 달라지므로 캐시에 저장하지 않음
+            if cache_used and 'final_score' not in test_data.columns:
+                log_info("  - 캐시 파일에서 로드했으므로 final_score를 다시 계산합니다.")
+                # final_score 계산을 위해 run_detailed_backtest에서 처리하도록 함
+                # 여기서는 데이터만 준비
+            
+            # 인덱스가 이미 설정되어 있지 않은 경우에만 설정
+            if not isinstance(test_data.index, pd.MultiIndex) or 'date' not in test_data.index.names:
+                test_data.set_index(['date', '종목코드'], inplace=True)
+                test_data.sort_index(inplace=True)
             
             # 로그: 인덱스 설정 후 상태 확인
             log_info(f"🔍 인덱스 설정 후: {len(test_data):,}개 행")
@@ -1313,7 +1585,10 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                 take_profit_pct=take_profit_pct,
                 stop_loss_pct=stop_loss_pct,
                 buy_universe_rank=buy_universe_rank,
-                transaction_fee_rate=transaction_fee_rate
+                transaction_fee_rate=transaction_fee_rate,
+                save_cache=use_cache and not cache_used,
+                cache_start_date=backtest_start_date_with_warmup,
+                cache_end_date=end_date
             )
             
             # 결과에 메타데이터 추가
@@ -1325,6 +1600,21 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             backtest_results['top_n'] = top_n
             backtest_results['buy_universe_rank'] = buy_universe_rank
             backtest_results['securities_transaction_tax_rate'] = SECURITIES_TRANSACTION_TAX_RATE
+            # 캐시 정보 추가
+            if cache_used and cache_meta:
+                backtest_results['cache_info'] = {
+                    'used': True,
+                    'start_date': cache_meta.get('start_date'),
+                    'end_date': cache_meta.get('end_date'),
+                    'created_at': cache_meta.get('created_at')
+                }
+            else:
+                backtest_results['cache_info'] = {
+                    'used': False,
+                    'start_date': None,
+                    'end_date': None,
+                    'created_at': None
+                }
             
             log_info("백테스팅 시뮬레이션 완료", context={
                 "final_asset": backtest_results.get('final_asset', 0),
@@ -1382,6 +1672,7 @@ if __name__ == '__main__':
     parser.add_argument('--fee', type=float, default=0.015, help='Transaction fee rate (e.g., 0.015 for 0.015%)')
     parser.add_argument('--start-date', type=str, default=None, help='Test start date (YYYY-MM-DD format, default: 1 year ago)')
     parser.add_argument('--end-date', type=str, default=None, help='Test end date (YYYY-MM-DD format, default: today)')
+    parser.add_argument('--use-cache', action='store_true', help='Use cache for backtesting (load/save cache file)')
     args = parser.parse_args()
 
     if args.capital <= 0:
@@ -1396,6 +1687,7 @@ if __name__ == '__main__':
             buy_universe_rank=args.buy_universe,
             transaction_fee_rate=args.fee,
             start_date=args.start_date,
-            end_date=args.end_date
+            end_date=args.end_date,
+            use_cache=args.use_cache
         )
 

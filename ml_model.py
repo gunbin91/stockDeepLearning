@@ -487,8 +487,8 @@ def predict_with_catboost_model(df):
         features = metadata['features']
         scaler = metadata.get('scaler')  # 스케일러 로드
         
-        # 모델 로드
-        model = CatBoostClassifier()
+        # 모델 로드 (catboost_info 디렉토리 생성 방지)
+        model = CatBoostClassifier(allow_writing_files=False)
         model.load_model(str(catboost_model_path))
         
         # 피처 준비 (순서 중요)

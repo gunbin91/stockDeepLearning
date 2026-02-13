@@ -27,6 +27,7 @@ import optuna
 from sklearn.model_selection import KFold
 from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import StandardScaler
+from sklearn.base import BaseEstimator, ClassifierMixin
 import psutil
 
 # CatBoost은 lazy import로 처리
@@ -522,6 +523,7 @@ def check_gpu_availability():
             'iterations': 1,
             'verbose': False,
             'random_seed': 42,
+            'allow_writing_files': False,  # catboost_info 디렉토리 생성 방지
         }
         
         # GPU 학습 시도
@@ -972,11 +974,12 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
             log_info(f"   [PERM] 학습 데이터 샘플링 사용: {len(X_eval):,}행")
             
         # CatBoost 모델 래퍼 (sklearn 호환성 위함)
-        class CatBoostWrapper:
+        class CatBoostWrapper(BaseEstimator, ClassifierMixin):
+            """CatBoost 모델을 sklearn 인터페이스로 래핑하는 클래스"""
             def __init__(self, model):
                 self.model = model
-                self._estimator_type = "classifier"  # 분류기임을 명시
-                self.classes_ = np.array([0, 1])     # 클래스 정보 추가
+                self.classes_ = np.array([0, 1])  # 클래스 정보 추가
+                self._estimator_type = "classifier"  # 분류기임을 명시적으로 설정
             
             def fit(self, X, y):
                 # 이미 학습된 모델이므로 아무것도 하지 않음 (sklearn 인터페이스 만족용)
@@ -996,12 +999,22 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
                 
         wrapper = CatBoostWrapper(final_model)
         
+        # 커스텀 스코어러: predict_proba를 명시적으로 사용하여 roc_auc 계산
+        from sklearn.metrics import make_scorer, roc_auc_score
+        
+        def roc_auc_scorer(estimator, X, y):
+            """predict_proba를 사용하는 커스텀 roc_auc 스코어러"""
+            y_pred_proba = estimator.predict_proba(X)[:, 1]
+            return roc_auc_score(y, y_pred_proba)
+        
+        custom_scorer = make_scorer(roc_auc_scorer, greater_is_better=True)
+        
         # roc_auc 점수 기준으로 중요도 계산
         # n_repeats=5 정도로 빠르게
         log_info(f"   [PERM] 순열 중요도 계산 시작 (n_repeats=5)...")
         results = permutation_importance(
             wrapper, X_eval, y_eval, 
-            scoring='roc_auc', n_repeats=5, random_state=42, n_jobs=1
+            scoring=custom_scorer, n_repeats=5, random_state=42, n_jobs=1
         )
         
         feature_importances['permutation_importance'] = results.importances_mean

@@ -1407,6 +1407,10 @@ def start_backtest():
                 if end_date:
                     command.extend(['--end-date', end_date])
                 
+                # 캐시 사용 파라미터 추가
+                if data.get('use_cache', False):
+                    command.append('--use-cache')
+                
                 env = os.environ.copy()
                 env['PYTHONIOENCODING'] = 'utf-8'
                 env['LANG'] = 'ko_KR.UTF-8'
@@ -1659,6 +1663,32 @@ def get_backtest_report():
             return jsonify({'error': '리포트를 로드할 수 없습니다.'}), 500
     else:
         return jsonify({'error': '백테스팅 리포트를 찾을 수 없습니다.'}), 404
+
+@app.route('/api/delete_backtest_cache', methods=['POST'])
+def delete_backtest_cache():
+    """백테스팅 캐시 파일 삭제 API (단일 파일)"""
+    try:
+        # 백테스팅 스크립트의 캐시 삭제 함수 사용
+        import sys
+        import importlib.util
+        
+        backtest_path = os.path.join(os.path.dirname(__file__), 'scripts', 'backtest.py')
+        spec = importlib.util.spec_from_file_location("backtest_module", backtest_path)
+        backtest_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(backtest_module)
+        
+        deleted = backtest_module.delete_backtest_cache()
+        
+        if deleted:
+            return jsonify({'message': '캐시 파일이 삭제되었습니다.'})
+        else:
+            return jsonify({'error': '삭제할 캐시 파일이 없습니다.'}), 404
+            
+    except Exception as e:
+        log_error(f"백테스팅 캐시 삭제 실패: {e}")
+        import traceback
+        log_error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/favicon.ico')

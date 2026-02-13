@@ -601,6 +601,11 @@ $(document).ready(function() {
             stopBacktest();
         });
         
+        // 캐시 파일 삭제 버튼
+        $('#delete_cache_btn').on('click', function() {
+            deleteBacktestCache();
+        });
+        
         // 모달이 열릴 때 서버 상태 확인 및 날짜 기본값 설정
         $('#backtest_modal').on('show.bs.modal', function() {
             // 날짜 필드 기본값 설정 (시작일: 1년 전, 종료일: 오늘)
@@ -712,7 +717,8 @@ $(document).ready(function() {
             buy_universe: parseInt($('#modal_buy_universe').val()),
             transaction_fee: parseFloat($('#modal_transaction_fee').val()),
             start_date: startDate,
-            end_date: endDate
+            end_date: endDate,
+            use_cache: $('#use_cache_checkbox').is(':checked')
         };
         
         // 서버 상태 확인 후 진행
@@ -833,6 +839,26 @@ $(document).ready(function() {
         showBacktestReadyState();
     }
     
+    function deleteBacktestCache() {
+        if (!confirm('백테스팅 캐시 파일을 삭제하시겠습니까?')) {
+            return;
+        }
+        
+        $.ajax({
+            url: '/api/delete_backtest_cache',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({}),
+            success: function(response) {
+                showToast('캐시 파일이 삭제되었습니다.', 'success');
+            },
+            error: function(xhr) {
+                const error = JSON.parse(xhr.responseText);
+                showToast('캐시 파일 삭제 중 오류: ' + error.error, 'danger');
+            }
+        });
+    }
+    
     function handleBacktestComplete(data) {
         if (data.success) {
             showToast('백테스팅이 완료되었습니다.', 'success');
@@ -879,6 +905,20 @@ $(document).ready(function() {
         const metadata = data.metadata || {};
         const metrics = data.performance_metrics || {};
         const params = data.strategy_parameters || {};
+        const cacheInfo = metadata.cache_info || {};
+        
+        // 캐시 정보 표시
+        let cacheInfoHtml = '';
+        if (cacheInfo.used) {
+            const cacheCreatedAt = cacheInfo.created_at ? new Date(cacheInfo.created_at).toLocaleString('ko-KR') : '알 수 없음';
+            cacheInfoHtml = `
+                <div class="alert alert-info mb-3">
+                    <i class="fas fa-info-circle me-2"></i>
+                    <strong>캐시 파일 사용:</strong> ${cacheInfo.start_date} ~ ${cacheInfo.end_date}<br>
+                    <small class="text-muted">캐시 생성일: ${cacheCreatedAt}</small>
+                </div>
+            `;
+        }
         
         // 성과 지표 카드
         let metricsHtml = `
@@ -1081,7 +1121,7 @@ $(document).ready(function() {
             `;
         }
         
-        container.html(metricsHtml + paramsHtml + chartHtml + tradeLogHtml);
+        container.html(cacheInfoHtml + metricsHtml + paramsHtml + chartHtml + tradeLogHtml);
         
         // 차트 렌더링
         if (data.portfolio_history && data.portfolio_history.dates && data.portfolio_history.values) {
