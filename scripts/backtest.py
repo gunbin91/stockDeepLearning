@@ -224,7 +224,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         
         # 병합할 컬럼 목록 (final_score는 필수, 나머지는 final_scores_df에 있으면 포함)
         merge_cols = ['final_score']
-        optional_cols = ['ml_pred_proba', 'lgbm_pred_proba', 'volatility_score']
+        optional_cols = ['ml_pred_proba', 'lgbm_pred_proba']
         for col in optional_cols:
             if col in final_scores_df.columns:
                 merge_cols.append(col)
@@ -267,7 +267,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
     print(f"🔍 백테스팅 날짜 범위: {daily_dates.min()} ~ {daily_dates.max()}")
     print(f"🔍 총 백테스팅 날짜 수: {len(daily_dates)}개")
     
-    score_cols_to_log = ['final_score', 'ml_pred_proba', 'lgbm_pred_proba', 'volatility_score']
+    score_cols_to_log = ['final_score', 'ml_pred_proba', 'lgbm_pred_proba']
 
     take_profit_multiplier = 1 + (take_profit_pct / 100)
     stop_loss_multiplier = 1 - (stop_loss_pct / 100)
@@ -696,8 +696,7 @@ def create_json_report(results, output_path=None):
                 'cumulative_profit': float(row['cumulative_profit']) if 'cumulative_profit' in row and pd.notna(row['cumulative_profit']) else None,
                 'final_score': float(row['final_score']) if 'final_score' in row and pd.notna(row['final_score']) else None,
                 'ml_pred_proba': float(row['ml_pred_proba']) if 'ml_pred_proba' in row and pd.notna(row['ml_pred_proba']) else None,
-                'lgbm_pred_proba': float(row['lgbm_pred_proba']) if 'lgbm_pred_proba' in row and pd.notna(row['lgbm_pred_proba']) else None,
-                'volatility_score': float(row['volatility_score']) if 'volatility_score' in row and pd.notna(row['volatility_score']) else None
+                'lgbm_pred_proba': float(row['lgbm_pred_proba']) if 'lgbm_pred_proba' in row and pd.notna(row['lgbm_pred_proba']) else None
             }
             trade_log_records.append(record)
     
@@ -815,12 +814,9 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
 
         do_rf = _w('ml_pred_proba', 0.5) > 0
         do_lgbm = _w('lgbm_pred_proba', 0.5) > 0
-        do_volatility = _w('volatility_score', 0.10) > 0
         log_info("⚙️ 가중치 기반 계산 스킵 설정", context={
-            "volatility_score": _w('volatility_score', 0.10),
             "ml_pred_proba": _w('ml_pred_proba', 0.5),
             "lgbm_pred_proba": _w('lgbm_pred_proba', 0.5),
-            "do_volatility": do_volatility,
             "do_rf": do_rf,
             "do_lgbm": do_lgbm
         })
@@ -839,11 +835,11 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             log_info(f"   📅 테스트 기간: {start_date} ~ {end_date}")
             log_info(f"   📅 데이터 수집 기간: {backtest_start_date_with_warmup} ~ {end_date} (Warmup 400일 포함)")
             
-            # volatility_score 가중치가 0이면, 일별 팩터 점수 계산(현재는 변동성 점수) 자체를 스킵
+            # 팩터 점수 계산 (향후 다른 팩터 추가 대비)
             test_data = data_processor.get_preprocessed_data(
                 backtest_start_date_with_warmup,
                 end_date,
-                skip_factor_scores=(not do_volatility)
+                skip_factor_scores=False
             )
             
             # 즉시 빈 데이터 검증 (초기 수집/병합 실패 조기 발견)

@@ -61,17 +61,15 @@ def calculate_final_score(df):
 
     # 기본 가중치 설정 (최적화된 가중치 파일이 없을 경우 사용)
     factor_weights = {
-        'volatility_score': 0.10,    # 변동성 점수 10%
-        'ml_pred_proba': 0.90,       # ML 예측 확률 90% (RF)
+        'ml_pred_proba': 1.0,       # ML 예측 확률 100% (RF)
     }
 
     # LGBM 결과가 있으면 가중치 분산 (기본값)
     if 'lgbm_pred_proba' in final_df.columns:
         log_info("[INFO] LGBM 예측 결과 발견 - 가중치 자동 조정")
         factor_weights = {
-            'volatility_score': 0.10,
-            'ml_pred_proba': 0.45,    # RF 45%
-            'lgbm_pred_proba': 0.45   # LGBM 45%
+            'ml_pred_proba': 0.5,    # RF 50%
+            'lgbm_pred_proba': 0.5   # LGBM 50%
         }
 
     # 최적화된 가중치 파일이 있으면 불러오기
@@ -81,10 +79,12 @@ def calculate_final_score(df):
     if os.path.exists(optimal_weights_path):
         with open(optimal_weights_path, 'r') as f:
             loaded_weights = json.load(f)
+            # volatility_score는 제거되었으므로 필터링
+            loaded_weights = {k: v for k, v in loaded_weights.items() if k != 'volatility_score'}
             # 파일에 LGBM 가중치가 없고 데이터에는 LGBM이 있다면 기본 비율 유지하면서 로드된 값 반영
             if 'lgbm_pred_proba' in final_df.columns and 'lgbm_pred_proba' not in loaded_weights:
                  # 기존 ML 가중치를 반으로 나눠서 LGBM에 할당하는 전략
-                 ml_weight = loaded_weights.get('ml_pred_proba', 0.90)
+                 ml_weight = loaded_weights.get('ml_pred_proba', 1.0)
                  loaded_weights['ml_pred_proba'] = ml_weight / 2
                  loaded_weights['lgbm_pred_proba'] = ml_weight / 2
             

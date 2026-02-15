@@ -191,7 +191,7 @@ def _validate_and_prepare_weights(payload: dict):
         raise ValueError("요청 바디가 비어있습니다.")
 
     # 프로젝트 호환 팩터(컬럼)만 수정 가능: 추후 팩터 추가 시 이 목록만 확장
-    allowed_keys = {'volatility_score', 'ml_pred_proba', 'lgbm_pred_proba'}
+    allowed_keys = {'ml_pred_proba', 'lgbm_pred_proba'}
 
     # 입력 포맷 호환: {weights: {...}, normalize: true/false} 또는 {...} 직접
     if isinstance(payload, dict) and 'weights' in payload and isinstance(payload.get('weights'), dict):
@@ -453,7 +453,7 @@ def load_cached_analysis_result():
                 display_df['시장구분'] = 'N/A'
 
             # 숫자 컬럼 정리 (NaN/문자 혼합 대비)
-            for col in ['현재가', '기준일가', '전날종가', 'final_score', 'ml_pred_proba', 'lgbm_pred_proba', 'volatility_score', '시가총액']:
+            for col in ['현재가', '기준일가', '전날종가', 'final_score', 'ml_pred_proba', 'lgbm_pred_proba', '시가총액']:
                 if col in display_df.columns:
                     display_df[col] = pd.to_numeric(display_df[col], errors='coerce')
             
@@ -476,10 +476,6 @@ def load_cached_analysis_result():
             else:
                 # LGBM 컬럼이 없더라도 테이블 정렬을 위해 컬럼 생성
                 display_df['lgbm_pred_proba'] = np.nan
-            
-            # volatility_score가 없을 때 기본값 설정
-            if 'volatility_score' not in display_df.columns:
-                display_df['volatility_score'] = 50.0
             
             # 등락율 계산 (0 나누기/NaN 방어)
             if '현재가' in display_df.columns and '기준일가' in display_df.columns:
@@ -504,7 +500,7 @@ def load_cached_analysis_result():
                 display_df['시가총액'] = display_df['시가총액'] / 100000000
 
             # NASDAQ 전용: 통화/단위 표기를 USD로 통일
-            rename_map = { '현재가': '현재가(USD)', '시가총액': '시가총액(억달러)',  'volatility_score': '변동성(점)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(USD)'}
+            rename_map = { '현재가': '현재가(USD)', '시가총액': '시가총액(억달러)', 'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(USD)'}
             display_df.rename(columns=rename_map, inplace=True)
             
             display_columns = [
@@ -518,7 +514,6 @@ def load_cached_analysis_result():
                 '최종점수(점)',
                 '상승확률(%)',
                 'lgbm_pred_proba',
-                '변동성(점)',
                 '시가총액(억달러)'
             ]
             
@@ -1784,8 +1779,7 @@ def get_weights():
     try:
         # ensemble.py 기본값과 동일한 디폴트
         default_weights = {
-            'volatility_score': 0.10,
-            'ml_pred_proba': 0.90,
+            'ml_pred_proba': 1.0,
         }
 
         weights_path = _get_weights_file_path()
@@ -1794,9 +1788,11 @@ def get_weights():
 
         merged = default_weights.copy()
         if isinstance(file_weights, dict):
+            # volatility_score는 제거되었으므로 필터링
+            file_weights = {k: v for k, v in file_weights.items() if k != 'volatility_score'}
             merged.update(file_weights)
 
-        allowed_keys = ['volatility_score', 'ml_pred_proba', 'lgbm_pred_proba']
+        allowed_keys = ['ml_pred_proba', 'lgbm_pred_proba']
         # UI 혼란 방지: 허용된 키만 반환/표시
         merged_filtered = {k: merged.get(k, 0.0) for k in allowed_keys}
         file_weights_filtered = {k: (file_weights or {}).get(k, 0.0) for k in allowed_keys}

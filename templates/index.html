@@ -107,7 +107,6 @@
                         <th>최종점수(점)</th>
                         <th>RF상승확률(%)</th>
                         <th>LGBM상승확률(%)</th>
-                        <th>변동성(점)</th>
                         <th>시가총액(억달러)</th>
                     </tr>
                 </thead>
@@ -157,7 +156,6 @@
                                 <span class="text-muted">-</span>
                             {% endif %}
                         </td>
-                        <td>{% if '변동성(점)' in row.index %}{{ "{:.2f}".format(row['변동성(점)']) }}{% else %}0.00{% endif %}</td>
                         <td>
                             {% set v = row['시가총액(억달러)'] %}
                             {% if v is not none and not (v != v) %}
