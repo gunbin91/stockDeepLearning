@@ -1076,6 +1076,8 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                 
                 # cuML 모델인 경우 cuDF DataFrame으로 변환 필요
                 if is_cuml_model:
+                    # 호환성 패치 적용 (import cudf 전에 실행)
+                    apply_pandas_compatibility_patch()
                     import cudf
                     # cuML scaler인지 확인
                     if use_scaler and hasattr(scaler, 'transform'):

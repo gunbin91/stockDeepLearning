@@ -23,9 +23,57 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # cudf의 feather reader 관련 UserWarning은 예상된 동작이므로 숨김 처리
 warnings.filterwarnings("ignore", message="Using CPU via PyArrow to read feather dataset", category=UserWarning)
 
+# pandas 호환성 패치: cuDF가 pandas.api.types.is_interval을 사용하는데 최신 pandas에서는 제거됨
+def apply_pandas_compatibility_patch():
+    """pandas 최신 버전과 cuDF 호환성을 위한 패치 적용"""
+    try:
+        import pandas.api.types as pd_types
+        # is_interval이 없으면 추가 (cuDF 호환성)
+        if not hasattr(pd_types, 'is_interval'):
+            # pandas 2.0+에서는 IntervalDtype을 사용하여 체크
+            def is_interval(arr):
+                """Interval 타입 체크 함수"""
+                try:
+                    from pandas import IntervalDtype
+                    return hasattr(arr, 'dtype') and isinstance(arr.dtype, IntervalDtype)
+                except:
+                    return False
+            pd_types.is_interval = is_interval
+    except Exception as e:
+        # 패치 적용 실패해도 계속 진행 (cuDF가 직접 처리할 수 있음)
+        pass
+
+# scikit-learn 호환성 패치: cuML이 BaseEstimator._get_default_requests를 사용하는데 최신 scikit-learn에서는 제거됨
+def apply_sklearn_compatibility_patch():
+    """scikit-learn 최신 버전과 cuML 호환성을 위한 패치 적용"""
+    try:
+        from sklearn.base import BaseEstimator
+        # _get_default_requests가 없으면 추가 (cuML 호환성)
+        if not hasattr(BaseEstimator, '_get_default_requests'):
+            # scikit-learn 1.3+에서는 _get_metadata_request를 사용하거나, 없으면 빈 함수로 대체
+            if hasattr(BaseEstimator, '_get_metadata_request'):
+                # _get_metadata_request를 _get_default_requests로 별칭 생성
+                original_get_metadata_request = BaseEstimator._get_metadata_request
+                def _get_default_requests(self, *args, **kwargs):
+                    return original_get_metadata_request(self, *args, **kwargs)
+                BaseEstimator._get_default_requests = _get_default_requests
+            else:
+                # 둘 다 없으면 빈 함수로 대체
+                def _get_default_requests(self, *args, **kwargs):
+                    return {}
+                BaseEstimator._get_default_requests = _get_default_requests
+    except Exception as e:
+        # 패치 적용 실패해도 계속 진행
+        pass
+
 # 서드파티 라이브러리
 import pandas as pd
+# 호환성 패치 적용 (import cudf 전에 실행)
+apply_pandas_compatibility_patch()
 import cudf
+# scikit-learn 호환성 패치 적용 (import cuml 전에 실행)
+apply_sklearn_compatibility_patch()
+import cuml
 import cuml
 import numpy as np
 import joblib
@@ -82,7 +130,31 @@ optuna.samplers.TPESampler.init_rng = lambda self: np.random.RandomState()
 
 # --- 메모리 관리 유틸리티 ---
 
-
+def convert_cudf_to_pandas_for_joblib(obj):
+    """
+    joblib.dump를 위해 cuDF 객체를 pandas로 변환하는 헬퍼 함수
+    - cuDF DataFrame/Series를 pandas로 변환
+    - 딕셔너리의 값들도 재귀적으로 변환
+    - 리스트/튜플의 요소들도 재귀적으로 변환
+    """
+    try:
+        # 호환성 패치 적용 (import cudf 전에 실행)
+        apply_pandas_compatibility_patch()
+        import cudf
+        if isinstance(obj, cudf.DataFrame):
+            return obj.to_pandas()
+        elif isinstance(obj, cudf.Series):
+            return obj.to_pandas()
+        elif isinstance(obj, dict):
+            return {k: convert_cudf_to_pandas_for_joblib(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            converted = [convert_cudf_to_pandas_for_joblib(item) for item in obj]
+            return tuple(converted) if isinstance(obj, tuple) else converted
+        else:
+            return obj
+    except:
+        # cudf가 없거나 변환 실패 시 원본 반환
+        return obj
 
 def get_memory_usage(gpu=False):
 
@@ -1533,6 +1605,17 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
         if X_train_original is None or X_val_original is None:
             raise ValueError("fold_cache 파일의 데이터가 유효하지 않습니다.")
         
+        # 저장 시 pandas로 변환했으므로, 로드 후 cuDF로 다시 변환 필요
+        # pandas DataFrame을 cuDF DataFrame으로 변환
+        if not isinstance(X_train_original, cudf.DataFrame):
+            X_train_original = cudf.from_pandas(X_train_original)
+        if not isinstance(y_train_original, cudf.Series):
+            y_train_original = cudf.Series(y_train_original) if isinstance(y_train_original, (pd.Series, np.ndarray)) else cudf.from_pandas(pd.Series(y_train_original))
+        if not isinstance(X_val_original, cudf.DataFrame):
+            X_val_original = cudf.from_pandas(X_val_original)
+        if not isinstance(y_val_original, cudf.Series):
+            y_val_original = cudf.Series(y_val_original) if isinstance(y_val_original, (pd.Series, np.ndarray)) else cudf.from_pandas(pd.Series(y_val_original))
+        
         log_info(f"   [OK] 원본 데이터 로드 완료: Train {len(X_train_original):,}행, Val {len(X_val_original):,}행")
         
         # 원본 train + 원본 val 합치기 (전체 데이터 복원)
@@ -1964,18 +2047,20 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
             
             # 모델 파일 저장
             # final_imputation_values: 전체 데이터(X_all) 기준으로 계산된 중앙값 (실전 추론 시 사용)
-            joblib.dump({
+            # cuDF 객체를 pandas로 변환하여 저장 (joblib 직렬화 호환성)
+            model_data_to_save = {
                 'model': final_model,
                 'features': features,
                 'scaler': final_scaler,
-                'imputation_values': final_imputation_values,  # 전체 데이터 기준 중앙값 (실전 추론용)
+                'imputation_values': convert_cudf_to_pandas_for_joblib(final_imputation_values),  # 전체 데이터 기준 중앙값 (실전 추론용)
                 'best_params': best_params,
                 'model_type': 'single_model',
                 'optimization_results': optimization_results or {},
                 'training_config': final_training_config,
                 'feature_importances': feature_importances,  # SHAP 값
                 'permutation_importances': permutation_importances  # 순열 중요도
-            }, model_path, compress=3)
+            }
+            joblib.dump(model_data_to_save, model_path, compress=3)
             log_info(f"   [OK] 최종 모델 저장 완료: {model_path}")
             
             # 메타데이터 파일 저장 (웹페이지에서 빠른 로드를 위해)
@@ -2001,7 +2086,9 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
                     'parameter_explanations': parameter_explanations
                 }
                 
-                joblib.dump(metadata_to_save, metadata_path, compress=3)
+                # cuDF 객체를 pandas로 변환하여 저장 (joblib 직렬화 호환성)
+                metadata_to_save_converted = convert_cudf_to_pandas_for_joblib(metadata_to_save)
+                joblib.dump(metadata_to_save_converted, metadata_path, compress=3)
                 log_info(f"   [OK] 메타데이터 파일 저장 완료: {metadata_path}")
             except Exception as e:
                 log_warning(f"   [WARN] 메타데이터 파일 저장 실패 (선택사항): {e}")
@@ -2234,6 +2321,16 @@ def main():
                 else:
                     raise ValueError("캐시 형식이 맞지 않습니다.")
                 
+                # 저장 시 pandas로 변환했으므로, 로드 후 cuDF로 다시 변환 필요
+                if not isinstance(X_train, cudf.DataFrame):
+                    X_train = cudf.from_pandas(X_train)
+                if not isinstance(y_train, cudf.Series):
+                    y_train = cudf.Series(y_train) if isinstance(y_train, (pd.Series, np.ndarray)) else cudf.from_pandas(pd.Series(y_train))
+                if not isinstance(X_val, cudf.DataFrame):
+                    X_val = cudf.from_pandas(X_val)
+                if not isinstance(y_val, cudf.Series):
+                    y_val = cudf.Series(y_val) if isinstance(y_val, (pd.Series, np.ndarray)) else cudf.from_pandas(pd.Series(y_val))
+                
                 load_time = (datetime.now() - load_start).total_seconds()
                 
                 if X_train is None or X_val is None:
@@ -2299,7 +2396,14 @@ def main():
             # fold 데이터 파일로 저장 (imputation_map도 함께 저장)
             log_info(f"   💾 Fold #{fold_idx+1}/3 데이터 파일 저장 중...")
             try:
-                joblib.dump((X_train, y_train, X_val, y_val, train_imputation_map), fold_cache_path)
+                # cuDF DataFrame/Series를 pandas로 변환하여 저장 (joblib 직렬화 호환성)
+                X_train_pandas = X_train.to_pandas() if hasattr(X_train, 'to_pandas') else X_train
+                y_train_pandas = y_train.to_pandas() if hasattr(y_train, 'to_pandas') else y_train
+                X_val_pandas = X_val.to_pandas() if hasattr(X_val, 'to_pandas') else X_val
+                y_val_pandas = y_val.to_pandas() if hasattr(y_val, 'to_pandas') else y_val
+                train_imputation_map_converted = convert_cudf_to_pandas_for_joblib(train_imputation_map)
+                
+                joblib.dump((X_train_pandas, y_train_pandas, X_val_pandas, y_val_pandas, train_imputation_map_converted), fold_cache_path)
                 log_info(f"   ✅ Fold #{fold_idx+1}/3 데이터 파일 저장 완료.")
             except Exception as e:
                 log_warning(f"   ⚠️ Fold #{fold_idx+1} 데이터 파일 저장 실패: {e}. 학습은 계속 진행됩니다.")

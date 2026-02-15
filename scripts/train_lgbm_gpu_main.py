@@ -20,8 +20,54 @@ from bisect import bisect_left
 import gc
 import warnings
 
+# pandas 호환성 패치: cuDF가 pandas.api.types.is_interval을 사용하는데 최신 pandas에서는 제거됨
+def apply_pandas_compatibility_patch():
+    """pandas 최신 버전과 cuDF 호환성을 위한 패치 적용"""
+    try:
+        import pandas.api.types as pd_types
+        # is_interval이 없으면 추가 (cuDF 호환성)
+        if not hasattr(pd_types, 'is_interval'):
+            # pandas 2.0+에서는 IntervalDtype을 사용하여 체크
+            def is_interval(arr):
+                """Interval 타입 체크 함수"""
+                try:
+                    from pandas import IntervalDtype
+                    return hasattr(arr, 'dtype') and isinstance(arr.dtype, IntervalDtype)
+                except:
+                    return False
+            pd_types.is_interval = is_interval
+    except Exception as e:
+        # 패치 적용 실패해도 계속 진행 (cuDF가 직접 처리할 수 있음)
+        pass
+
+# scikit-learn 호환성 패치: cuML이 BaseEstimator._get_default_requests를 사용하는데 최신 scikit-learn에서는 제거됨
+def apply_sklearn_compatibility_patch():
+    """scikit-learn 최신 버전과 cuML 호환성을 위한 패치 적용"""
+    try:
+        from sklearn.base import BaseEstimator
+        # _get_default_requests가 없으면 추가 (cuML 호환성)
+        if not hasattr(BaseEstimator, '_get_default_requests'):
+            # scikit-learn 1.3+에서는 _get_metadata_request를 사용하거나, 없으면 빈 함수로 대체
+            if hasattr(BaseEstimator, '_get_metadata_request'):
+                # _get_metadata_request를 _get_default_requests로 별칭 생성
+                original_get_metadata_request = BaseEstimator._get_metadata_request
+                def _get_default_requests(self, *args, **kwargs):
+                    return original_get_metadata_request(self, *args, **kwargs)
+                BaseEstimator._get_default_requests = _get_default_requests
+            else:
+                # 둘 다 없으면 빈 함수로 대체
+                def _get_default_requests(self, *args, **kwargs):
+                    return {}
+                BaseEstimator._get_default_requests = _get_default_requests
+    except Exception as e:
+        # 패치 적용 실패해도 계속 진행
+        pass
+
 # 서드파티 라이브러리
 import pandas as pd
+# 호환성 패치 적용 (cuDF/cuML import 전에 실행)
+apply_pandas_compatibility_patch()
+apply_sklearn_compatibility_patch()
 import numpy as np
 import joblib
 import optuna
@@ -60,6 +106,32 @@ DEFAULT_HORIZON_TRADING_DAYS = 10
 optuna.samplers.TPESampler.init_rng = lambda self: np.random.RandomState()
 
 # --- 메모리 관리 유틸리티 ---
+
+def convert_cudf_to_pandas_for_joblib(obj):
+    """
+    joblib.dump를 위해 cuDF 객체를 pandas로 변환하는 헬퍼 함수
+    - cuDF DataFrame/Series를 pandas로 변환
+    - 딕셔너리의 값들도 재귀적으로 변환
+    - 리스트/튜플의 요소들도 재귀적으로 변환
+    """
+    try:
+        # 호환성 패치 적용 (import cudf 전에 실행)
+        apply_pandas_compatibility_patch()
+        import cudf
+        if isinstance(obj, cudf.DataFrame):
+            return obj.to_pandas()
+        elif isinstance(obj, cudf.Series):
+            return obj.to_pandas()
+        elif isinstance(obj, dict):
+            return {k: convert_cudf_to_pandas_for_joblib(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            converted = [convert_cudf_to_pandas_for_joblib(item) for item in obj]
+            return tuple(converted) if isinstance(obj, tuple) else converted
+        else:
+            return obj
+    except:
+        # cudf가 없거나 변환 실패 시 원본 반환
+        return obj
 
 def get_memory_usage():
     """현재 CPU 메모리 사용량을 MB 단위로 반환합니다."""
@@ -1087,7 +1159,9 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
         metadata['training_config'] = training_config
     
     metadata_path = path_manager.data_dir / 'lgbm_model_metadata.joblib'
-    joblib.dump(metadata, metadata_path)
+    # cuDF 객체를 pandas로 변환하여 저장 (joblib 직렬화 호환성)
+    metadata_converted = convert_cudf_to_pandas_for_joblib(metadata)
+    joblib.dump(metadata_converted, metadata_path)
     log_info(f"   [OK] 메타데이터 저장 완료: {metadata_path}")
     
     return final_model, features

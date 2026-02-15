@@ -1053,21 +1053,21 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             except Exception as e:
                 log_warning(f"HV_Volatility_60 계산 실패 ({ticker}): {e}")
                 df['HV_Volatility_60'] = np.nan
+            
+            # 2-3. [신규 추가] VWAP Disparity(1W) (VWAP 괴리율 1주)
+            # 최근 5일 거래대금 가중 평균 가격 대비 현재가 비율
+            try:
+                tp = (df['고가'] + df['저가'] + df['종가']) / 3
+                money = tp * df['거래량']
                 
-                # 2-3. [신규 추가] VWAP Disparity(1W) (VWAP 괴리율 1주)
-                # 최근 5일 거래대금 가중 평균 가격 대비 현재가 비율
-                try:
-                    tp = (df['고가'] + df['저가'] + df['종가']) / 3
-                    money = tp * df['거래량']
-                    
-                    sum_money_5 = money.rolling(window=5).sum()
-                    sum_vol_5 = df['거래량'].rolling(window=5).sum()
-                    
-                    vwap_5 = sum_money_5 / (sum_vol_5 + 1e-9)
-                    df['VWAP_Disparity_5'] = (df['종가'] / vwap_5 - 1) * 100
-                except Exception as e:
-                    log_warning(f"VWAP_Disparity_5 계산 실패 ({ticker}): {e}")
-                    df['VWAP_Disparity_5'] = np.nan
+                sum_money_5 = money.rolling(window=5).sum()
+                sum_vol_5 = df['거래량'].rolling(window=5).sum()
+                
+                vwap_5 = sum_money_5 / (sum_vol_5 + 1e-9)
+                df['VWAP_Disparity_5'] = (df['종가'] / vwap_5 - 1) * 100
+            except Exception as e:
+                log_warning(f"VWAP_Disparity_5 계산 실패 ({ticker}): {e}")
+                df['VWAP_Disparity_5'] = np.nan
             
             # 3. 이격도 계산 (120일, 240일) - disparity_20 제거
             for p in [120, 240]:
