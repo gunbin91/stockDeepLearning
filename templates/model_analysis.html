@@ -831,7 +831,6 @@
 
 {% block extra_scripts %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
 <script>
   $(document).ready(function() {
       // --- Chart 생성 유틸리티 ---
@@ -918,25 +917,52 @@
         let rfShapChart = createChart('rf_shap_chart', rfShapData, 'RF SHAP Importance');
         let rfPermChart = createChart('rf_perm_chart', rfPermData, 'RF Permutation Importance');
         
-        // RF DataTables 초기화
-        if (!$.fn.DataTable.isDataTable('#rf_shap_table')) {
-            $('#rf_shap_table').DataTable({
-                pageLength: 10,
-                order: [[1, 'desc']],
-                language: {
-                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
+        // RF DataTables 초기화 함수 (안전한 초기화)
+        function initRFDataTables(tableId) {
+            try {
+                const $table = $(tableId);
+                if (!$table.length) return;
+                if ($.fn.DataTable.isDataTable(tableId)) return;
+                
+                // 테이블이 보이는지 확인
+                if ($table.is(':hidden') || $table.parent().is(':hidden')) return;
+                
+                // 테이블 구조 검증
+                const $thead = $table.find('thead');
+                const $tbody = $table.find('tbody');
+                if (!$thead.length || !$tbody.length) return;
+                
+                const thCount = $thead.find('th').length;
+                const $firstRow = $tbody.find('tr').first();
+                if ($firstRow.length) {
+                    const tdCount = $firstRow.find('td').length;
+                    if (thCount !== tdCount) return; // 컬럼 개수 불일치
                 }
-            });
+                
+                // DataTables 초기화
+                $table.DataTable({
+                    pageLength: 10,
+                    order: [[1, 'desc']],
+                    language: {
+                        url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
+                    }
+                });
+            } catch (e) {
+                console.warn('DataTables 초기화 실패:', tableId, e);
+            }
         }
-        if (!$.fn.DataTable.isDataTable('#rf_perm_table')) {
-            $('#rf_perm_table').DataTable({
-                pageLength: 10,
-                order: [[1, 'desc']],
-                language: {
-                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
-              }
-          });
-      }
+        
+        // 아코디언이 열릴 때 DataTables 초기화
+        $('#rfShapDetails').on('shown.bs.collapse', function() {
+            setTimeout(function() {
+                initRFDataTables('#rf_shap_table');
+            }, 50);
+        });
+        $('#rfPermDetails').on('shown.bs.collapse', function() {
+            setTimeout(function() {
+                initRFDataTables('#rf_perm_table');
+            }, 50);
+        });
       {% endif %}
 
       // --- LGBM 차트 ---
@@ -949,50 +975,79 @@
         let lgbmShapChart = createChart('lgbm_shap_chart', lgbmShapData, 'LGBM SHAP Importance');
         let lgbmPermChart = createChart('lgbm_perm_chart', lgbmPermData, 'LGBM Permutation Importance');
         
-        // LGBM DataTables 초기화
-        if (!$.fn.DataTable.isDataTable('#lgbm_default_table')) {
-            $('#lgbm_default_table').DataTable({
-                pageLength: 10,
-                order: [[1, 'desc']], // 중요도 높은 순서대로 정렬
-                language: {
-                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
-                },
-                columnDefs: [
-                    {
-                        targets: 1,
-                        render: function(data, type, row) {
-                            if (type === 'display' || type === 'type') {
-                                // 큰 수치인 경우 천 단위 구분 기호 추가
-                                const num = parseFloat(data);
-                                if (num >= 1000) {
-                                    return num.toLocaleString('ko-KR', {maximumFractionDigits: 2});
-                                }
-                                return num.toFixed(6);
-                            }
-                            return data;
-                        }
+        // LGBM DataTables 초기화 함수 (안전한 초기화)
+        function initLGBMDataTables(tableId, options) {
+            try {
+                const $table = $(tableId);
+                if (!$table.length) return;
+                if ($.fn.DataTable.isDataTable(tableId)) return;
+                
+                // 테이블이 보이는지 확인
+                if ($table.is(':hidden') || $table.parent().is(':hidden')) return;
+                
+                // 테이블 구조 검증
+                const $thead = $table.find('thead');
+                const $tbody = $table.find('tbody');
+                if (!$thead.length || !$tbody.length) return;
+                
+                const thCount = $thead.find('th').length;
+                const $firstRow = $tbody.find('tr').first();
+                if ($firstRow.length) {
+                    const tdCount = $firstRow.find('td').length;
+                    if (thCount !== tdCount) return; // 컬럼 개수 불일치
+                }
+                
+                // DataTables 초기화 옵션
+                const defaultOptions = {
+                    pageLength: 10,
+                    order: [[1, 'desc']],
+                    language: {
+                        url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
                     }
-                ]
-            });
+                };
+                
+                const finalOptions = options ? Object.assign({}, defaultOptions, options) : defaultOptions;
+                
+                // DataTables 초기화
+                $table.DataTable(finalOptions);
+            } catch (e) {
+                console.warn('DataTables 초기화 실패:', tableId, e);
+            }
         }
-        if (!$.fn.DataTable.isDataTable('#lgbm_shap_table')) {
-            $('#lgbm_shap_table').DataTable({
-                pageLength: 10,
-              order: [[1, 'desc']],
-              language: {
-                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
-                }
-          });
-        }
-        if (!$.fn.DataTable.isDataTable('#lgbm_perm_table')) {
-            $('#lgbm_perm_table').DataTable({
-                pageLength: 10,
-              order: [[1, 'desc']],
-              language: {
-                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
-                }
-          });
-        }
+        
+        // 아코디언이 열릴 때 DataTables 초기화
+        $('#lgbmDefaultDetails').on('shown.bs.collapse', function() {
+            setTimeout(function() {
+                initLGBMDataTables('#lgbm_default_table', {
+                    columnDefs: [
+                        {
+                            targets: 1,
+                            render: function(data, type, row) {
+                                if (type === 'display' || type === 'type') {
+                                    // 큰 수치인 경우 천 단위 구분 기호 추가
+                                    const num = parseFloat(data);
+                                    if (num >= 1000) {
+                                        return num.toLocaleString('ko-KR', {maximumFractionDigits: 2});
+                                    }
+                                    return num.toFixed(6);
+                                }
+                                return data;
+                            }
+                        }
+                    ]
+                });
+            }, 50);
+        });
+        $('#lgbmShapDetails').on('shown.bs.collapse', function() {
+            setTimeout(function() {
+                initLGBMDataTables('#lgbm_shap_table');
+            }, 50);
+        });
+        $('#lgbmPermDetails').on('shown.bs.collapse', function() {
+            setTimeout(function() {
+                initLGBMDataTables('#lgbm_perm_table');
+            }, 50);
+        });
       {% endif %}
 
       // --- 탭 전환 시 리사이즈 ---

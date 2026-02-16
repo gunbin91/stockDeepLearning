@@ -151,7 +151,7 @@ def fetch_daily_ohlcv_batch(tickers, start=None, end=None) -> dict:
                     end=yf_end,
                     interval='1d',
                     progress=False,
-                    auto_adjust=False,
+                    auto_adjust=True,
                     threads=False
                 )
             if batch_df is None or batch_df.empty:
@@ -208,7 +208,7 @@ def fetch_daily_ohlcv(symbol: str, start=None, end=None) -> pd.DataFrame:
                     end=yf_end,
                     interval='1d',
                     progress=False,
-                    auto_adjust=False,
+                    auto_adjust=True,
                     threads=False
                 )
             yf_df = _normalize_yfinance_columns(yf_df)
