@@ -146,10 +146,25 @@
                         </div>
                     </div>
                     
-                    <div class="text-center">
-                        <button type="button" class="btn btn-primary" id="execute_backtest_btn">
-                            <i class="fas fa-play me-1"></i>백테스팅 실행
+                    <div class="mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="use_cache_checkbox" checked>
+                            <label class="form-check-label" for="use_cache_checkbox">
+                                백테스팅 캐싱 사용 (팩터 점수 계산 결과 재사용)
+                            </label>
+                            <div class="form-text">체크 시 데이터 수집 및 팩터 계산 결과를 캐시하여 재사용합니다.</div>
+                        </div>
+                    </div>
+                    
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <button type="button" class="btn btn-outline-danger btn-sm" id="delete_cache_btn">
+                            <i class="fas fa-trash-alt me-1"></i>캐시 파일 삭제
                         </button>
+                        <div class="text-center flex-grow-1">
+                            <button type="button" class="btn btn-primary" id="execute_backtest_btn">
+                                <i class="fas fa-play me-1"></i>백테스팅 실행
+                            </button>
+                        </div>
                     </div>
                 </div>
                 

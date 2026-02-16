@@ -152,8 +152,14 @@ MODEL_FILE = str(path_manager.get_model_path())
 JSON_REPORT_FILE = str(path_manager.data_dir / 'backtest_report.json')
 TOP_N_STOCKS = 5
 
-def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, buy_universe_rank, transaction_fee_rate):
-    """상세 백테스팅 실행 - 강화된 에러 처리"""
+def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, buy_universe_rank, transaction_fee_rate, save_cache=False, cache_start_date=None, cache_end_date=None):
+    """상세 백테스팅 실행 - 강화된 에러 처리
+    
+    Args:
+        save_cache: 캐시 저장 여부
+        cache_start_date: 캐시 저장 시 시작일
+        cache_end_date: 캐시 저장 시 종료일
+    """
     try:
         log_info("백테스팅 시작", context={
             "initial_capital": initial_capital,
@@ -163,6 +169,11 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         })
         
         final_df_list = []
+        # reset_index() 전에 인덱스의 date가 컬럼에도 있으면 컬럼의 date 제거 (중복 방지)
+        if isinstance(data.index, pd.MultiIndex) and 'date' in data.index.names:
+            if 'date' in data.columns:
+                # 인덱스의 date를 사용하므로 컬럼의 date 제거
+                data = data.drop(columns=['date'])
         data_reset = data.reset_index()
         
         # 일별 최종 점수 계산 (에러 처리 강화)
@@ -253,6 +264,17 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             "final_scores_count": len(final_scores_df),
             "merged_data_rows": len(data)
         })
+        
+        # 캐시 저장 (팩터 점수 계산 완료된 데이터, final_score는 제외)
+        # final_score는 가중치에 따라 달라지므로 캐시에 저장하지 않음
+        if save_cache and cache_start_date and cache_end_date:
+            try:
+                # final_score 컬럼을 제거한 데이터로 캐시 저장
+                cache_data = data.drop(columns=['final_score'], errors='ignore')
+                save_backtest_cache(cache_data, cache_start_date, cache_end_date)
+                print(f"💾 백테스팅 캐시 파일 생성: {cache_start_date} ~ {cache_end_date} (final_score 제외)")
+            except Exception as e:
+                log_warning(f"⚠️ 백테스팅 캐시 저장 실패: {e}")
         
     except Exception as e:
         log_critical("백테스팅 초기화 중 치명적 에러", exception=e)
@@ -747,7 +769,113 @@ def create_json_report(results, output_path=None):
     return report_data
 
 
-def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate, start_date=None, end_date=None):
+def get_cache_path():
+    """백테스팅 캐시 파일 경로 반환 (단일 파일)"""
+    cache_dir = path_manager.data_dir / 'backtest_cache'
+    cache_dir.mkdir(exist_ok=True)
+    cache_file = cache_dir / 'backtest_cache.feather'
+    meta_file = cache_dir / 'backtest_cache_meta.json'
+    return cache_file, meta_file
+
+def load_backtest_cache():
+    """백테스팅 캐시 로드 (단일 파일)"""
+    try:
+        cache_file, meta_file = get_cache_path()
+        if cache_file.exists() and meta_file.exists():
+            # 메타데이터 로드
+            with open(meta_file, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+            # 데이터 로드
+            data = pd.read_feather(cache_file)
+            # final_score는 가중치에 따라 달라지므로 캐시에서 제거
+            if 'final_score' in data.columns:
+                data = data.drop(columns=['final_score'])
+                log_info("  - 캐시 파일에서 final_score 제거 (가중치에 따라 재계산 필요)")
+            # 인덱스 복원 (date, 종목코드) - 하지만 date 컬럼은 유지
+            if 'date' in data.columns and '종목코드' in data.columns:
+                # date 컬럼을 datetime으로 변환
+                data['date'] = pd.to_datetime(data['date'])
+                # 인덱스 설정하되 date 컬럼은 유지
+                data = data.set_index(['date', '종목코드'])
+                # date 컬럼을 인덱스에서 가져와서 컬럼으로 추가 (컬럼 접근을 위해)
+                data['date'] = data.index.get_level_values('date')
+            log_info(f"📦 백테스팅 캐시 파일 로드 완료", context={
+                "cache_file": str(cache_file),
+                "start_date": meta.get('start_date'),
+                "end_date": meta.get('end_date'),
+                "created_at": meta.get('created_at'),
+                "data_rows": len(data)
+            })
+            return data, meta
+        return None, None
+    except Exception as e:
+        log_warning(f"⚠️ 백테스팅 캐시 로드 실패: {e}")
+        return None, None
+
+def save_backtest_cache(data, start_date, end_date):
+    """백테스팅 캐시 저장 (팩터 점수 계산 완료된 데이터, 단일 파일)"""
+    try:
+        cache_file, meta_file = get_cache_path()
+        # 데이터 저장 (인덱스 포함)
+        data_reset = data.reset_index()
+        data_reset.to_feather(cache_file)
+        # 메타데이터 저장 (날짜 안전하게 처리)
+        start_date_str = None
+        end_date_str = None
+        if start_date:
+            try:
+                start_date_obj = pd.to_datetime(start_date)
+                if pd.notna(start_date_obj):
+                    start_date_str = start_date_obj.strftime('%Y-%m-%d')
+            except (ValueError, AttributeError):
+                pass
+        if end_date:
+            try:
+                end_date_obj = pd.to_datetime(end_date)
+                if pd.notna(end_date_obj):
+                    end_date_str = end_date_obj.strftime('%Y-%m-%d')
+            except (ValueError, AttributeError):
+                pass
+        
+        meta = {
+            'start_date': start_date_str,
+            'end_date': end_date_str,
+            'created_at': datetime.now().isoformat(),
+            'data_rows': len(data),
+            'data_columns': list(data.columns)
+        }
+        with open(meta_file, 'w', encoding='utf-8') as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        log_info(f"💾 백테스팅 캐시 파일 저장 완료", context={
+            "cache_file": str(cache_file),
+            "start_date": meta['start_date'],
+            "end_date": meta['end_date'],
+            "data_rows": len(data)
+        })
+        return True
+    except Exception as e:
+        log_error(f"백테스팅 캐시 저장 실패: {e}")
+        return False
+
+def delete_backtest_cache():
+    """백테스팅 캐시 파일 삭제 (단일 파일)"""
+    try:
+        cache_file, meta_file = get_cache_path()
+        deleted = False
+        if cache_file.exists():
+            cache_file.unlink()
+            deleted = True
+            log_info(f"🗑️ 백테스팅 캐시 파일 삭제: {cache_file}")
+        if meta_file.exists():
+            meta_file.unlink()
+            deleted = True
+            log_info(f"🗑️ 백테스팅 캐시 메타데이터 삭제: {meta_file}")
+        return deleted
+    except Exception as e:
+        log_error(f"백테스팅 캐시 삭제 실패: {e}")
+        return False
+
+def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate, start_date=None, end_date=None, use_cache=False, shutdown_logger_after=True):
     """최종 백테스팅 실행 - 강화된 에러 처리
     
     Args:
@@ -760,6 +888,8 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         transaction_fee_rate: 거래 수수료율
         start_date: 테스트 시작일 (YYYY-MM-DD 형식, None이면 기본값 사용)
         end_date: 테스트 종료일 (YYYY-MM-DD 형식, None이면 기본값 사용)
+        use_cache: 캐시 사용 여부 (True면 캐시 파일 사용/생성, False면 실시간 분석)
+        shutdown_logger_after: 백테스팅 완료 후 logger 종료 여부 (기본값: True, 최적화 시 False로 설정)
     """
     start_time = time.time()
     
@@ -781,6 +911,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         log_info(f"   └─ 손절 기준: -{stop_loss_pct}%")
         log_info(f"   └─ 거래 수수료: {transaction_fee_rate}%")
         log_info(f"   └─ 테스트 기간: {start_date} ~ {end_date}")
+        log_info(f"   └─ 캐시 사용: {'예' if use_cache else '아니오'}")
         
         log_info("1. 최종 백테스트 시작...")
         
@@ -823,24 +954,50 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         
         # 데이터 로딩 (강화된 에러 처리)
         # Warmup 기간 400일 유지
+        start_date_obj = pd.to_datetime(start_date)
+        if pd.isna(start_date_obj):
+            raise ValueError(f"시작일이 올바르지 않습니다: {start_date}")
+        backtest_start_date_with_warmup = (start_date_obj - timedelta(days=400)).strftime('%Y-%m-%d')
+        cache_used = False
+        cache_meta = None
+        
         try:
-            backtest_start_date_with_warmup = (pd.to_datetime(start_date) - timedelta(days=400)).strftime('%Y-%m-%d')
-            log_info("백테스팅 데이터 로딩 시작", context={
-                "test_start_date": start_date,
-                "test_end_date": end_date,
-                "data_start_date": backtest_start_date_with_warmup,
-                "data_end_date": end_date,
-                "warmup_days": 400
-            })
-            log_info(f"   📅 테스트 기간: {start_date} ~ {end_date}")
-            log_info(f"   📅 데이터 수집 기간: {backtest_start_date_with_warmup} ~ {end_date} (Warmup 400일 포함)")
+            # 캐시 사용 여부 확인
+            if use_cache:
+                cached_data, cache_meta = load_backtest_cache()
+                if cached_data is not None and cache_meta is not None:
+                    test_data = cached_data
+                    cache_used = True
+                    log_info("📦 백테스팅 캐시 파일 사용", context={
+                        "start_date": cache_meta.get('start_date'),
+                        "end_date": cache_meta.get('end_date'),
+                        "created_at": cache_meta.get('created_at'),
+                        "data_rows": len(test_data)
+                    })
+                    print(f"📦 백테스팅 캐시 파일 사용: {cache_meta.get('start_date')} ~ {cache_meta.get('end_date')} (생성일: {cache_meta.get('created_at')})")
+                else:
+                    log_info("백테스팅 캐시 파일이 없습니다. 데이터 수집을 시작합니다.")
+                    print("📦 백테스팅 캐시 파일이 없습니다. 데이터 수집을 시작합니다.")
             
-            # 팩터 점수 계산 (향후 다른 팩터 추가 대비)
-            test_data = data_processor.get_preprocessed_data(
-                backtest_start_date_with_warmup,
-                end_date,
-                skip_factor_scores=False
-            )
+            # 캐시를 사용하지 않거나 캐시 파일이 없는 경우 데이터 수집
+            if not cache_used:
+                log_info("백테스팅 데이터 로딩 시작", context={
+                    "test_start_date": start_date,
+                    "test_end_date": end_date,
+                    "data_start_date": backtest_start_date_with_warmup,
+                    "data_end_date": end_date,
+                    "warmup_days": 400,
+                    "use_cache": use_cache
+                })
+                log_info(f"   📅 테스트 기간: {start_date} ~ {end_date}")
+                log_info(f"   📅 데이터 수집 기간: {backtest_start_date_with_warmup} ~ {end_date} (Warmup 400일 포함)")
+                
+                # 팩터 점수 계산은 현재 계산할 팩터가 없으므로 스킵
+                test_data = data_processor.get_preprocessed_data(
+                    backtest_start_date_with_warmup,
+                    end_date,
+                    skip_factor_scores=True
+                )
             
             # 즉시 빈 데이터 검증 (초기 수집/병합 실패 조기 발견)
             if test_data is None or test_data.empty:
@@ -853,7 +1010,21 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             
             # 데이터 품질 검증 추가
             total_rows = len(test_data)
-            valid_rows = len(test_data.dropna(subset=['종목코드', 'date']))
+            # 인덱스가 MultiIndex인 경우 인덱스 레벨 확인, 아니면 컬럼 확인
+            if isinstance(test_data.index, pd.MultiIndex) and 'date' in test_data.index.names and '종목코드' in test_data.index.names:
+                # 인덱스 레벨에서 NaN이 없는 행 개수 확인
+                date_level = test_data.index.get_level_values('date')
+                ticker_level = test_data.index.get_level_values('종목코드')
+                valid_rows = len(test_data[(pd.notna(date_level)) & (pd.notna(ticker_level))])
+            else:
+                # 컬럼이 있는 경우 컬럼으로 검증
+                if '종목코드' in test_data.columns and 'date' in test_data.columns:
+                    valid_rows = len(test_data.dropna(subset=['종목코드', 'date']))
+                elif 'date' in test_data.columns:
+                    valid_rows = len(test_data.dropna(subset=['date']))
+                else:
+                    # 검증 불가능한 경우 전체 행을 유효한 것으로 간주
+                    valid_rows = total_rows
             data_quality = valid_rows / total_rows * 100 if total_rows > 0 else 0
             
             log_info(f"📊 백테스팅 데이터 품질: {valid_rows:,}/{total_rows:,}개 유효 행 ({data_quality:.1f}%)")
@@ -868,10 +1039,10 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             elif data_quality < 80:
                 log_warning(f"⚠️ 백테스팅 데이터 품질이 낮습니다: {data_quality:.1f}% (권장: 90% 이상)")
                 
-            log_info("백테스팅 데이터 로딩 완료", context={
-                "data_rows": len(test_data),
-                "data_columns": list(test_data.columns)
-            })
+                log_info("백테스팅 데이터 로딩 완료", context={
+                    "data_rows": len(test_data),
+                    "data_columns": list(test_data.columns)
+                })
             
         except Exception as e:
             log_critical("백테스팅 데이터 로딩 실패", exception=e, context={
@@ -1205,9 +1376,19 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
     
         # 데이터 전처리 (강화된 에러 처리)
         try:
-            # 테스트 기간에 맞게 데이터 필터링
-            test_data = test_data[(test_data['date'] >= pd.to_datetime(start_date)) & 
-                                  (test_data['date'] <= pd.to_datetime(end_date))]
+            # 캐시에서 로드한 경우 인덱스가 이미 설정되어 있을 수 있음
+            if isinstance(test_data.index, pd.MultiIndex) and 'date' in test_data.index.names:
+                # 인덱스가 이미 설정되어 있으면 date 컬럼이 없을 수 있으므로 인덱스에서 가져옴
+                if 'date' not in test_data.columns:
+                    test_data['date'] = test_data.index.get_level_values('date')
+                # 테스트 기간에 맞게 데이터 필터링
+                test_data = test_data[(test_data['date'] >= pd.to_datetime(start_date)) & 
+                                      (test_data['date'] <= pd.to_datetime(end_date))]
+            else:
+                # 일반 데이터 로드의 경우
+                # 테스트 기간에 맞게 데이터 필터링
+                test_data = test_data[(test_data['date'] >= pd.to_datetime(start_date)) & 
+                                      (test_data['date'] <= pd.to_datetime(end_date))]
             
             # 로그: 백테스팅용 데이터 상태 확인
             log_info(f"🔍 백테스팅용 데이터: {len(test_data):,}개 행")
@@ -1222,8 +1403,17 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             # <<< 팩터 점수 계산 루프가 필요 없어짐 >>>
             log_info("  - 팩터 점수는 데이터 로딩 시 이미 계산되었습니다.")
             
-            test_data.set_index(['date', '종목코드'], inplace=True)
-            test_data.sort_index(inplace=True)
+            # 캐시에서 로드한 경우 final_score가 없을 수 있으므로 다시 계산 필요
+            # final_score는 가중치에 따라 달라지므로 캐시에 저장하지 않음
+            if cache_used and 'final_score' not in test_data.columns:
+                log_info("  - 캐시 파일에서 로드했으므로 final_score를 다시 계산합니다.")
+                # final_score 계산을 위해 run_detailed_backtest에서 처리하도록 함
+                # 여기서는 데이터만 준비
+            
+            # 인덱스가 이미 설정되어 있지 않은 경우에만 설정
+            if not isinstance(test_data.index, pd.MultiIndex) or 'date' not in test_data.index.names:
+                test_data.set_index(['date', '종목코드'], inplace=True)
+                test_data.sort_index(inplace=True)
             
             # 로그: 인덱스 설정 후 상태 확인
             log_info(f"🔍 인덱스 설정 후: {len(test_data):,}개 행")
@@ -1259,7 +1449,10 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                 take_profit_pct=take_profit_pct,
                 stop_loss_pct=stop_loss_pct,
                 buy_universe_rank=buy_universe_rank,
-                transaction_fee_rate=transaction_fee_rate
+                transaction_fee_rate=transaction_fee_rate,
+                save_cache=use_cache and not cache_used,
+                cache_start_date=backtest_start_date_with_warmup,
+                cache_end_date=end_date
             )
             
             # 결과에 메타데이터 추가
@@ -1271,6 +1464,21 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             backtest_results['top_n'] = top_n
             backtest_results['buy_universe_rank'] = buy_universe_rank
             backtest_results['securities_transaction_tax_rate'] = SECURITIES_TRANSACTION_TAX_RATE
+            # 캐시 정보 추가
+            if cache_used and cache_meta:
+                backtest_results['cache_info'] = {
+                    'used': True,
+                    'start_date': cache_meta.get('start_date'),
+                    'end_date': cache_meta.get('end_date'),
+                    'created_at': cache_meta.get('created_at')
+                }
+            else:
+                backtest_results['cache_info'] = {
+                    'used': False,
+                    'start_date': None,
+                    'end_date': None,
+                    'created_at': None
+                }
             
             log_info("백테스팅 시뮬레이션 완료", context={
                 "final_asset": backtest_results.get('final_asset', 0),
@@ -1302,19 +1510,24 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         
         log_info(f"\n✅ 백테스팅 완료. JSON 리포트 파일이 생성되었습니다.")
         
-        # 로거 종료
-        try:
-            shutdown_logger()
-        except Exception:
-            pass
+        # 로거 종료 (선택적)
+        if shutdown_logger_after:
+            try:
+                shutdown_logger()
+            except Exception:
+                pass
+        
+        # 백테스팅 결과 반환
+        return backtest_results
             
     except Exception as e:
         log_critical("최종 백테스팅 실행 중 치명적 에러", exception=e)
-        # 로거 종료
-        try:
-            shutdown_logger()
-        except Exception:
-            pass
+        # 로거 종료 (선택적)
+        if shutdown_logger_after:
+            try:
+                shutdown_logger()
+            except Exception:
+                pass
         raise
 
 if __name__ == '__main__':
@@ -1328,6 +1541,7 @@ if __name__ == '__main__':
     parser.add_argument('--fee', type=float, default=0.015, help='Transaction fee rate (e.g., 0.015 for 0.015%)')
     parser.add_argument('--start-date', type=str, default=None, help='Test start date (YYYY-MM-DD format, default: 1 year ago)')
     parser.add_argument('--end-date', type=str, default=None, help='Test end date (YYYY-MM-DD format, default: today)')
+    parser.add_argument('--use-cache', action='store_true', help='Use cache for backtesting (load/save cache file)')
     args = parser.parse_args()
 
     if args.capital <= 0:
@@ -1342,6 +1556,7 @@ if __name__ == '__main__':
             buy_universe_rank=args.buy_universe,
             transaction_fee_rate=args.fee,
             start_date=args.start_date,
-            end_date=args.end_date
+            end_date=args.end_date,
+            use_cache=args.use_cache
         )
 

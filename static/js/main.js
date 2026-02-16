@@ -609,6 +609,11 @@ $(document).ready(function() {
             stopBacktest();
         });
         
+        // 캐시 파일 삭제 버튼
+        $('#delete_cache_btn').on('click', function() {
+            deleteBacktestCache();
+        });
+        
         // 모달이 열릴 때 서버 상태 확인 및 날짜 기본값 설정
         $('#backtest_modal').on('show.bs.modal', function() {
             // 날짜 필드 기본값 설정 (시작일: 1년 전, 종료일: 오늘)
@@ -720,7 +725,8 @@ $(document).ready(function() {
             buy_universe: parseInt($('#modal_buy_universe').val()),
             transaction_fee: parseFloat($('#modal_transaction_fee').val()),
             start_date: startDate,
-            end_date: endDate
+            end_date: endDate,
+            use_cache: $('#use_cache_checkbox').is(':checked')
         };
         
         // 서버 상태 확인 후 진행
@@ -839,6 +845,26 @@ $(document).ready(function() {
         
         // 모달 상태를 준비 상태로 변경
         showBacktestReadyState();
+    }
+    
+    function deleteBacktestCache() {
+        if (!confirm('백테스팅 캐시 파일을 삭제하시겠습니까?')) {
+            return;
+        }
+        
+        $.ajax({
+            url: '/api/delete_backtest_cache',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({}),
+            success: function(response) {
+                showToast('캐시 파일이 삭제되었습니다.', 'success');
+            },
+            error: function(xhr) {
+                const error = JSON.parse(xhr.responseText);
+                showToast('캐시 파일 삭제 중 오류: ' + error.error, 'danger');
+            }
+        });
     }
     
     function handleBacktestComplete(data) {
