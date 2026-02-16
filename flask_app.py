@@ -1856,6 +1856,198 @@ def save_weights():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 400
 
+@app.route('/api/optimize_weights', methods=['POST'])
+def optimize_weights():
+    """가중치 최적화 API - 여러 가중치 조합을 테스트하여 최적 조합 찾기"""
+    try:
+        # 백테스팅이 이미 실행 중이면 거부
+        if get_backtest_running():
+            return jsonify({'error': '이미 백테스팅이 실행 중입니다. 완료될 때까지 기다려주세요.'}), 400
+        
+        # 백테스팅 파라미터 수집 (request context가 있는 동안)
+        data = request.get_json() or {}
+        
+        # 날짜 기본값 설정 (None이면 기본값 사용)
+        from datetime import datetime, timedelta
+        default_end_date = datetime.now().strftime('%Y-%m-%d')
+        default_start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+        
+        backtest_params = {
+            'capital': data.get('capital', 10000000),
+            'max_hold': data.get('max_hold', 7),
+            'take_profit': data.get('take_profit', 8.0),
+            'stop_loss': data.get('stop_loss', 8.0),
+            'top_n': data.get('top_n', 5),
+            'buy_universe': data.get('buy_universe', 20),
+            'transaction_fee': data.get('transaction_fee', 0.015),
+            'start_date': data.get('start_date') or default_start_date,
+            'end_date': data.get('end_date') or default_end_date,
+            'use_cache': True  # 캐시 사용 강제
+        }
+        
+        # 날짜 유효성 검증
+        if not backtest_params['start_date'] or not backtest_params['end_date']:
+            return jsonify({'error': '시작일과 종료일이 필요합니다.'}), 400
+        
+        # 최적화를 비동기로 실행
+        def run_optimization():
+            try:
+                optimize_weights_sync(backtest_params)
+            except Exception as e:
+                log_error(f"가중치 최적화 실패: {e}")
+                socketio.emit('optimize_complete', {'success': False, 'error': str(e)})
+        
+        # 백그라운드에서 실행
+        socketio.start_background_task(run_optimization)
+        
+        return jsonify({'message': '가중치 최적화가 시작되었습니다.'})
+        
+    except Exception as e:
+        log_error(f"가중치 최적화 시작 실패: {e}")
+        return jsonify({'error': str(e)}), 500
+
+def optimize_weights_sync(backtest_params):
+    """가중치 최적화 동기 실행 함수"""
+    try:
+        # backtest_params는 이미 파라미터로 받았으므로 그대로 사용
+        
+        # 가중치 조합 생성 (ML + LGBM = 1.0, 0.1 단위)
+        combinations = []
+        for ml in range(11):  # 0.0, 0.1, ..., 1.0
+            ml_weight = round(ml * 0.1, 1)
+            lgbm_weight = round(1.0 - ml_weight, 1)
+            
+            # 합이 1.0이고 모든 가중치가 0 이상인 조합만
+            if abs(ml_weight + lgbm_weight - 1.0) < 0.01 and ml_weight >= 0 and lgbm_weight >= 0:
+                combinations.append({
+                    'ml_pred_proba': ml_weight,
+                    'lgbm_pred_proba': lgbm_weight
+                })
+        
+        log_info(f"가중치 최적화 시작: {len(combinations)}개 조합 테스트")
+        
+        # 기존 가중치 백업
+        weights_path = _get_weights_file_path()
+        backup_weights = None
+        if os.path.exists(weights_path):
+            backup_weights = _load_weights_file()
+        
+        results = []
+        total_combinations = len(combinations)
+        
+        # 진행률 전송을 위한 함수
+        def emit_progress(current, total, current_weights):
+            progress_pct = int((current / total) * 100)
+            socketio.emit('optimize_progress', {
+                'current': current,
+                'total': total,
+                'progress': progress_pct,
+                'current_weights': current_weights
+            })
+        
+        # 각 조합 테스트
+        first_error = None
+        for idx, weights in enumerate(combinations, 1):
+            try:
+                # 진행률 전송 (각 조합 시작 시)
+                emit_progress(idx - 1, total_combinations, weights)
+                
+                # 가중치 파일 저장
+                _atomic_write_json(weights_path, weights)
+                
+                log_info(f"  [{idx}/{total_combinations}] 가중치 {weights} 테스트 시작...")
+                
+                # 백테스팅 실행 (직접 함수 호출)
+                import scripts.backtest as backtest_module
+                backtest_result = backtest_module.run_final_backtest(
+                    initial_capital=backtest_params['capital'],
+                    max_hold_period=backtest_params['max_hold'],
+                    take_profit_pct=backtest_params['take_profit'],
+                    stop_loss_pct=backtest_params['stop_loss'],
+                    top_n=backtest_params['top_n'],
+                    buy_universe_rank=backtest_params['buy_universe'],
+                    transaction_fee_rate=backtest_params['transaction_fee'],
+                    start_date=backtest_params.get('start_date'),
+                    end_date=backtest_params.get('end_date'),
+                    use_cache=True,
+                    shutdown_logger_after=False  # 최적화 중에는 logger 종료하지 않음
+                )
+                
+                # 결과 수집
+                if backtest_result and isinstance(backtest_result, dict) and 'total_return' in backtest_result:
+                    results.append({
+                        'weights': weights,
+                        'total_return': float(backtest_result.get('total_return', 0)),
+                        'win_rate': float(backtest_result.get('win_rate', 0)),
+                        'annual_return': float(backtest_result.get('annual_return', 0)),
+                        'sharpe_ratio': float(backtest_result.get('sharpe_ratio', 0)),
+                        'mdd': float(backtest_result.get('mdd', 0)),
+                        'final_asset': float(backtest_result.get('final_asset', 0))
+                    })
+                    log_info(f"  [{idx}/{total_combinations}] 가중치 {weights} - 총수익률: {backtest_result.get('total_return', 0)*100:.2f}%")
+                else:
+                    error_msg = f"백테스팅 결과가 올바르지 않음: {type(backtest_result)}"
+                    if backtest_result:
+                        error_msg += f", keys: {list(backtest_result.keys()) if isinstance(backtest_result, dict) else 'N/A'}"
+                    log_warning(f"  [{idx}/{total_combinations}] 가중치 {weights} - {error_msg}")
+                    if first_error is None:
+                        first_error = error_msg
+                    
+            except Exception as e:
+                import traceback
+                error_detail = traceback.format_exc()
+                log_error(f"  [{idx}/{total_combinations}] 가중치 {weights} 테스트 실패: {e}")
+                log_error(f"  상세 에러:\n{error_detail}")
+                if first_error is None:
+                    first_error = f"{str(e)}\n{error_detail[:500]}"  # 처음 500자만
+                continue
+        
+        # 최종 진행률 전송 (100%)
+        emit_progress(total_combinations, total_combinations, None)
+        
+        # 백업된 가중치 복원
+        if backup_weights:
+            _atomic_write_json(weights_path, backup_weights)
+        
+        # 모든 테스트 완료 후 logger 종료
+        try:
+            from logger import shutdown_logger
+            shutdown_logger()
+        except Exception:
+            pass
+        
+        # 총수익률 기준 정렬
+        results.sort(key=lambda x: x['total_return'], reverse=True)
+        
+        # Top 20 반환
+        top_results = results[:20]
+        
+        log_info(f"가중치 최적화 완료: {len(results)}개 성공, Top 20 반환")
+        
+        response_data = {
+            'success': True,
+            'total_tested': total_combinations,
+            'successful': len(results),
+            'results': top_results
+        }
+        
+        # 에러가 있었으면 첫 번째 에러 메시지 포함
+        if first_error and len(results) == 0:
+            response_data['error_message'] = f"모든 테스트 실패. 첫 번째 에러: {first_error[:500]}"
+            log_error(f"가중치 최적화 실패: 모든 조합 테스트 실패. 첫 번째 에러: {first_error[:500]}")
+        
+        # WebSocket으로 결과 전송
+        socketio.emit('optimize_complete', response_data)
+        
+    except Exception as e:
+        log_error(f"가중치 최적화 동기 실행 실패: {e}")
+        import traceback
+        error_detail = traceback.format_exc()
+        socketio.emit('optimize_complete', {
+            'success': False,
+            'error': f"{str(e)}\n{error_detail[:500]}"
+        })
+
 @app.route('/api/feature_correlation/calculate', methods=['POST'])
 def calculate_feature_correlation():
     """피처 상관관계 계산 API"""

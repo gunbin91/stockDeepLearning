@@ -174,15 +174,41 @@ class StockAnalysisLogger:
                 
             except queue.Empty:
                 continue
+            except (ValueError, OSError) as e:
+                # 버퍼가 닫혔거나 분리된 경우 무시 (프로세스 종료 시 발생할 수 있음)
+                if "underlying buffer has been detached" in str(e) or "closed" in str(e).lower():
+                    # 프로세스가 종료되었으므로 워커도 종료
+                    break
+                time.sleep(0.1)
             except Exception as e:
-                # 백그라운드 로깅 실패 시 기본 출력
-                print(f"[LOGGER ERROR] {e}")
+                # 백그라운드 로깅 실패 시 기본 출력 (버퍼가 열려있는 경우에만)
+                try:
+                    print(f"[LOGGER ERROR] {e}")
+                except (ValueError, OSError):
+                    pass  # 출력 실패 시 무시
                 time.sleep(0.1)
     
     def _write_log_safely(self, level: str, message: str, exception: Optional[Exception] = None, context: Optional[Dict[str, Any]] = None):
         """안전한 로그 쓰기 (스레드 안전)"""
         try:
             with self._lock:
+                # stdout/stderr 버퍼가 닫혔는지 확인
+                import sys
+                try:
+                    # 버퍼 상태 확인 (detached 상태 체크)
+                    if hasattr(sys.stdout, 'closed') and sys.stdout.closed:
+                        return  # 버퍼가 닫혔으면 로깅 건너뛰기
+                    if hasattr(sys.stderr, 'closed') and sys.stderr.closed:
+                        return  # 버퍼가 닫혔으면 로깅 건너뛰기
+                    # isatty() 호출로 버퍼가 유효한지 확인 (detached 버퍼는 에러 발생)
+                    if hasattr(sys.stdout, 'isatty'):
+                        sys.stdout.isatty()
+                    if hasattr(sys.stderr, 'isatty'):
+                        sys.stderr.isatty()
+                except (ValueError, OSError, AttributeError):
+                    # 버퍼가 detached되었거나 접근 불가능한 경우
+                    return  # 조용히 무시
+                
                 formatted_message = self._format_message(message, level, context)
                 
                 if exception:
@@ -193,25 +219,44 @@ class StockAnalysisLogger:
                     full_message = formatted_message
                 
                 # 로그 레벨에 따라 적절한 메서드 호출
-                if level == "INFO":
-                    self.logger.info(full_message)
-                elif level == "WARNING":
-                    self.logger.warning(full_message)
-                elif level == "ERROR":
-                    self.logger.error(full_message)
-                elif level == "DEBUG":
-                    self.logger.debug(full_message)
-                elif level == "CRITICAL":
-                    self.logger.critical(full_message)
-                else:
-                    self.logger.info(full_message)
+                try:
+                    if level == "INFO":
+                        self.logger.info(full_message)
+                    elif level == "WARNING":
+                        self.logger.warning(full_message)
+                    elif level == "ERROR":
+                        self.logger.error(full_message)
+                    elif level == "DEBUG":
+                        self.logger.debug(full_message)
+                    elif level == "CRITICAL":
+                        self.logger.critical(full_message)
+                    else:
+                        self.logger.info(full_message)
+                except (ValueError, OSError) as log_error:
+                    # logging 핸들러가 detached 버퍼에 쓰려고 할 때 발생하는 에러
+                    if "underlying buffer has been detached" in str(log_error) or "closed" in str(log_error).lower():
+                        return  # 조용히 무시
+                    # 다른 에러도 무시 (최적화 중에는 로깅 에러가 발생해도 계속 진행)
+                    return
+                except Exception as log_error:
+                    # 모든 로깅 에러 무시 (최적화 중 안정성을 위해)
+                    return
                     
+        except (ValueError, OSError) as e:
+            # 버퍼가 닫혔거나 분리된 경우 무시 (프로세스 종료 시 발생할 수 있음)
+            if "underlying buffer has been detached" in str(e) or "closed" in str(e).lower():
+                return  # 조용히 무시
+            raise  # 다른 예외는 다시 발생
         except Exception as e:
-            # 로깅 실패 시 기본 출력으로 폴백
-            print(f"[{level}] {message}")
-            if exception:
-                print(f"Exception: {exception}")
-                print(f"Stack Trace: {traceback.format_exc()}")
+            # 로깅 실패 시 기본 출력으로 폴백 (하지만 이것도 실패할 수 있으므로 try-except 필요)
+            try:
+                print(f"[{level}] {message}")
+                if exception:
+                    print(f"Exception: {exception}")
+                    print(f"Stack Trace: {traceback.format_exc()}")
+            except (ValueError, OSError):
+                # 출력도 실패하면 조용히 무시
+                pass
     
     def _queue_log(self, level: str, message: str, exception: Optional[Exception] = None, context: Optional[Dict[str, Any]] = None):
         """로그를 큐에 추가 (비동기)"""
