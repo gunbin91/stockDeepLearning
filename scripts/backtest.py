@@ -152,6 +152,211 @@ MODEL_FILE = str(path_manager.get_model_path())
 JSON_REPORT_FILE = str(path_manager.data_dir / 'backtest_report.json')
 TOP_N_STOCKS = 5
 
+def _load_ml_models(force_all=False, weights=None):
+    """모델들을 한 번만 로드하여 반환 (성능 최적화) - NASDAQ 프로젝트: RF(ML)와 LGBM만"""
+    loaded_models = {
+        'ml': None,
+        'lgbm': None
+    }
+    
+    # 가중치 확인
+    rf_weight = 0.0
+    lgbm_weight = 0.0
+    
+    if isinstance(weights, dict):
+        rf_weight = float(weights.get('ml_pred_proba', 0.0))
+        lgbm_weight = float(weights.get('lgbm_pred_proba', weights.get('lgb_pred_proba', 0.0)))
+    
+    # ML 모델 로드 (필요한 경우)
+    if force_all or rf_weight > 0:
+        try:
+            from path_manager import path_manager
+            import ml_model
+            ml_model.apply_pandas_compatibility_patch()
+            ml_model.apply_sklearn_compatibility_patch()
+            
+            CUML_MODEL_PATH = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
+            LEGACY_MODEL_PATH = str(path_manager.get_model_path())
+            
+            model_path = None
+            is_cuml_model = False
+            
+            if os.path.exists(CUML_MODEL_PATH):
+                model_path = CUML_MODEL_PATH
+                is_cuml_model = True
+            elif os.path.exists(LEGACY_MODEL_PATH):
+                model_path = LEGACY_MODEL_PATH
+                is_cuml_model = False
+            else:
+                log_warning("ML 모델 파일을 찾을 수 없습니다.")
+                model_path = None
+            
+            if model_path:
+                model_data = joblib.load(model_path)
+                
+                if is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'mini_batch_ensemble':
+                    from ml_model_wrapper import EnsembleModelWrapper
+                    models = model_data['models']
+                    scaler = model_data['scaler']
+                    features = model_data['features']
+                    imputation_values = model_data.get('imputation_values')
+                    model = EnsembleModelWrapper(models, scaler)
+                elif is_cuml_model and 'model_type' in model_data and model_data['model_type'] == 'single_model':
+                    model = model_data['model']
+                    features = model_data['features']
+                    scaler = model_data['scaler']
+                    imputation_values = model_data.get('imputation_values')
+                else:
+                    model = model_data['model']
+                    features = model_data['features']
+                    scaler = model_data['scaler']
+                    imputation_values = model_data.get('imputation_values')
+                    if 'cuml' in str(type(model)).lower():
+                        is_cuml_model = True
+                
+                loaded_models['ml'] = {
+                    'model': model,
+                    'features': features,
+                    'scaler': scaler,
+                    'imputation_values': imputation_values,
+                    'is_cuml_model': is_cuml_model
+                }
+                log_info("✅ ML 모델 로드 완료")
+        except Exception as e:
+            log_warning(f"⚠️ ML 모델 로드 실패: {e}")
+    
+    # LGBM 모델 로드 (필요한 경우)
+    if force_all or lgbm_weight > 0:
+        try:
+            from path_manager import path_manager
+            import lightgbm as lgb
+            
+            model_dir = path_manager.data_dir
+            lgbm_model_path = model_dir / 'lgbm_model.txt'
+            lgbm_meta_path = model_dir / 'lgbm_model_metadata.joblib'
+            
+            if lgbm_model_path.exists() and lgbm_meta_path.exists():
+                metadata = joblib.load(lgbm_meta_path)
+                features = metadata['features']
+                scaler = metadata.get('scaler')
+                model = lgb.Booster(model_file=str(lgbm_model_path))
+                
+                loaded_models['lgbm'] = {
+                    'model': model,
+                    'features': features,
+                    'scaler': scaler
+                }
+                log_info("✅ LGBM 모델 로드 완료")
+        except Exception as e:
+            log_warning(f"⚠️ LGBM 모델 로드 실패: {e}")
+    
+    return loaded_models
+
+def _predict_with_loaded_ml_model(df, model_info):
+    """로드된 ML 모델을 사용하여 예측"""
+    if model_info is None:
+        return pd.DataFrame(columns=['종목코드', 'ml_pred_proba'])
+    
+    model = model_info['model']
+    features = model_info['features']
+    scaler = model_info['scaler']
+    imputation_values = model_info.get('imputation_values')
+    is_cuml_model = model_info.get('is_cuml_model', False)
+    
+    result_df = df[['종목코드']].copy()
+    
+    available_features = [f for f in features if f in df.columns]
+    if not available_features:
+        result_df['ml_pred_proba'] = np.nan
+        return result_df
+    
+    X_pred = df[available_features].copy()
+    
+    if imputation_values:
+        available_imputation = {k: v for k, v in imputation_values.items() if k in available_features}
+        X_pred.fillna(available_imputation, inplace=True)
+    else:
+        X_pred.fillna(0, inplace=True)
+    
+    # 스케일링
+    use_scaler = scaler is not None
+    if use_scaler:
+        try:
+            if is_cuml_model:
+                import cudf
+                X_pred_ordered = X_pred[available_features]
+                X_pred_cudf = cudf.from_pandas(X_pred_ordered)
+                X_pred_scaled = scaler.transform(X_pred_cudf)
+            else:
+                X_pred_scaled = scaler.transform(X_pred)
+        except Exception:
+            X_pred_scaled = X_pred.values if not is_cuml_model else cudf.from_pandas(X_pred[available_features])
+    else:
+        if is_cuml_model:
+            import cudf
+            X_pred_scaled = cudf.from_pandas(X_pred[available_features])
+        else:
+            X_pred_scaled = X_pred.values
+    
+    # 예측
+    try:
+        pred_proba = model.predict_proba(X_pred_scaled)
+        
+        if isinstance(pred_proba, np.ndarray):
+            y_pred_proba = pred_proba[:, 1] if pred_proba.ndim == 2 else pred_proba
+        elif hasattr(pred_proba, 'iloc'):
+            if hasattr(pred_proba.iloc[:, 1], 'to_pandas'):
+                y_pred_proba = pred_proba.iloc[:, 1].to_pandas().values
+            else:
+                y_pred_proba = pred_proba.iloc[:, 1].values
+        else:
+            y_pred_proba = pred_proba[:, 1] if hasattr(pred_proba, '__getitem__') else pred_proba
+        
+        result_df['ml_pred_proba'] = y_pred_proba
+    except Exception as e:
+        log_warning(f"⚠️ ML 예측 실패: {e}")
+        result_df['ml_pred_proba'] = np.nan
+    
+    return result_df
+
+def _predict_with_loaded_lgbm_model(df, model_info):
+    """로드된 LGBM 모델을 사용하여 예측"""
+    if model_info is None:
+        return pd.DataFrame(columns=['종목코드', 'lgbm_pred_proba'])
+    
+    model = model_info['model']
+    features = model_info['features']
+    scaler = model_info.get('scaler')
+    
+    result_df = df[['종목코드']].copy()
+    
+    available_features = [f for f in features if f in df.columns]
+    if not available_features:
+        result_df['lgbm_pred_proba'] = np.nan
+        return result_df
+    
+    X_pred = df[available_features].copy()
+    numeric_cols = X_pred.select_dtypes(include=[np.number]).columns
+    X_pred[numeric_cols] = X_pred[numeric_cols].replace([np.inf, -np.inf], np.nan)
+    
+    if scaler:
+        try:
+            X_pred = X_pred.fillna(0)
+            X_pred_scaled = scaler.transform(X_pred)
+        except Exception:
+            X_pred_scaled = X_pred
+    else:
+        X_pred_scaled = X_pred
+    
+    try:
+        y_pred = model.predict(X_pred_scaled)
+        result_df['lgbm_pred_proba'] = y_pred
+    except Exception as e:
+        log_warning(f"⚠️ LGBM 예측 실패: {e}")
+        result_df['lgbm_pred_proba'] = np.nan
+    
+    return result_df
+
 def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, buy_universe_rank, transaction_fee_rate, save_cache=False, cache_start_date=None, cache_end_date=None):
     """상세 백테스팅 실행 - 강화된 에러 처리
     
@@ -167,6 +372,14 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             "max_hold_period": max_hold_period,
             "data_rows": len(data)
         })
+        
+        # 캐시 저장 시에는 가중치와 상관없이 모든 모델의 상승확률을 계산
+        force_all_predictions = save_cache
+        
+        # 모델들을 한 번만 로드 (성능 최적화)
+        log_info("📦 모델 로딩 중...")
+        loaded_models = _load_ml_models(force_all=force_all_predictions, weights=weights)
+        log_info("✅ 모델 로딩 완료")
         
         final_df_list = []
         # reset_index() 전에 인덱스의 date가 컬럼에도 있으면 컬럼의 date 제거 (중복 방지)
@@ -185,7 +398,40 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             try:
                 daily_data_copy = daily_data.copy()
 
+                # 가중치 기반 스킵: RF(ML) 가중치가 0이면 예측을 수행하지 않음 (호환성: 컬럼은 NaN으로 유지)
+                # 단, 캐시 저장 시에는 강제로 모든 예측 수행
+                rf_weight = 0.0
+                try:
+                    if isinstance(weights, dict):
+                        if 'ml_pred_proba' in weights:
+                            rf_weight = float(weights.get('ml_pred_proba', 0.0))
+                except Exception:
+                    rf_weight = 0.0
+
+                # RF(ML) 예측 추가 (ml_pred_proba 컬럼이 없는 경우)
+                if 'ml_pred_proba' not in daily_data_copy.columns:
+                    if force_all_predictions or rf_weight > 0:
+                        try:
+                            ml_predicted_df = _predict_with_loaded_ml_model(daily_data_copy, loaded_models['ml'])
+                            if not ml_predicted_df.empty and 'ml_pred_proba' in ml_predicted_df.columns:
+                                # ML 예측 결과 병합
+                                daily_data_copy = pd.merge(
+                                    daily_data_copy,
+                                    ml_predicted_df[['종목코드', 'ml_pred_proba']],
+                                    on='종목코드',
+                                    how='left'
+                                )
+                        except Exception as e:
+                            # ML 예측 실패 시 경고만 출력하고 계속 진행
+                            log_warning(f"   ⚠️ [RF/ML] 예측 실패 (날짜: {date}): {e}")
+                            daily_data_copy['ml_pred_proba'] = np.nan
+                    else:
+                        # 스킵 시에도 컬럼은 유지
+                        if 'ml_pred_proba' not in daily_data_copy.columns:
+                            daily_data_copy['ml_pred_proba'] = np.nan
+
                 # 가중치 기반 스킵: LGBM 가중치가 0이면 예측을 수행하지 않음 (호환성: 컬럼은 NaN으로 유지)
+                # 단, 캐시 저장 시에는 강제로 모든 예측 수행
                 lgbm_weight = 0.0
                 try:
                     if isinstance(weights, dict):
@@ -198,9 +444,9 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
 
                 # LGBM 예측 추가 (lgbm_pred_proba 컬럼이 없는 경우)
                 if 'lgbm_pred_proba' not in daily_data_copy.columns:
-                    if lgbm_weight > 0:
+                    if force_all_predictions or lgbm_weight > 0:
                         try:
-                            lgbm_predicted_df = ml_model.predict_with_lgbm_model(daily_data_copy)
+                            lgbm_predicted_df = _predict_with_loaded_lgbm_model(daily_data_copy, loaded_models['lgbm'])
                             if not lgbm_predicted_df.empty and 'lgbm_pred_proba' in lgbm_predicted_df.columns:
                                 # LGBM 예측 결과 병합
                                 daily_data_copy = pd.merge(
@@ -215,7 +461,8 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                             daily_data_copy['lgbm_pred_proba'] = np.nan
                     else:
                         # 스킵 시에도 컬럼은 유지
-                        daily_data_copy['lgbm_pred_proba'] = np.nan
+                        if 'lgbm_pred_proba' not in daily_data_copy.columns:
+                            daily_data_copy['lgbm_pred_proba'] = np.nan
                 
                 temp_df = ensemble.calculate_final_score(daily_data_copy)
                 temp_df['date'] = date
@@ -1409,6 +1656,16 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                 log_info("  - 캐시 파일에서 로드했으므로 final_score를 다시 계산합니다.")
                 # final_score 계산을 위해 run_detailed_backtest에서 처리하도록 함
                 # 여기서는 데이터만 준비
+            
+            # 캐시 사용 시 ml_pred_proba, lgbm_pred_proba가 없거나 모두 NaN이면 재계산 필요
+            # run_detailed_backtest에서 force_all_predictions로 처리하되, 여기서도 확인
+            if cache_used:
+                need_recalc_ml = 'ml_pred_proba' not in test_data.columns or (test_data['ml_pred_proba'].isna().all() if 'ml_pred_proba' in test_data.columns else True)
+                need_recalc_lgbm = 'lgbm_pred_proba' not in test_data.columns or (test_data['lgbm_pred_proba'].isna().all() if 'lgbm_pred_proba' in test_data.columns else True)
+                
+                if need_recalc_ml or need_recalc_lgbm:
+                    log_info("  - 캐시 파일에 ml_pred_proba 또는 lgbm_pred_proba가 없거나 모두 NaN입니다. run_detailed_backtest에서 재계산합니다.")
+                    # run_detailed_backtest에서 force_all_predictions로 처리되도록 함
             
             # 인덱스가 이미 설정되어 있지 않은 경우에만 설정
             if not isinstance(test_data.index, pd.MultiIndex) or 'date' not in test_data.index.names:
