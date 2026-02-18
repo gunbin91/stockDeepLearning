@@ -226,7 +226,8 @@ $(document).ready(function() {
                     { targets: [7], width: '90px', className: 'text-end' },         // 최종점수
                     { targets: [8], width: '110px', className: 'text-end' },        // RF상승확률
                     { targets: [9], width: '120px', className: 'text-end' },        // LGBM상승확률
-                    { targets: [10], width: '110px', className: 'text-end' }        // 시가총액
+                    { targets: [10], width: '110px', className: 'text-end' },       // CB상승확률
+                    { targets: [11], width: '110px', className: 'text-end' }        // 시가총액
                 ],
                 responsive: false,
                 drawCallback: function() {
@@ -914,18 +915,28 @@ $(document).ready(function() {
                 const current = data.current || 0;
                 const total = data.total || 0;
                 const weights = data.current_weights || {};
+                const status = data.status || '';
                 
                 $('#optimize_progress_bar').css('width', progress + '%').text(progress + '%');
-                $('#optimize_status_text').text(
-                    `가중치 조합 테스트 중... (${current}/${total})`
-                );
+                
+                // 상태 메시지가 있으면 우선 표시, 없으면 기본 메시지
+                if (status) {
+                    $('#optimize_status_text').text(status);
+                } else {
+                    $('#optimize_status_text').text(
+                        `가중치 조합 테스트 중... (${current}/${total})`
+                    );
+                }
                 
                 if (weights && Object.keys(weights).length > 0) {
                     const mlWeight = (weights.ml_pred_proba || 0).toFixed(1);
                     const lgbmWeight = (weights.lgbm_pred_proba || 0).toFixed(1);
+                    const catboostWeight = (weights.catboost_pred_proba || 0).toFixed(1);
                     $('#current_weights_display').text(
-                        `ML: ${mlWeight}, LGBM: ${lgbmWeight}`
+                        `ML: ${mlWeight}, LGBM: ${lgbmWeight}, CB: ${catboostWeight}`
                     );
+                } else {
+                    $('#current_weights_display').text('-');
                 }
             });
             
@@ -1011,12 +1022,13 @@ $(document).ready(function() {
         tbody.empty();
         
         if (results.length === 0) {
-            tbody.append('<tr><td colspan="9" class="text-center">결과가 없습니다.</td></tr>');
+            tbody.append('<tr><td colspan="10" class="text-center">결과가 없습니다.</td></tr>');
         } else {
             results.forEach(function(result, index) {
                 const weights = result.weights || {};
                 const mlWeight = (weights.ml_pred_proba || 0).toFixed(1);
                 const lgbmWeight = (weights.lgbm_pred_proba || 0).toFixed(1);
+                const catboostWeight = (weights.catboost_pred_proba || 0).toFixed(1);
                 const totalReturn = ((result.total_return || 0) * 100).toFixed(2);
                 const winRate = ((result.win_rate || 0) * 100).toFixed(2);
                 const annualReturn = ((result.annual_return || 0) * 100).toFixed(2);
@@ -1027,6 +1039,7 @@ $(document).ready(function() {
                 row.append($('<td>').text(index + 1));
                 row.append($('<td>').text(mlWeight));
                 row.append($('<td>').text(lgbmWeight));
+                row.append($('<td>').text(catboostWeight));
                 row.append($('<td>').html('<strong class="text-primary">' + totalReturn + '%</strong>'));
                 row.append($('<td>').text(winRate + '%'));
                 row.append($('<td>').text(annualReturn + '%'));
@@ -1052,10 +1065,12 @@ $(document).ready(function() {
     function applyOptimizedWeights(weights, totalReturn) {
         const mlWeight = (weights.ml_pred_proba || 0).toFixed(1);
         const lgbmWeight = (weights.lgbm_pred_proba || 0).toFixed(1);
+        const catboostWeight = (weights.catboost_pred_proba || 0).toFixed(1);
         
         const confirmMsg = `다음 가중치로 변경하시겠습니까?\n\n` +
             `ML: ${mlWeight}\n` +
-            `LGBM: ${lgbmWeight}\n\n` +
+            `LGBM: ${lgbmWeight}\n` +
+            `CB: ${catboostWeight}\n\n` +
             `예상 총수익률: ${totalReturn}%`;
         
         if (!confirm(confirmMsg)) {
@@ -1279,6 +1294,7 @@ $(document).ready(function() {
                                                 <th>최종점수</th>
                                                 <th>RF상승확률</th>
                                                 <th>LGBM상승확률</th>
+                                                <th>CB상승확률</th>
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -1318,7 +1334,8 @@ $(document).ready(function() {
                         <td class="text-end">${trade.total_asset !== null && trade.total_asset !== undefined ? formatCurrency(trade.total_asset) : 'N/A'}</td>
                         <td class="text-end">${trade.final_score !== null && trade.final_score !== undefined ? trade.final_score.toFixed(2) : 'N/A'}</td>
                         <td class="text-end">${trade.ml_pred_proba !== null && trade.ml_pred_proba !== undefined ? (trade.ml_pred_proba * 100).toFixed(2) + '%' : 'N/A'}</td>
-                        <td class="text-end">${trade.lgbm_pred_proba !== null && trade.lgbm_pred_proba !== undefined ? (trade.lgbm_pred_proba * 100).toFixed(2) + '%' : '-'}</td>
+                        <td class="text-end">${trade.lgbm_pred_proba !== null && trade.lgbm_pred_proba !== undefined ? (trade.lgbm_pred_proba * 100).toFixed(2) + '%' : 'N/A'}</td>
+                        <td class="text-end">${trade.catboost_pred_proba !== null && trade.catboost_pred_proba !== undefined ? (trade.catboost_pred_proba * 100).toFixed(2) + '%' : 'N/A'}</td>
                     </tr>
                 `;
             });
@@ -1384,7 +1401,8 @@ $(document).ready(function() {
                         { width: "120px", targets: 15 }, // 총자산
                         { width: "100px", targets: 16 }, // 최종점수
                         { width: "100px", targets: 17 }, // RF상승확률
-                        { width: "100px", targets: 18 }  // LGBM상승확률
+                        { width: "100px", targets: 18 }, // LGBM상승확률
+                        { width: "100px", targets: 19 }  // CB상승확률
                     ]
                 });
             }

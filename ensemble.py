@@ -17,8 +17,9 @@ import numpy as np
 import json
 import os
 from logger import log_info, log_warning, log_error, log_step, log_success, log_start, log_complete
+from path_manager import path_manager
 
-def calculate_final_score(df):
+def calculate_final_score(df, weights=None):
     """
     최종 앙상블 점수 계산 함수
     
@@ -28,6 +29,7 @@ def calculate_final_score(df):
     
     Args:
         df: 팩터 점수와 ML 예측 확률이 포함된 데이터프레임
+        weights: 가중치 딕셔너리 (None이면 파일에서 로드)
         
     Returns:
         pandas.DataFrame: 최종 점수와 순위가 추가된 데이터프레임
@@ -71,27 +73,96 @@ def calculate_final_score(df):
             'ml_pred_proba': 0.5,    # RF 50%
             'lgbm_pred_proba': 0.5   # LGBM 50%
         }
+    
+    # CatBoost 결과가 있으면 가중치 분산 (기본값)
+    if 'catboost_pred_proba' in final_df.columns:
+        log_info("[INFO] CatBoost 예측 결과 발견 - 가중치 자동 조정")
+        # 기존 모델 개수에 따라 가중치 분산
+        if 'lgbm_pred_proba' in final_df.columns:
+            # RF, LGBM, CatBoost 모두 있는 경우
+            factor_weights = {
+                'ml_pred_proba': 0.333,      # RF 33.3%
+                'lgbm_pred_proba': 0.333,    # LGBM 33.3%
+                'catboost_pred_proba': 0.334 # CatBoost 33.4%
+            }
+        else:
+            # RF, CatBoost만 있는 경우
+            factor_weights = {
+                'ml_pred_proba': 0.5,        # RF 50%
+                'catboost_pred_proba': 0.5   # CatBoost 50%
+            }
 
-    # 최적화된 가중치 파일이 있으면 불러오기
-    script_dir = os.path.dirname(__file__)
-    optimal_weights_path = os.path.join(script_dir, 'data', 'optimal_weights.json')
-
-    if os.path.exists(optimal_weights_path):
-        with open(optimal_weights_path, 'r') as f:
-            loaded_weights = json.load(f)
-            # volatility_score는 제거되었으므로 필터링
-            loaded_weights = {k: v for k, v in loaded_weights.items() if k != 'volatility_score'}
-            # 파일에 LGBM 가중치가 없고 데이터에는 LGBM이 있다면 기본 비율 유지하면서 로드된 값 반영
-            if 'lgbm_pred_proba' in final_df.columns and 'lgbm_pred_proba' not in loaded_weights:
-                 # 기존 ML 가중치를 반으로 나눠서 LGBM에 할당하는 전략
-                 ml_weight = loaded_weights.get('ml_pred_proba', 1.0)
-                 loaded_weights['ml_pred_proba'] = ml_weight / 2
-                 loaded_weights['lgbm_pred_proba'] = ml_weight / 2
+    # 가중치 로딩: 전달받은 weights가 있으면 우선 사용, 없으면 파일에서 로드
+    if weights is not None and isinstance(weights, dict):
+        # 전달받은 가중치 사용
+        loaded_weights = weights.copy()
+        # volatility_score는 제거되었으므로 필터링
+        loaded_weights = {k: v for k, v in loaded_weights.items() if k != 'volatility_score'}
+        
+        # 파일에 LGBM 가중치가 없고 데이터에는 LGBM이 있다면 기본 비율 유지하면서 로드된 값 반영
+        if 'lgbm_pred_proba' in final_df.columns and 'lgbm_pred_proba' not in loaded_weights:
+             # 기존 ML 가중치를 반으로 나눠서 LGBM에 할당하는 전략
+             ml_weight = loaded_weights.get('ml_pred_proba', 0.90)
+             loaded_weights['ml_pred_proba'] = ml_weight / 2
+             loaded_weights['lgbm_pred_proba'] = ml_weight / 2
+        
+        # 파일에 CatBoost 가중치가 없고 데이터에는 CatBoost가 있다면 기본 비율 유지하면서 로드된 값 반영
+        if 'catboost_pred_proba' in final_df.columns and 'catboost_pred_proba' not in loaded_weights:
+            # 기존 모델들의 가중치를 고려하여 CatBoost에 할당
+            ml_weight = loaded_weights.get('ml_pred_proba', 0.90)
+            lgbm_weight = loaded_weights.get('lgbm_pred_proba', 0.0)
             
-            factor_weights.update(loaded_weights)
-        log_info("[OK] 최적화된 가중치 적용")
+            if lgbm_weight > 0:
+                # RF, LGBM, CatBoost 모두 있는 경우 - 3등분
+                total_weight = ml_weight + lgbm_weight
+                loaded_weights['ml_pred_proba'] = total_weight / 3
+                loaded_weights['lgbm_pred_proba'] = total_weight / 3
+                loaded_weights['catboost_pred_proba'] = total_weight / 3
+            else:
+                # RF, CatBoost만 있는 경우 - 반으로 나눔
+                loaded_weights['ml_pred_proba'] = ml_weight / 2
+                loaded_weights['catboost_pred_proba'] = ml_weight / 2
+        
+        factor_weights.update(loaded_weights)
+        log_info("[OK] 전달받은 가중치 적용")
     else:
-        log_info("[INFO] 기본 가중치 사용")
+        # 파일에서 가중치 로드 (경로 통일: path_manager 사용)
+        optimal_weights_path = path_manager.get_weights_path()
+        
+        if os.path.exists(optimal_weights_path):
+            with open(optimal_weights_path, 'r', encoding='utf-8') as f:
+                loaded_weights = json.load(f)
+                # volatility_score는 제거되었으므로 필터링
+                loaded_weights = {k: v for k, v in loaded_weights.items() if k != 'volatility_score'}
+                
+                # 파일에 LGBM 가중치가 없고 데이터에는 LGBM이 있다면 기본 비율 유지하면서 로드된 값 반영
+                if 'lgbm_pred_proba' in final_df.columns and 'lgbm_pred_proba' not in loaded_weights:
+                     # 기존 ML 가중치를 반으로 나눠서 LGBM에 할당하는 전략
+                     ml_weight = loaded_weights.get('ml_pred_proba', 0.90)
+                     loaded_weights['ml_pred_proba'] = ml_weight / 2
+                     loaded_weights['lgbm_pred_proba'] = ml_weight / 2
+                
+                # 파일에 CatBoost 가중치가 없고 데이터에는 CatBoost가 있다면 기본 비율 유지하면서 로드된 값 반영
+                if 'catboost_pred_proba' in final_df.columns and 'catboost_pred_proba' not in loaded_weights:
+                    # 기존 모델들의 가중치를 고려하여 CatBoost에 할당
+                    ml_weight = loaded_weights.get('ml_pred_proba', 0.90)
+                    lgbm_weight = loaded_weights.get('lgbm_pred_proba', 0.0)
+                    
+                    if lgbm_weight > 0:
+                        # RF, LGBM, CatBoost 모두 있는 경우 - 3등분
+                        total_weight = ml_weight + lgbm_weight
+                        loaded_weights['ml_pred_proba'] = total_weight / 3
+                        loaded_weights['lgbm_pred_proba'] = total_weight / 3
+                        loaded_weights['catboost_pred_proba'] = total_weight / 3
+                    else:
+                        # RF, CatBoost만 있는 경우 - 반으로 나눔
+                        loaded_weights['ml_pred_proba'] = ml_weight / 2
+                        loaded_weights['catboost_pred_proba'] = ml_weight / 2
+                
+                factor_weights.update(loaded_weights)
+            log_info("[OK] 최적화된 가중치 파일에서 로드하여 적용")
+        else:
+            log_info("[INFO] 기본 가중치 사용")
 
     active_factors = {k: v for k, v in factor_weights.items() if v > 0 and k in final_df.columns}
     log_info(f"[SEARCH] 활성 팩터: {len(active_factors)}개 - {list(active_factors.keys())}")
@@ -106,7 +177,7 @@ def calculate_final_score(df):
     log_info("   📊 정규화 값 계산 중...")
     cached_norms = {}
     for factor in active_factors.keys():
-        if factor in ['ml_pred_proba', 'lgbm_pred_proba']:
+        if factor in ['ml_pred_proba', 'lgbm_pred_proba', 'catboost_pred_proba']:
             source_series = final_df[factor] * 100
         else:
             source_series = final_df[factor]
@@ -133,7 +204,7 @@ def calculate_final_score(df):
     # 각 팩터의 점수를 0-100점으로 정규화하여 공정한 비교가 가능하도록 함
     # 벡터화 연산을 사용하여 대용량 데이터 처리 성능 향상
     for factor in active_factors.keys():
-        if factor in ['ml_pred_proba', 'lgbm_pred_proba']:
+        if factor in ['ml_pred_proba', 'lgbm_pred_proba', 'catboost_pred_proba']:
             # 예측 확률은 0-1 범위이므로 100을 곱하여 0-100 범위로 변환
             source_series = final_df[factor] * 100
         else:
@@ -147,9 +218,6 @@ def calculate_final_score(df):
             final_df[factor + '_norm'] = 100 * (source_series - norm_info['min']) / norm_info['range']
         else:
             final_df[factor + '_norm'] = 50
-
-    total_weight = sum(active_factors.values())
-    normalized_weights = {k: v / total_weight for k, v in active_factors.items()}
 
     # =================================================================
     # 가중치 정규화 및 가중합 계산

@@ -191,7 +191,7 @@ def _validate_and_prepare_weights(payload: dict):
         raise ValueError("요청 바디가 비어있습니다.")
 
     # 프로젝트 호환 팩터(컬럼)만 수정 가능: 추후 팩터 추가 시 이 목록만 확장
-    allowed_keys = {'ml_pred_proba', 'lgbm_pred_proba'}
+    allowed_keys = {'ml_pred_proba', 'lgbm_pred_proba', 'catboost_pred_proba'}
 
     # 입력 포맷 호환: {weights: {...}, normalize: true/false} 또는 {...} 직접
     if isinstance(payload, dict) and 'weights' in payload and isinstance(payload.get('weights'), dict):
@@ -323,6 +323,8 @@ def moment_filter(value, format_string='YYYY-MM-DD'):
 CUML_MODEL_PATH = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
 # LightGBM 모델 경로
 LGBM_MODEL_PATH = str(path_manager.data_dir / 'lgbm_model_metadata.joblib')
+# CatBoost 모델 경로
+CATBOOST_MODEL_PATH = str(path_manager.data_dir / 'catboost_model_metadata.joblib')
 # 기존 모델 경로 (fallback)
 MODEL_PATH = str(path_manager.get_model_path())
 
@@ -453,7 +455,7 @@ def load_cached_analysis_result():
                 display_df['시장구분'] = 'N/A'
 
             # 숫자 컬럼 정리 (NaN/문자 혼합 대비)
-            for col in ['현재가', '기준일가', '전날종가', 'final_score', 'ml_pred_proba', 'lgbm_pred_proba', '시가총액']:
+            for col in ['현재가', '기준일가', '전날종가', 'final_score', 'ml_pred_proba', 'lgbm_pred_proba', 'catboost_pred_proba', '시가총액']:
                 if col in display_df.columns:
                     display_df[col] = pd.to_numeric(display_df[col], errors='coerce')
             
@@ -476,6 +478,19 @@ def load_cached_analysis_result():
             else:
                 # LGBM 컬럼이 없더라도 테이블 정렬을 위해 컬럼 생성
                 display_df['lgbm_pred_proba'] = np.nan
+            
+            # catboost_pred_proba가 있으면 백분율로 변환 (0-1 범위를 0-100으로)
+            if 'catboost_pred_proba' in display_df.columns:
+                # NaN이 아닌 값만 처리
+                mask = display_df['catboost_pred_proba'].notna()
+                if mask.any():
+                    # 최대값이 1.0 이하이면 0-1 범위로 가정하고 백분율로 변환
+                    max_val = display_df.loc[mask, 'catboost_pred_proba'].max()
+                    if max_val <= 1.0:
+                        display_df.loc[mask, 'catboost_pred_proba'] = display_df.loc[mask, 'catboost_pred_proba'] * 100
+            else:
+                # CatBoost 컬럼이 없더라도 테이블 정렬을 위해 컬럼 생성
+                display_df['catboost_pred_proba'] = np.nan
             
             # 등락율 계산 (0 나누기/NaN 방어)
             if '현재가' in display_df.columns and '기준일가' in display_df.columns:
@@ -514,6 +529,7 @@ def load_cached_analysis_result():
                 '최종점수(점)',
                 '상승확률(%)',
                 'lgbm_pred_proba',
+                'catboost_pred_proba',
                 '시가총액(억달러)'
             ]
             
@@ -932,6 +948,7 @@ def model_analysis():
     """학습 모델 분석 페이지"""
     model_info = None
     lgbm_model_info = None
+    catboost_model_info = None
     error = None
     
     try:
@@ -1113,7 +1130,94 @@ def model_analysis():
                 log_warning(f"LGBM 정보 로드 실패: {e}")
                 lgbm_model_info = None
 
-        if model_info is None and lgbm_model_info is None:
+        # --- 3. CatBoost 모델 로드 ---
+        if os.path.exists(CATBOOST_MODEL_PATH):
+            try:
+                # scikit-learn 버전 불일치 경고 억제 (모델 로드 시)
+                import warnings
+                with warnings.catch_warnings():
+                    try:
+                        from sklearn.exceptions import InconsistentVersionWarning
+                        warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+                    except (ImportError, AttributeError):
+                        pass
+                    catboost_data = joblib.load(CATBOOST_MODEL_PATH)
+                log_info("CatBoost 메타데이터 로드 완료")
+                
+                catboost_model_info = {
+                    'model_type': 'CatBoost (GPU)',
+                    'model_path': str(path_manager.data_dir / 'catboost_model.cbm'),
+                    'last_modified': datetime.fromtimestamp(os.path.getmtime(CATBOOST_MODEL_PATH)).strftime('%Y-%m-%d %H:%M:%S'),
+                    'features': catboost_data.get('features', []),
+                    'params': catboost_data.get('best_params', {}),
+                    'best_score': catboost_data.get('best_score', None),
+                    'best_iteration': catboost_data.get('best_iteration', None),
+                    # Optuna 탐색 결과(있으면 표시)
+                    'optimization_results': catboost_data.get('optimization_results', None),
+                    'training_config': catboost_data.get('training_config', None),
+                    'n_trials': catboost_data.get('n_trials', None),
+                    'trials_completed': catboost_data.get('trials_completed', None),
+                }
+                
+                # 기본 중요도: 모델에서 직접 가져오기
+                try:
+                    from catboost import CatBoostClassifier
+                    catboost_model_file = path_manager.data_dir / 'catboost_model.cbm'
+                    if catboost_model_file.exists():
+                        model = CatBoostClassifier()
+                        model.load_model(str(catboost_model_file))
+                        feature_importance = model.get_feature_importance()
+                        features = catboost_model_info['features']
+                        if len(features) == len(feature_importance):
+                            # 튜플 리스트로 변환 [(feature, importance), ...]
+                            importance_list = list(zip(features, feature_importance.tolist()))
+                            # 중요도 높은 순서대로 정렬 (내림차순)
+                            importance_list.sort(key=lambda x: x[1], reverse=True)
+                            catboost_model_info['default_importances'] = importance_list
+                        else:
+                            catboost_model_info['default_importances'] = None
+                    else:
+                        catboost_model_info['default_importances'] = None
+                except Exception as e:
+                    log_warning(f"CatBoost 기본 중요도 로드 실패: {e}")
+                    catboost_model_info['default_importances'] = None
+                
+                # SHAP 및 Permutation 중요도: CSV 파일에서 로드
+                fi_path = path_manager.data_dir / 'catboost_feature_importance.csv'
+                if fi_path.exists():
+                    try:
+                        fi_df = pd.read_csv(fi_path)
+                        
+                        # SHAP 중요도
+                        if 'shap_importance' in fi_df.columns:
+                            shap_df = fi_df[['feature', 'shap_importance']].sort_values(by='shap_importance', ascending=False)
+                            catboost_model_info['shap_importances'] = list(shap_df.itertuples(index=False, name=None))
+                        else:
+                            catboost_model_info['shap_importances'] = None
+                            
+                        # 순열 중요도
+                        if 'permutation_importance' in fi_df.columns:
+                            perm_df = fi_df[['feature', 'permutation_importance']].sort_values(by='permutation_importance', ascending=False)
+                            catboost_model_info['permutation_importances'] = list(perm_df.itertuples(index=False, name=None))
+                        else:
+                            catboost_model_info['permutation_importances'] = None
+                            
+                    except Exception as e:
+                        log_warning(f"CatBoost 중요도 CSV 파일 처리 중 오류: {e}")
+                        catboost_model_info['shap_importances'] = None
+                        catboost_model_info['permutation_importances'] = None
+                else:
+                    catboost_model_info['shap_importances'] = None
+                    catboost_model_info['permutation_importances'] = None
+                
+                # 기본적으로 기본 중요도를 feature_importances로 설정 (하위 호환성)
+                catboost_model_info['feature_importances'] = catboost_model_info.get('default_importances') or catboost_model_info.get('shap_importances')
+                    
+            except Exception as e:
+                log_warning(f"CatBoost 정보 로드 실패: {e}")
+                catboost_model_info = None
+
+        if model_info is None and lgbm_model_info is None and catboost_model_info is None:
              error = "학습된 모델 정보를 찾을 수 없습니다."
 
     except FileNotFoundError:
@@ -1125,7 +1229,7 @@ def model_analysis():
         import traceback
         log_error(f"모델 분석 페이지 오류: {traceback.format_exc()}")
     
-    return render_template('model_analysis.html', model_info=model_info, lgbm_model_info=lgbm_model_info, error=error)
+    return render_template('model_analysis.html', model_info=model_info, lgbm_model_info=lgbm_model_info, catboost_model_info=catboost_model_info, error=error)
 
 @app.route('/backtest')
 def backtest():
@@ -1821,7 +1925,7 @@ def get_weights():
             file_weights = {k: v for k, v in file_weights.items() if k != 'volatility_score'}
             merged.update(file_weights)
 
-        allowed_keys = ['ml_pred_proba', 'lgbm_pred_proba']
+        allowed_keys = ['ml_pred_proba', 'lgbm_pred_proba', 'catboost_pred_proba']
         # UI 혼란 방지: 허용된 키만 반환/표시
         merged_filtered = {k: merged.get(k, 0.0) for k in allowed_keys}
         file_weights_filtered = {k: (file_weights or {}).get(k, 0.0) for k in allowed_keys}
@@ -1889,13 +1993,33 @@ def optimize_weights():
         if not backtest_params['start_date'] or not backtest_params['end_date']:
             return jsonify({'error': '시작일과 종료일이 필요합니다.'}), 400
         
+        # request context에서 sid 가져오기 (백그라운드 태스크에서 사용)
+        # HTTP 요청에서는 sid가 없으므로 None으로 설정
+        client_sid = None
+        try:
+            # WebSocket 연결이 있는 경우에만 sid 가져오기
+            from flask import has_request_context
+            if has_request_context():
+                # request.sid는 WebSocket 연결에서만 사용 가능
+                # HTTP 요청에서는 AttributeError 발생하므로 try-except로 처리
+                try:
+                    client_sid = request.sid
+                except AttributeError:
+                    # HTTP 요청인 경우 sid가 없음 (정상)
+                    client_sid = None
+        except Exception:
+            client_sid = None
+        
         # 최적화를 비동기로 실행
         def run_optimization():
             try:
-                optimize_weights_sync(backtest_params)
+                # Flask application context 설정 (백그라운드 태스크에서 필요)
+                with app.app_context():
+                    optimize_weights_sync(backtest_params, client_sid=client_sid)
             except Exception as e:
                 log_error(f"가중치 최적화 실패: {e}")
-                socketio.emit('optimize_complete', {'success': False, 'error': str(e)})
+                with app.app_context():
+                    socketio.emit('optimize_complete', {'success': False, 'error': str(e)}, room=client_sid if client_sid else None)
         
         # 백그라운드에서 실행
         socketio.start_background_task(run_optimization)
@@ -1906,23 +2030,31 @@ def optimize_weights():
         log_error(f"가중치 최적화 시작 실패: {e}")
         return jsonify({'error': str(e)}), 500
 
-def optimize_weights_sync(backtest_params):
-    """가중치 최적화 동기 실행 함수"""
+def optimize_weights_sync(backtest_params, client_sid=None):
+    """가중치 최적화 동기 실행 함수
+    
+    Args:
+        backtest_params: 백테스팅 파라미터 딕셔너리
+        client_sid: WebSocket 클라이언트 세션 ID (None이면 모든 클라이언트에게 브로드캐스트)
+    """
     try:
         # backtest_params는 이미 파라미터로 받았으므로 그대로 사용
         
-        # 가중치 조합 생성 (ML + LGBM = 1.0, 0.1 단위)
+        # 가중치 조합 생성 (0.0~1.0, 0.1 단위, 합=1.0)
         combinations = []
         for ml in range(11):  # 0.0, 0.1, ..., 1.0
             ml_weight = round(ml * 0.1, 1)
-            lgbm_weight = round(1.0 - ml_weight, 1)
-            
-            # 합이 1.0이고 모든 가중치가 0 이상인 조합만
-            if abs(ml_weight + lgbm_weight - 1.0) < 0.01 and ml_weight >= 0 and lgbm_weight >= 0:
-                combinations.append({
-                    'ml_pred_proba': ml_weight,
-                    'lgbm_pred_proba': lgbm_weight
-                })
+            for lgbm in range(11):
+                lgbm_weight = round(lgbm * 0.1, 1)
+                catboost_weight = round(1.0 - ml_weight - lgbm_weight, 1)
+                
+                # 합이 1.0이고 모든 가중치가 0 이상인 조합만
+                if abs(ml_weight + lgbm_weight + catboost_weight - 1.0) < 0.01 and catboost_weight >= 0:
+                    combinations.append({
+                        'ml_pred_proba': ml_weight,
+                        'lgbm_pred_proba': lgbm_weight,
+                        'catboost_pred_proba': catboost_weight
+                    })
         
         log_info(f"가중치 최적화 시작: {len(combinations)}개 조합 테스트")
         
@@ -1936,26 +2068,54 @@ def optimize_weights_sync(backtest_params):
         total_combinations = len(combinations)
         
         # 진행률 전송을 위한 함수
-        def emit_progress(current, total, current_weights):
+        def emit_progress(current, total, current_weights, status_msg=None):
             progress_pct = int((current / total) * 100)
-            socketio.emit('optimize_progress', {
+            # client_sid가 있으면 해당 클라이언트에게만, 없으면 모든 클라이언트에게 브로드캐스트
+            progress_data = {
                 'current': current,
                 'total': total,
                 'progress': progress_pct,
                 'current_weights': current_weights
-            })
+            }
+            if status_msg:
+                progress_data['status'] = status_msg
+            socketio.emit('optimize_progress', progress_data, room=client_sid if client_sid else None)
+            # 이벤트 루프에 양보 (WebSocket 전송 보장)
+            socketio.sleep(0)
+        
+        # 초기 진행률 전송 (0%)
+        emit_progress(0, total_combinations, None, "가중치 최적화 준비 중...")
+        
+        # 종목 리스트를 한 번만 수집하여 재사용 (가중치 최적화 성능 최적화)
+        import data_processor
+        shared_stock_list = None
+        try:
+            emit_progress(0, total_combinations, None, "종목 리스트 수집 중...")
+            shared_stock_list = data_processor.fetch_stock_list()
+            if shared_stock_list is not None and not shared_stock_list.empty:
+                log_info(f"가중치 최적화용 종목 리스트 수집 완료: {len(shared_stock_list)}개 종목")
+                emit_progress(0, total_combinations, None, f"종목 리스트 수집 완료 ({len(shared_stock_list)}개 종목)")
+            else:
+                log_warning("가중치 최적화용 종목 리스트 수집 실패 (각 백테스팅마다 수집 시도)")
+                emit_progress(0, total_combinations, None, "종목 리스트 수집 실패 (백테스팅 중 수집 시도)")
+        except Exception as e:
+            log_warning(f"가중치 최적화용 종목 리스트 수집 실패: {e} (각 백테스팅마다 수집 시도)")
+            emit_progress(0, total_combinations, None, f"종목 리스트 수집 실패: {str(e)[:50]}")
         
         # 각 조합 테스트
         first_error = None
         for idx, weights in enumerate(combinations, 1):
             try:
                 # 진행률 전송 (각 조합 시작 시)
-                emit_progress(idx - 1, total_combinations, weights)
+                emit_progress(idx - 1, total_combinations, weights, f"가중치 조합 {idx}/{total_combinations} 테스트 중...")
                 
                 # 가중치 파일 저장
                 _atomic_write_json(weights_path, weights)
                 
                 log_info(f"  [{idx}/{total_combinations}] 가중치 {weights} 테스트 시작...")
+                
+                # 백테스팅 실행 전 진행률 업데이트
+                emit_progress(idx - 1, total_combinations, weights, f"백테스팅 실행 중... ({idx}/{total_combinations})")
                 
                 # 백테스팅 실행 (직접 함수 호출)
                 import scripts.backtest as backtest_module
@@ -1970,8 +2130,13 @@ def optimize_weights_sync(backtest_params):
                     start_date=backtest_params.get('start_date'),
                     end_date=backtest_params.get('end_date'),
                     use_cache=True,
-                    shutdown_logger_after=False  # 최적화 중에는 logger 종료하지 않음
+                    shutdown_logger_after=False,  # 최적화 중에는 logger 종료하지 않음
+                    skip_report=True,  # 가중치 최적화에서는 리포트 생성 스킵
+                    shared_stock_list=shared_stock_list  # 재사용할 종목 리스트 전달
                 )
+                
+                # 백테스팅 완료 후 진행률 업데이트 (백테스팅이 오래 걸릴 수 있으므로)
+                emit_progress(idx, total_combinations, weights, f"백테스팅 완료 ({idx}/{total_combinations})")
                 
                 # 결과 수집
                 if backtest_result and isinstance(backtest_result, dict) and 'total_return' in backtest_result:
@@ -2003,7 +2168,7 @@ def optimize_weights_sync(backtest_params):
                 continue
         
         # 최종 진행률 전송 (100%)
-        emit_progress(total_combinations, total_combinations, None)
+        emit_progress(total_combinations, total_combinations, None, "가중치 최적화 완료")
         
         # 백업된 가중치 복원
         if backup_weights:
@@ -2037,7 +2202,7 @@ def optimize_weights_sync(backtest_params):
             log_error(f"가중치 최적화 실패: 모든 조합 테스트 실패. 첫 번째 에러: {first_error[:500]}")
         
         # WebSocket으로 결과 전송
-        socketio.emit('optimize_complete', response_data)
+        socketio.emit('optimize_complete', response_data, room=client_sid if client_sid else None)
         
     except Exception as e:
         log_error(f"가중치 최적화 동기 실행 실패: {e}")
@@ -2046,7 +2211,7 @@ def optimize_weights_sync(backtest_params):
         socketio.emit('optimize_complete', {
             'success': False,
             'error': f"{str(e)}\n{error_detail[:500]}"
-        })
+        }, room=client_sid if client_sid else None)
 
 @app.route('/api/feature_correlation/calculate', methods=['POST'])
 def calculate_feature_correlation():
@@ -2068,7 +2233,7 @@ def calculate_feature_correlation():
             'disparity_240',  # 240일 이격도
             'IXIC_disparity_20',  # IXIC 20일 이격도 (NASDAQ 지수)
             # 추가된 피처
-            'Z_Score_20',
+            'Trend_Pullback_Score',
             'Position_Range_60',
             # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
             # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
@@ -2076,10 +2241,6 @@ def calculate_feature_correlation():
             'MA120_Slope',  # 120일 이동평균선 기울기
             'MA240_Slope',  # 240일 이동평균선 기울기
             'IXIC_MA20_Slope',  # IXIC 20일 이동평균선 기울기 (NASDAQ 지수)
-            'Ichi_Kijun_Gap',        # 일목 기준선 괴리율
-            'Ichi_Cloud_Score',      # 일목 구름대 돌파 점수
-            'Ichi_TK_Cross_Power',   # 일목 전환-기준선 크로스 파워
-            'Ichi_Cloud_Thickness',  # 일목 구름대 두께 대비 주가
             # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
             # 새로 추가된 피처
             'RVOL',  # 상대 거래량 (Relative Volume)
@@ -2089,6 +2250,7 @@ def calculate_feature_correlation():
             'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
             'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
             'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
+            'HV_Volatility_5',  # HV 변동성 1주
             # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
             # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
             'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)

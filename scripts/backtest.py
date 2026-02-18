@@ -153,19 +153,22 @@ JSON_REPORT_FILE = str(path_manager.data_dir / 'backtest_report.json')
 TOP_N_STOCKS = 5
 
 def _load_ml_models(force_all=False, weights=None):
-    """모델들을 한 번만 로드하여 반환 (성능 최적화) - NASDAQ 프로젝트: RF(ML)와 LGBM만"""
+    """모델들을 한 번만 로드하여 반환 (성능 최적화)"""
     loaded_models = {
         'ml': None,
-        'lgbm': None
+        'lgbm': None,
+        'catboost': None
     }
     
     # 가중치 확인
     rf_weight = 0.0
     lgbm_weight = 0.0
+    catboost_weight = 0.0
     
     if isinstance(weights, dict):
         rf_weight = float(weights.get('ml_pred_proba', 0.0))
         lgbm_weight = float(weights.get('lgbm_pred_proba', weights.get('lgb_pred_proba', 0.0)))
+        catboost_weight = float(weights.get('catboost_pred_proba', 0.0))
     
     # ML 모델 로드 (필요한 경우)
     if force_all or rf_weight > 0:
@@ -249,6 +252,32 @@ def _load_ml_models(force_all=False, weights=None):
                 log_info("✅ LGBM 모델 로드 완료")
         except Exception as e:
             log_warning(f"⚠️ LGBM 모델 로드 실패: {e}")
+    
+    # CatBoost 모델 로드 (필요한 경우)
+    if force_all or catboost_weight > 0:
+        try:
+            from path_manager import path_manager
+            from catboost import CatBoostClassifier
+            
+            model_dir = path_manager.data_dir
+            catboost_model_path = model_dir / 'catboost_model.cbm'
+            catboost_meta_path = model_dir / 'catboost_model_metadata.joblib'
+            
+            if catboost_model_path.exists() and catboost_meta_path.exists():
+                metadata = joblib.load(catboost_meta_path)
+                features = metadata['features']
+                scaler = metadata.get('scaler')
+                model = CatBoostClassifier(allow_writing_files=False)
+                model.load_model(str(catboost_model_path))
+                
+                loaded_models['catboost'] = {
+                    'model': model,
+                    'features': features,
+                    'scaler': scaler
+                }
+                log_info("✅ CatBoost 모델 로드 완료")
+        except Exception as e:
+            log_warning(f"⚠️ CatBoost 모델 로드 실패: {e}")
     
     return loaded_models
 
@@ -354,6 +383,44 @@ def _predict_with_loaded_lgbm_model(df, model_info):
     except Exception as e:
         log_warning(f"⚠️ LGBM 예측 실패: {e}")
         result_df['lgbm_pred_proba'] = np.nan
+    
+    return result_df
+
+def _predict_with_loaded_catboost_model(df, model_info):
+    """로드된 CatBoost 모델을 사용하여 예측"""
+    if model_info is None:
+        return pd.DataFrame(columns=['종목코드', 'catboost_pred_proba'])
+    
+    model = model_info['model']
+    features = model_info['features']
+    scaler = model_info.get('scaler')
+    
+    result_df = df[['종목코드']].copy()
+    
+    available_features = [f for f in features if f in df.columns]
+    if not available_features:
+        result_df['catboost_pred_proba'] = np.nan
+        return result_df
+    
+    X_pred = df[available_features].copy()
+    numeric_cols = X_pred.select_dtypes(include=[np.number]).columns
+    X_pred[numeric_cols] = X_pred[numeric_cols].replace([np.inf, -np.inf], np.nan)
+    
+    if scaler:
+        try:
+            X_pred = X_pred.fillna(0)
+            X_pred_scaled = scaler.transform(X_pred)
+        except Exception:
+            X_pred_scaled = X_pred
+    else:
+        X_pred_scaled = X_pred
+    
+    try:
+        y_pred_proba = model.predict_proba(X_pred_scaled)[:, 1]
+        result_df['catboost_pred_proba'] = y_pred_proba
+    except Exception as e:
+        log_warning(f"⚠️ CatBoost 예측 실패: {e}")
+        result_df['catboost_pred_proba'] = np.nan
     
     return result_df
 
@@ -463,8 +530,40 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                         # 스킵 시에도 컬럼은 유지
                         if 'lgbm_pred_proba' not in daily_data_copy.columns:
                             daily_data_copy['lgbm_pred_proba'] = np.nan
+
+                # 가중치 기반 스킵: CatBoost 가중치가 0이면 예측을 수행하지 않음 (호환성: 컬럼은 NaN으로 유지)
+                # 단, 캐시 저장 시에는 강제로 모든 예측 수행
+                catboost_weight = 0.0
+                try:
+                    if isinstance(weights, dict):
+                        if 'catboost_pred_proba' in weights:
+                            catboost_weight = float(weights.get('catboost_pred_proba', 0.0))
+                except Exception:
+                    catboost_weight = 0.0
+
+                # CatBoost 예측 추가 (catboost_pred_proba 컬럼이 없는 경우)
+                if 'catboost_pred_proba' not in daily_data_copy.columns:
+                    if force_all_predictions or catboost_weight > 0:
+                        try:
+                            catboost_predicted_df = _predict_with_loaded_catboost_model(daily_data_copy, loaded_models['catboost'])
+                            if not catboost_predicted_df.empty and 'catboost_pred_proba' in catboost_predicted_df.columns:
+                                # CatBoost 예측 결과 병합
+                                daily_data_copy = pd.merge(
+                                    daily_data_copy,
+                                    catboost_predicted_df[['종목코드', 'catboost_pred_proba']],
+                                    on='종목코드',
+                                    how='left'
+                                )
+                        except Exception as e:
+                            # CatBoost 예측 실패 시 경고만 출력하고 계속 진행
+                            log_warning(f"   ⚠️ [CatBoost] 예측 실패 (날짜: {date}): {e}")
+                            daily_data_copy['catboost_pred_proba'] = np.nan
+                    else:
+                        # 스킵 시에도 컬럼은 유지
+                        if 'catboost_pred_proba' not in daily_data_copy.columns:
+                            daily_data_copy['catboost_pred_proba'] = np.nan
                 
-                temp_df = ensemble.calculate_final_score(daily_data_copy)
+                temp_df = ensemble.calculate_final_score(daily_data_copy, weights=weights)
                 temp_df['date'] = date
                 final_df_list.append(temp_df)
             except Exception as e:
@@ -482,7 +581,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         
         # 병합할 컬럼 목록 (final_score는 필수, 나머지는 final_scores_df에 있으면 포함)
         merge_cols = ['final_score']
-        optional_cols = ['ml_pred_proba', 'lgbm_pred_proba']
+        optional_cols = ['ml_pred_proba', 'lgbm_pred_proba', 'catboost_pred_proba']
         for col in optional_cols:
             if col in final_scores_df.columns:
                 merge_cols.append(col)
@@ -492,6 +591,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         data = data.merge(final_scores_df[merge_cols], left_index=True, right_index=True, how='left', suffixes=('', '_new'))
         
         # _new 접미사가 붙은 컬럼 처리 (final_scores_df의 값이 우선)
+        # 캐시 사용 시: 원본 data에 있는 모든 상승확률 컬럼을 보존 (일관성 유지)
         for col in optional_cols:
             new_col = col + '_new'
             if new_col in data.columns:
@@ -500,6 +600,8 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                 if mask.any():
                     data.loc[mask, col] = data.loc[mask, new_col]
                 data.drop(columns=[new_col], inplace=True)
+            # final_scores_df에 컬럼이 없어도 원본 data에 있으면 보존 (캐시 사용 시 모든 상승확률 표시)
+            # 원본 data에 컬럼이 있으면 그대로 유지 (이미 병합 전에 존재하므로)
         
         data.dropna(subset=['final_score'], inplace=True)
 
@@ -536,7 +638,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
     print(f"🔍 백테스팅 날짜 범위: {daily_dates.min()} ~ {daily_dates.max()}")
     print(f"🔍 총 백테스팅 날짜 수: {len(daily_dates)}개")
     
-    score_cols_to_log = ['final_score', 'ml_pred_proba', 'lgbm_pred_proba']
+    score_cols_to_log = ['final_score', 'ml_pred_proba', 'lgbm_pred_proba', 'catboost_pred_proba']
 
     take_profit_multiplier = 1 + (take_profit_pct / 100)
     stop_loss_multiplier = 1 - (stop_loss_pct / 100)
@@ -878,8 +980,14 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             "initial_capital": initial_capital, "final_asset": final_asset}
 
 
-def create_json_report(results, output_path=None):
-    """JSON 리포트 생성 함수"""
+def create_json_report(results, output_path=None, stock_list=None):
+    """JSON 리포트 생성 함수
+    
+    Args:
+        results: 백테스팅 결과 딕셔너리
+        output_path: 리포트 저장 경로 (None이면 기본 경로 사용)
+        stock_list: 종목 리스트 DataFrame (None이면 자동으로 수집, 가중치 최적화 시 재사용을 위해 전달 가능)
+    """
     if output_path is None:
         output_path = str(path_manager.data_dir / 'backtest_report.json')
     
@@ -914,8 +1022,10 @@ def create_json_report(results, output_path=None):
     trade_log_records = []
     
     if not trade_log_all.empty:
-        # 백테스팅용 주식 목록 (캐시 없이 최신 데이터 사용)
-        stock_list = data_processor.fetch_stock_list()
+        # 백테스팅용 주식 목록 (전달받지 않은 경우에만 수집)
+        if stock_list is None:
+            stock_list = data_processor.fetch_stock_list()
+        
         if stock_list is not None and not stock_list.empty:
             trade_log_all = pd.merge(trade_log_all, stock_list, left_on='ticker', right_on='종목코드', how='left')
         else:
@@ -965,7 +1075,8 @@ def create_json_report(results, output_path=None):
                 'cumulative_profit': float(row['cumulative_profit']) if 'cumulative_profit' in row and pd.notna(row['cumulative_profit']) else None,
                 'final_score': float(row['final_score']) if 'final_score' in row and pd.notna(row['final_score']) else None,
                 'ml_pred_proba': float(row['ml_pred_proba']) if 'ml_pred_proba' in row and pd.notna(row['ml_pred_proba']) else None,
-                'lgbm_pred_proba': float(row['lgbm_pred_proba']) if 'lgbm_pred_proba' in row and pd.notna(row['lgbm_pred_proba']) else None
+                'lgbm_pred_proba': float(row['lgbm_pred_proba']) if 'lgbm_pred_proba' in row and pd.notna(row['lgbm_pred_proba']) else None,
+                'catboost_pred_proba': float(row['catboost_pred_proba']) if 'catboost_pred_proba' in row and pd.notna(row['catboost_pred_proba']) else None
             }
             trade_log_records.append(record)
     
@@ -1122,7 +1233,7 @@ def delete_backtest_cache():
         log_error(f"백테스팅 캐시 삭제 실패: {e}")
         return False
 
-def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate, start_date=None, end_date=None, use_cache=False, shutdown_logger_after=True):
+def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate, start_date=None, end_date=None, use_cache=False, shutdown_logger_after=True, skip_report=False, shared_stock_list=None):
     """최종 백테스팅 실행 - 강화된 에러 처리
     
     Args:
@@ -1137,6 +1248,8 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         end_date: 테스트 종료일 (YYYY-MM-DD 형식, None이면 기본값 사용)
         use_cache: 캐시 사용 여부 (True면 캐시 파일 사용/생성, False면 실시간 분석)
         shutdown_logger_after: 백테스팅 완료 후 logger 종료 여부 (기본값: True, 최적화 시 False로 설정)
+        skip_report: 리포트 생성 스킵 여부 (기본값: False, 가중치 최적화 시 True로 설정)
+        shared_stock_list: 재사용할 종목 리스트 DataFrame (기본값: None, 가중치 최적화 시 전달)
     """
     start_time = time.time()
     
@@ -1751,21 +1864,24 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             raise
         
         # JSON 리포트 생성 (강화된 에러 처리)
-        try:
-            log_info("\n4. JSON 리포트 생성 중...")
-            json_report_path = str(path_manager.data_dir / 'backtest_report.json')
-            log_info("JSON 리포트 생성 시작", context={"report_file": json_report_path})
+        if not skip_report:
+            try:
+                log_info("\n4. JSON 리포트 생성 중...")
+                json_report_path = str(path_manager.data_dir / 'backtest_report.json')
+                log_info("JSON 리포트 생성 시작", context={"report_file": json_report_path})
+                
+                create_json_report(backtest_results, output_path=json_report_path, stock_list=shared_stock_list)
+                
+                log_info("JSON 리포트 생성 완료", context={"report_file": json_report_path})
+                
+            except Exception as e:
+                log_critical("JSON 리포트 생성 실패", exception=e, context={"report_file": json_report_path if 'json_report_path' in locals() else "Unknown"})
+                # 리포트 생성 실패해도 백테스팅 결과는 반환
+                log_warning(f"\n⚠️ JSON 리포트 생성에 실패했습니다: {e}")
             
-            create_json_report(backtest_results, output_path=json_report_path)
-            
-            log_info("JSON 리포트 생성 완료", context={"report_file": json_report_path})
-            
-        except Exception as e:
-            log_critical("JSON 리포트 생성 실패", exception=e, context={"report_file": json_report_path if 'json_report_path' in locals() else "Unknown"})
-            # 리포트 생성 실패해도 백테스팅 결과는 반환
-            log_warning(f"\n⚠️ JSON 리포트 생성에 실패했습니다: {e}")
-        
-        log_info(f"\n✅ 백테스팅 완료. JSON 리포트 파일이 생성되었습니다.")
+            log_info(f"\n✅ 백테스팅 완료. JSON 리포트 파일이 생성되었습니다.")
+        else:
+            log_info(f"\n✅ 백테스팅 완료. (리포트 생성 스킵)")
         
         # 로거 종료 (선택적)
         if shutdown_logger_after:
