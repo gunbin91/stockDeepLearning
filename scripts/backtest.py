@@ -90,6 +90,9 @@ def apply_sklearn_compatibility_patch():
         # 패치 적용 실패해도 계속 진행
         pass
 
+# 호환성 패치 적용 (cudf/cuml import 전에 실행)
+apply_pandas_compatibility_patch()
+apply_sklearn_compatibility_patch()
 
 # 프로젝트 루트 경로를 sys.path에 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -404,6 +407,7 @@ def _predict_with_loaded_ml_model(df, model_info):
     if use_scaler:
         try:
             if is_cuml_model:
+                # 호환성 패치가 이미 적용되어 있음
                 import cudf
                 X_pred_ordered = X_pred[available_features]
                 X_pred_cudf = cudf.from_pandas(X_pred_ordered)
@@ -414,6 +418,7 @@ def _predict_with_loaded_ml_model(df, model_info):
             X_pred_scaled = X_pred.values if not is_cuml_model else cudf.from_pandas(X_pred[available_features])
     else:
         if is_cuml_model:
+            # 호환성 패치가 이미 적용되어 있음
             import cudf
             X_pred_scaled = cudf.from_pandas(X_pred[available_features])
         else:
@@ -1149,6 +1154,11 @@ def create_json_report(results, output_path=None):
     if output_path is None:
         output_path = str(path_manager.data_dir / 'backtest_report.json')
     
+    # 디렉토리 생성 (파일 저장 전)
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    
     if results["portfolio_history"].empty:
         print("백테스트 결과가 없어 리포트를 생성할 수 없습니다.")
         return
@@ -1309,11 +1319,15 @@ def create_json_report(results, output_path=None):
 
     report_data = _sanitize_json_value(report_data)
 
-    # JSON 파일로 저장
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(report_data, f, ensure_ascii=False, indent=2)
+    # JSON 파일로 저장 (디렉토리는 이미 생성됨)
+    try:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(report_data, f, ensure_ascii=False, indent=2)
+        log_info(f"JSON 리포트 생성 완료: {output_path}")
+    except Exception as e:
+        log_error(f"JSON 리포트 저장 실패: {e}", context={"output_path": output_path})
+        raise
     
-    log_info(f"JSON 리포트 생성 완료: {output_path}")
     return report_data
 
 

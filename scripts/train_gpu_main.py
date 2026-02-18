@@ -24,6 +24,54 @@ warnings.filterwarnings("ignore", message="Using CPU via PyArrow to read feather
 
 # 서드파티 라이브러리
 import pandas as pd
+
+# pandas 호환성 패치: cuDF가 pandas.api.types.is_interval을 사용하는데 최신 pandas에서는 제거됨
+def apply_pandas_compatibility_patch():
+    """pandas 최신 버전과 cuDF 호환성을 위한 패치 적용"""
+    try:
+        import pandas.api.types as pd_types
+        # is_interval이 없으면 추가 (cuDF 호환성)
+        if not hasattr(pd_types, 'is_interval'):
+            # pandas 2.0+에서는 IntervalDtype을 사용하여 체크
+            def is_interval(arr):
+                """Interval 타입 체크 함수"""
+                try:
+                    from pandas import IntervalDtype
+                    return hasattr(arr, 'dtype') and isinstance(arr.dtype, IntervalDtype)
+                except:
+                    return False
+            pd_types.is_interval = is_interval
+    except Exception:
+        # 패치 적용 실패해도 계속 진행 (cuDF가 직접 처리할 수 있음)
+        pass
+
+# scikit-learn 호환성 패치: cuML이 BaseEstimator._get_default_requests를 사용하는데 최신 scikit-learn에서는 제거됨
+def apply_sklearn_compatibility_patch():
+    """scikit-learn 최신 버전과 cuML 호환성을 위한 패치 적용"""
+    try:
+        from sklearn.base import BaseEstimator
+        # _get_default_requests가 없으면 추가 (cuML 호환성)
+        if not hasattr(BaseEstimator, '_get_default_requests'):
+            # scikit-learn 1.3+에서는 _get_metadata_request를 사용하거나, 없으면 빈 함수로 대체
+            if hasattr(BaseEstimator, '_get_metadata_request'):
+                # _get_metadata_request를 _get_default_requests로 별칭 생성
+                original_get_metadata_request = BaseEstimator._get_metadata_request
+                def _get_default_requests(self, *args, **kwargs):
+                    return original_get_metadata_request(self, *args, **kwargs)
+                BaseEstimator._get_default_requests = _get_default_requests
+            else:
+                # 둘 다 없으면 빈 함수로 대체
+                def _get_default_requests(self, *args, **kwargs):
+                    return {}
+                BaseEstimator._get_default_requests = _get_default_requests
+    except Exception:
+        # 패치 적용 실패해도 계속 진행
+        pass
+
+# 호환성 패치 적용 (cudf/cuml import 전에 실행)
+apply_pandas_compatibility_patch()
+apply_sklearn_compatibility_patch()
+
 import cudf
 import cuml
 import numpy as np
@@ -1542,6 +1590,16 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
         else:
             raise ValueError(f"fold_cache 파일 형식이 맞지 않습니다. (요소 개수: {len(fold_data)}, 기대값: 5 또는 6)")
         
+        # pandas DataFrame을 cuDF DataFrame으로 변환 (저장 시 pandas로 변환했으므로)
+        if isinstance(X_train_original, pd.DataFrame):
+            X_train_original = cudf.from_pandas(X_train_original)
+        if isinstance(X_val_original, pd.DataFrame):
+            X_val_original = cudf.from_pandas(X_val_original)
+        if isinstance(y_train_original, (pd.Series, np.ndarray)):
+            y_train_original = cudf.Series(y_train_original) if not isinstance(y_train_original, cudf.Series) else y_train_original
+        if isinstance(y_val_original, (pd.Series, np.ndarray)):
+            y_val_original = cudf.Series(y_val_original) if not isinstance(y_val_original, cudf.Series) else y_val_original
+        
         if X_train_original is None or X_val_original is None:
             raise ValueError("fold_cache 파일의 데이터가 유효하지 않습니다.")
         
@@ -1950,8 +2008,8 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
         # 7. 최종 모델 저장
         if final_model:
             log_info("   [SAVE] 최종 단일 모델 및 전처리기 저장 중...")
-            model_path = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
-            metadata_path = str(path_manager.data_dir / 'cuml_ensemble_model_metadata.joblib')
+            model_path = path_manager.data_dir / 'cuml_ensemble_model.joblib'
+            metadata_path = path_manager.data_dir / 'cuml_ensemble_model_metadata.joblib'
             
             # 모델 피처 수 검증 (저장 전 확인)
             model_expected_features = None
@@ -1975,6 +2033,8 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
             final_training_config = {**(training_config or {}), 'n_final_models': 1}
             
             # 모델 파일 저장
+            # 디렉토리 생성 (파일 저장 전)
+            model_path.parent.mkdir(parents=True, exist_ok=True)
             # final_imputation_values: 전체 데이터(X_all) 기준으로 계산된 중앙값 (실전 추론 시 사용)
             joblib.dump({
                 'model': final_model,
@@ -1987,11 +2047,13 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
                 'training_config': final_training_config,
                 'feature_importances': feature_importances,  # SHAP 값
                 'permutation_importances': permutation_importances  # 순열 중요도
-            }, model_path, compress=3)
+            }, str(model_path), compress=3)
             log_info(f"   [OK] 최종 모델 저장 완료: {model_path}")
             
             # 메타데이터 파일 저장 (웹페이지에서 빠른 로드를 위해)
             try:
+                # 디렉토리 생성 (파일 저장 전)
+                metadata_path.parent.mkdir(parents=True, exist_ok=True)
                 parameter_explanations = {
                     'n_estimators': 'RandomForest가 만들 트리의 개수',
                     'max_depth': '각 트리의 최대 깊이 (과적합 방지)',
@@ -2013,7 +2075,7 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
                     'parameter_explanations': parameter_explanations
                 }
                 
-                joblib.dump(metadata_to_save, metadata_path, compress=3)
+                joblib.dump(metadata_to_save, str(metadata_path), compress=3)
                 log_info(f"   [OK] 메타데이터 파일 저장 완료: {metadata_path}")
             except Exception as e:
                 log_warning(f"   [WARN] 메타데이터 파일 저장 실패 (선택사항): {e}")
@@ -2231,6 +2293,16 @@ def main():
                 else:
                     raise ValueError("캐시 형식이 맞지 않습니다.")
                 
+                # pandas DataFrame을 cuDF DataFrame으로 변환 (저장 시 pandas로 변환했으므로)
+                if isinstance(X_train, pd.DataFrame):
+                    X_train = cudf.from_pandas(X_train)
+                if isinstance(X_val, pd.DataFrame):
+                    X_val = cudf.from_pandas(X_val)
+                if isinstance(y_train, (pd.Series, np.ndarray)):
+                    y_train = cudf.Series(y_train) if not isinstance(y_train, cudf.Series) else y_train
+                if isinstance(y_val, (pd.Series, np.ndarray)):
+                    y_val = cudf.Series(y_val) if not isinstance(y_val, cudf.Series) else y_val
+                
                 load_time = (datetime.now() - load_start).total_seconds()
                 
                 if X_train is None or X_val is None:
@@ -2296,10 +2368,57 @@ def main():
             # fold 데이터 파일로 저장 (imputation_map도 함께 저장)
             log_info(f"   💾 Fold #{fold_idx+1}/3 데이터 파일 저장 중...")
             try:
-                joblib.dump((X_train, y_train, X_val, y_val, train_imputation_map), fold_cache_path)
+                # cuDF DataFrame을 pandas DataFrame으로 변환 (joblib 호환성)
+                # StringDtype 등 joblib이 직렬화하지 못하는 dtype 문제 해결
+                if hasattr(X_train, 'to_pandas'):
+                    X_train_pd = X_train.to_pandas()
+                    # StringDtype을 object dtype으로 변환 (joblib 호환성)
+                    for col in X_train_pd.columns:
+                        if hasattr(X_train_pd[col].dtype, 'name') and 'string' in str(X_train_pd[col].dtype).lower():
+                            X_train_pd[col] = X_train_pd[col].astype('object')
+                else:
+                    X_train_pd = X_train
+                    # StringDtype을 object dtype으로 변환
+                    for col in X_train_pd.columns:
+                        if hasattr(X_train_pd[col].dtype, 'name') and 'string' in str(X_train_pd[col].dtype).lower():
+                            X_train_pd[col] = X_train_pd[col].astype('object')
+                
+                if hasattr(X_val, 'to_pandas'):
+                    X_val_pd = X_val.to_pandas()
+                    # StringDtype을 object dtype으로 변환
+                    for col in X_val_pd.columns:
+                        if hasattr(X_val_pd[col].dtype, 'name') and 'string' in str(X_val_pd[col].dtype).lower():
+                            X_val_pd[col] = X_val_pd[col].astype('object')
+                else:
+                    X_val_pd = X_val
+                    # StringDtype을 object dtype으로 변환
+                    for col in X_val_pd.columns:
+                        if hasattr(X_val_pd[col].dtype, 'name') and 'string' in str(X_val_pd[col].dtype).lower():
+                            X_val_pd[col] = X_val_pd[col].astype('object')
+                
+                # y_train, y_val도 변환 (cuDF Series인 경우)
+                if hasattr(y_train, 'to_pandas'):
+                    y_train_pd = y_train.to_pandas()
+                else:
+                    y_train_pd = y_train
+                
+                if hasattr(y_val, 'to_pandas'):
+                    y_val_pd = y_val.to_pandas()
+                else:
+                    y_val_pd = y_val
+                
+                # 디렉토리 생성 (파일 저장 전)
+                # fold_cache_path는 문자열이므로 os.path.dirname 사용
+                fold_cache_dir = os.path.dirname(fold_cache_path)
+                os.makedirs(fold_cache_dir, exist_ok=True)
+                
+                # 변환된 데이터 저장
+                joblib.dump((X_train_pd, y_train_pd, X_val_pd, y_val_pd, train_imputation_map), fold_cache_path)
                 log_info(f"   ✅ Fold #{fold_idx+1}/3 데이터 파일 저장 완료.")
             except Exception as e:
                 log_warning(f"   ⚠️ Fold #{fold_idx+1} 데이터 파일 저장 실패: {e}. 학습은 계속 진행됩니다.")
+                import traceback
+                log_warning(f"   상세 오류:\n{traceback.format_exc()}")
     
     log_info(f"   ✅ Fold 데이터 로딩 완료 (총 {len(fold_data_cache)}개 Fold)")
     

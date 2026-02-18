@@ -901,6 +901,8 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
     
     # 모델 저장
     model_path = path_manager.data_dir / 'catboost_model.cbm'
+    # 디렉토리 생성 (파일 저장 전)
+    model_path.parent.mkdir(parents=True, exist_ok=True)
     final_model.save_model(str(model_path))
     log_info(f"   [OK] 모델 저장 완료: {model_path}")
     
@@ -1020,6 +1022,8 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
 
     # 중요도 파일 저장
     importance_path = path_manager.data_dir / 'catboost_feature_importance.csv'
+    # 디렉토리 생성 (파일 저장 전)
+    importance_path.parent.mkdir(parents=True, exist_ok=True)
     feature_importances.to_csv(importance_path, index=False)
     log_info(f"   [OK] 피처 중요도 저장 완료: {importance_path}")
 
@@ -1036,6 +1040,8 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
     }
     
     metadata_path = path_manager.data_dir / 'catboost_model_metadata.joblib'
+    # 디렉토리 생성 (파일 저장 전)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(metadata, metadata_path)
     log_info(f"   [OK] 메타데이터 저장 완료: {metadata_path}")
     

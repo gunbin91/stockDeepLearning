@@ -245,6 +245,7 @@ def predict_with_ml_model(df):
             # cuML scaler는 cuDF DataFrame을 받아야 함
             # 모델이 저장된 피처 순서대로 컬럼 정렬 (중요: 순서가 정확히 일치해야 함)
             try:
+                # 호환성 패치가 이미 적용되어 있음
                 import cudf
                 X_pred_ordered = X_pred[available_features]
                 X_pred_cudf = cudf.from_pandas(X_pred_ordered)
@@ -262,6 +263,7 @@ def predict_with_ml_model(df):
         elif is_cuml_model:
             # 스케일러를 사용하지 않음 (cuML 모델은 cuDF DataFrame 필요)
             # 모델이 저장된 피처 순서대로 컬럼 정렬 (중요: 순서가 정확히 일치해야 함)
+            # 호환성 패치가 이미 적용되어 있음
             import cudf
             X_pred_ordered = X_pred[available_features]
             X_pred_scaled = cudf.from_pandas(X_pred_ordered)
@@ -274,6 +276,7 @@ def predict_with_ml_model(df):
     except Exception as e:
         log_warning(f"   ⚠️ 스케일링 오류: {e}, 원본 데이터 사용")
         if is_cuml_model:
+            # 호환성 패치가 이미 적용되어 있음
             import cudf
             # 모델이 저장된 피처 순서대로 컬럼 정렬
             X_pred_ordered = X_pred[available_features]

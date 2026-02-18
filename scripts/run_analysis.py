@@ -152,6 +152,8 @@ def run_analysis(analysis_date_str):
             feature_df_for_json['종목코드'] = feature_df_for_json['종목코드'].astype(str).str.zfill(6)
             
         feature_df_path = os.path.join(str(path_manager.data_dir), 'cached_features.json')
+        # 디렉토리 생성 (파일 저장 전)
+        os.makedirs(os.path.dirname(feature_df_path), exist_ok=True)
         feature_df_for_json.to_json(feature_df_path, orient='records', force_ascii=False, indent=4)
         log_info(f"피처 데이터를 '{feature_df_path}'에 저장했습니다.")
         
@@ -188,6 +190,8 @@ def run_analysis(analysis_date_str):
             log_warning("   ⚠️ 일부 거시경제 지표 데이터가 누락되었습니다.")
         
         market_condition_path = os.path.join(str(path_manager.data_dir), 'market_condition.json')
+        # 디렉토리 생성 (파일 저장 전)
+        os.makedirs(os.path.dirname(market_condition_path), exist_ok=True)
         with open(market_condition_path, 'w', encoding='utf-8') as f:
             json.dump(market_condition, f, ensure_ascii=False, indent=4)
         log_info(f"   💾 시장 현황 데이터를 '{market_condition_path}'에 저장했습니다.")
@@ -394,6 +398,9 @@ def run_analysis(analysis_date_str):
             # 결과 파일로 저장
             log_info("💾 최종 분석 결과 저장 중...")
             result_path = os.path.join(str(path_manager.data_dir), 'analysis_result.json')
+            
+            # 디렉토리 생성 (파일 저장 전)
+            os.makedirs(os.path.dirname(result_path), exist_ok=True)
             
             # 날짜 필드를 문자열로 변환 (JSON 직렬화 위함)
             final_df_with_names['date'] = final_df_with_names['date'].dt.strftime('%Y-%m-%d')

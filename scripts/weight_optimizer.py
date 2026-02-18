@@ -181,8 +181,11 @@ if __name__ == '__main__':
         print(f"  - 최적 가중치: {best_weights}")
         if best_weights:
             output_path = str(path_manager.get_weights_path())
-            with open(output_path, 'w') as f:
-                json.dump(best_weights, f, indent=4)
+            # 디렉토리 생성 (파일 저장 전)
+            import os
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(best_weights, f, indent=4, ensure_ascii=False)
             print(f"`{output_path}` 파일에 최적 가중치를 저장했습니다.")
         else:
             print("유효한 최적 가중치를 찾지 못했습니다.")
