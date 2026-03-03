@@ -20,7 +20,6 @@ import sys
 import argparse
 from tqdm import tqdm
 import joblib
-import FinanceDataReader as fdr
 from datetime import datetime, timedelta
 import io
 import traceback
@@ -96,6 +95,9 @@ apply_sklearn_compatibility_patch()
 
 # 프로젝트 루트 경로를 sys.path에 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import data_fetcher  # KRX 세션 패치 적용
+import FinanceDataReader as fdr
 
 # 내부 모듈 임포트
 import ensemble
@@ -1749,7 +1751,7 @@ if __name__ == '__main__':
     parser.add_argument('--stop-loss', type=float, default=3.0, help='Stop loss percentage')
     parser.add_argument('--top-n', type=int, default=5, help='Number of stocks to buy')
     parser.add_argument('--buy-universe', type=int, default=20, help='Rank universe to consider for buying')
-    parser.add_argument('--fee', type=float, default=0.015, help='Transaction fee rate (e.g., 0.015 for 0.015%)')
+    parser.add_argument('--fee', type=float, default=0.015, help='Transaction fee rate (e.g., 0.015 for 0.015%%)')
     parser.add_argument('--start-date', type=str, default=None, help='Test start date (YYYY-MM-DD format, default: 1 year ago)')
     parser.add_argument('--end-date', type=str, default=None, help='Test end date (YYYY-MM-DD format, default: today)')
     parser.add_argument('--use-cache', action='store_true', help='Use cache for backtesting (load/save cache file)')

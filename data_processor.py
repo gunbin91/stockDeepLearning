@@ -17,6 +17,7 @@
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
+import data_fetcher  # KRX 세션 패치 적용
 from pykrx import stock
 from datetime import datetime, timedelta
 import pandas_ta as ta

@@ -43,6 +43,80 @@ from logger import (log_info, log_warning, log_error, log_critical, log_progress
 from exceptions import DataFetchError, DataValidationError
 
 from path_manager import path_manager
+import requests
+
+# =================================================================
+# KRX 세션 로그인 및 requests 패치
+# =================================================================
+_krx_session = requests.Session()
+
+def login_krx(login_id: str, login_pw: str) -> bool:
+    """
+    KRX data.krx.co.kr 로그인 후 세션 쿠키(JSESSIONID)를 갱신합니다.
+    """
+    _LOGIN_PAGE = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001.cmd"
+    _LOGIN_JSP  = "https://data.krx.co.kr/contents/MDC/COMS/client/view/login.jsp?site=mdc"
+    _LOGIN_URL  = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001D1.cmd"
+    _UA = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    )
+
+    try:
+        # 초기 세션 발급
+        _krx_session.get(_LOGIN_PAGE, headers={"User-Agent": _UA}, timeout=15)
+        _krx_session.get(_LOGIN_JSP, headers={"User-Agent": _UA, "Referer": _LOGIN_PAGE}, timeout=15)
+
+        payload = {
+            "mbrNm": "", "telNo": "", "di": "", "certType": "",
+            "mbrId": login_id, "pw": login_pw,
+        }
+        headers = {"User-Agent": _UA, "Referer": _LOGIN_PAGE}
+
+        # 로그인 POST
+        resp = _krx_session.post(_LOGIN_URL, data=payload, headers=headers, timeout=15)
+        data = resp.json()
+        error_code = data.get("_error_code", "")
+
+        # CD011 중복 로그인 처리
+        if error_code == "CD011":
+            payload["skipDup"] = "Y"
+            resp = _krx_session.post(_LOGIN_URL, data=payload, headers=headers, timeout=15)
+            data = resp.json()
+            error_code = data.get("_error_code", "")
+
+        if error_code == "CD001":
+            _patch_requests_for_fdr()
+            log_info("KRX 로그인 성공 및 세션 적용 완료")
+            return True
+        else:
+            log_warning(f"KRX 로그인 실패: {error_code}")
+            return False
+    except Exception as e:
+        log_error(f"KRX 로그인 과정 중 오류 발생: {e}")
+        return False
+
+def _patch_requests_for_fdr():
+    """FinanceDataReader 등이 전역 세션을 사용하도록 requests.get, requests.post를 패치합니다."""
+    if not hasattr(requests, '_original_get'):
+        requests._original_get = requests.get
+        requests._original_post = requests.post
+
+    def patched_get(url, **kwargs):
+        if isinstance(url, str) and ('krx.co.kr' in url or 'data.krx' in url or 'kind.krx' in url):
+            return _krx_session.get(url, **kwargs)
+        return requests._original_get(url, **kwargs)
+
+    def patched_post(url, data=None, json=None, **kwargs):
+        if isinstance(url, str) and ('krx.co.kr' in url or 'data.krx' in url or 'kind.krx' in url):
+            return _krx_session.post(url, data=data, json=json, **kwargs)
+        return requests._original_post(url, data=data, json=json, **kwargs)
+
+    requests.get = patched_get
+    requests.post = patched_post
+
+# 모듈 로드 시 즉시 로그인 수행 (아이디: gunbin52, 비밀번호: !rjsqls1357)
+login_krx("gunbin52", "!rjsqls1357")
 
 # =================================================================
 # 재무데이터(pykrx) 수집 사용 여부
@@ -340,7 +414,7 @@ def _fetch_macro_data(start_date, end_date):
                 try:
                     from data_processor import calculate_normalized_linear_regression_slope
                     kospi_ma20 = kospi_close.rolling(window=20).mean()
-                    macro_df['KOSPI_MA20_Slope'] = calculate_normalized_linear_regression_slope(kospi_ma20, window=20)
+                    macro_df['KOSPI_MA20_Slope'] = calculate_normalized_linear_regression_slope(kospi_ma20, window=5)
                 except Exception as e:
                     log_warning(f"KOSPI_MA20_Slope 계산 실패: {e}")
                     macro_df['KOSPI_MA20_Slope'] = np.nan
