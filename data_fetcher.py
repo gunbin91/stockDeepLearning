@@ -611,14 +611,16 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
 
         # =================================================================
         # 랭킹 제외 규칙 (요구사항 반영)
-        # - MA60이 MA120, MA240 둘 다 아래에 있고,
-        # - 종가가 MA60 아래에 있으면 제외
+        # - MA20이 MA120, MA240 둘 다 아래에 있고 종가가 MA60 아래에 있으면 제외
+        # - 또는, MA20이 20일 연속 하락(기울기 < 0)하고 종가가 MA20 아래에 있으면 제외
         #
         # 조건:
-        #   (MA60 < MA120) & (MA60 < MA240) & (종가 < MA60)
+        #   ( (MA20 < MA120) & (MA20 < MA240) & (종가 < MA60) ) |
+        #   ( (MA20 20일 연속 하락) & (종가 < MA20) )
         # =================================================================
         try:
             ma5_series = df_for_indicators['종가'].rolling(window=5).mean()
+            ma20_lvl = df_for_indicators['종가'].rolling(window=20).mean()
             ma60_lvl = df_for_indicators['종가'].rolling(window=60).mean()
             ma120_lvl = df_for_indicators['종가'].rolling(window=120).mean()
             ma240_lvl = df_for_indicators['종가'].rolling(window=240).mean()
@@ -631,18 +633,32 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
                 latest_data['MA5_Angle_Deg'] = np.nan
 
             # Exclude_Rank (일자별/시점별 동적 평가)
-            if len(ma60_lvl) and len(ma120_lvl) and len(ma240_lvl):
+            if len(ma20_lvl) and len(ma60_lvl) and len(ma120_lvl) and len(ma240_lvl):
+                ma20_last = ma20_lvl.iloc[-1]
                 ma60_last = ma60_lvl.iloc[-1]
                 ma120_last = ma120_lvl.iloc[-1]
                 ma240_last = ma240_lvl.iloc[-1]
                 close_last = df_for_indicators['종가'].iloc[-1]
-                latest_data['Exclude_Rank'] = bool(
-                    pd.notna(ma60_last) and pd.notna(ma240_last) and pd.notna(ma120_last)
+                
+                cond1 = (
+                    pd.notna(ma20_last) and pd.notna(ma60_last) and pd.notna(ma240_last) and pd.notna(ma120_last)
                     and pd.notna(close_last)
-                    and (ma60_last < ma120_last)
-                    and (ma60_last < ma240_last)
+                    and (ma20_last < ma120_last)
+                    and (ma20_last < ma240_last)
                     and (close_last < ma60_last)
                 )
+
+                if len(ma20_lvl) >= 21:
+                    ma20_diff = ma20_lvl.diff().dropna()
+                    if len(ma20_diff) >= 20:
+                        ma20_down_20_days = (ma20_diff.iloc[-20:] < 0).all()
+                        cond2 = bool(ma20_down_20_days and (close_last < ma20_last))
+                    else:
+                        cond2 = False
+                else:
+                    cond2 = False
+
+                latest_data['Exclude_Rank'] = bool(cond1 or cond2)
             else:
                 latest_data['Exclude_Rank'] = False
         except Exception:

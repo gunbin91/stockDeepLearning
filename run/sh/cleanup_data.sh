@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 정리할 데이터 경로 설정
-DATA_PATH=~/stock_data/processed_feather
+DATA_PATH=~/stock_data/processed_feathe
 IMPUTATION_VALUES_PATH=~/stock_data/imputation_values.joblib
 FOLD_CACHE_PATH=~/stock_data/fold_cache
 
