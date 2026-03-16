@@ -356,7 +356,9 @@ def _fetch_macro_data(start_date, end_date):
                 # 날짜 인덱스를 안전하게 처리 (format='mixed' 사용)
                 kospi_copy = kospi.copy()
                 kospi_copy.index = pd.to_datetime(kospi_copy.index, format='mixed', errors='coerce')
-                macro_data['KOSPI'] = kospi_copy['Close']
+                kospi_series = kospi_copy['Close'].dropna()  # NaT 제거
+                kospi_series = kospi_series[~kospi_series.index.duplicated(keep='first')]  # 중복 인덱스 제거
+                macro_data['KOSPI'] = kospi_series
         except Exception as e:
             log_warning(f"KOSPI 데이터 수집 실패: {e}")
         
@@ -366,7 +368,9 @@ def _fetch_macro_data(start_date, end_date):
                 # 날짜 인덱스를 안전하게 처리 (format='mixed' 사용)
                 usdkrw_copy = usdkrw.copy()
                 usdkrw_copy.index = pd.to_datetime(usdkrw_copy.index, format='mixed', errors='coerce')
-                macro_data['USDKRW'] = usdkrw_copy['Close']
+                usdkrw_series = usdkrw_copy['Close'].dropna()  # NaT 제거
+                usdkrw_series = usdkrw_series[~usdkrw_series.index.duplicated(keep='first')]  # 중복 인덱스 제거
+                macro_data['USDKRW'] = usdkrw_series
         except Exception as e:
             log_warning(f"USD/KRW 데이터 수집 실패: {e}")
         
@@ -376,7 +380,9 @@ def _fetch_macro_data(start_date, end_date):
                 # 날짜 인덱스를 안전하게 처리 (format='mixed' 사용)
                 vix_copy = vix.copy()
                 vix_copy.index = pd.to_datetime(vix_copy.index, format='mixed', errors='coerce')
-                macro_data['VIX'] = vix_copy['Close']
+                vix_series = vix_copy['Close'].dropna()  # NaT 제거
+                vix_series = vix_series[~vix_series.index.duplicated(keep='first')]  # 중복 인덱스 제거
+                macro_data['VIX'] = vix_series
         except Exception as e:
             log_warning(f"VIX 데이터 수집 실패: {e}")
             
@@ -612,11 +618,11 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         # =================================================================
         # 랭킹 제외 규칙 (요구사항 반영)
         # - MA20이 MA120, MA240 둘 다 아래에 있고 종가가 MA60 아래에 있으면 제외
-        # - 또는, MA20이 20일 연속 하락(기울기 < 0)하고 종가가 MA20 아래에 있으면 제외
+        # - 또는, MA20이 14거래일 연속 하락(전일 대비 변화량 < 0)하고 종가가 MA20 아래에 있으면 제외
         #
         # 조건:
         #   ( (MA20 < MA120) & (MA20 < MA240) & (종가 < MA60) ) |
-        #   ( (MA20 20일 연속 하락) & (종가 < MA20) )
+        #   ( (MA20이 14거래일 연속 하락) & (종가 < MA20) )
         # =================================================================
         try:
             ma5_series = df_for_indicators['종가'].rolling(window=5).mean()
@@ -648,11 +654,11 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
                     and (close_last < ma60_last)
                 )
 
-                if len(ma20_lvl) >= 21:
+                if len(ma20_lvl) >= 15:
                     ma20_diff = ma20_lvl.diff().dropna()
-                    if len(ma20_diff) >= 20:
-                        ma20_down_20_days = (ma20_diff.iloc[-20:] < 0).all()
-                        cond2 = bool(ma20_down_20_days and (close_last < ma20_last))
+                    if len(ma20_diff) >= 14:
+                        ma20_down_14_days = (ma20_diff.iloc[-14:] < 0).all()
+                        cond2 = bool(ma20_down_14_days and (close_last < ma20_last))
                     else:
                         cond2 = False
                 else:

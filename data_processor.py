@@ -497,7 +497,9 @@ def _fetch_macro_data(start_date, end_date):
             if not kospi.empty:
                 kospi_copy = kospi.copy()
                 kospi_copy.index = pd.to_datetime(kospi_copy.index, format='mixed', errors='coerce')
-                macro_data['KOSPI'] = kospi_copy['Close']
+                kospi_series = kospi_copy['Close'].dropna()  # NaT 제거
+                kospi_series = kospi_series[~kospi_series.index.duplicated(keep='first')]  # 중복 인덱스 제거
+                macro_data['KOSPI'] = kospi_series
         except Exception as e:
             log_warning(f"KOSPI 데이터 수집 실패: {e}")
         
@@ -506,7 +508,9 @@ def _fetch_macro_data(start_date, end_date):
             if not usdkrw.empty:
                 usdkrw_copy = usdkrw.copy()
                 usdkrw_copy.index = pd.to_datetime(usdkrw_copy.index, format='mixed', errors='coerce')
-                macro_data['USDKRW'] = usdkrw_copy['Close']
+                usdkrw_series = usdkrw_copy['Close'].dropna()  # NaT 제거
+                usdkrw_series = usdkrw_series[~usdkrw_series.index.duplicated(keep='first')]  # 중복 인덱스 제거
+                macro_data['USDKRW'] = usdkrw_series
         except Exception as e:
             log_warning(f"USD/KRW 데이터 수집 실패: {e}")
         
@@ -515,7 +519,9 @@ def _fetch_macro_data(start_date, end_date):
             if not vix.empty:
                 vix_copy = vix.copy()
                 vix_copy.index = pd.to_datetime(vix_copy.index, format='mixed', errors='coerce')
-                macro_data['VIX'] = vix_copy['Close']
+                vix_series = vix_copy['Close'].dropna()  # NaT 제거
+                vix_series = vix_series[~vix_series.index.duplicated(keep='first')]  # 중복 인덱스 제거
+                macro_data['VIX'] = vix_series
         except Exception as e:
             log_warning(f"VIX 데이터 수집 실패: {e}")
         
@@ -1071,11 +1077,11 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         # =================================================================
         # 랭킹 제외 규칙 (요구사항 반영)
         # - MA20이 MA120, MA240 둘 다 아래에 있고 종가가 MA60 아래에 있으면 제외
-        # - 또는, MA20이 20일 연속 하락(기울기 < 0)하고 종가가 MA20 아래에 있으면 제외
+        # - 또는, MA20이 14거래일 연속 하락(전일 대비 변화량 < 0)하고 종가가 MA20 아래에 있으면 제외
         #
         # 조건:
         #   ( (MA20 < MA120) & (MA20 < MA240) & (종가 < MA60) ) |
-        #   ( (MA20 20일 연속 하락) & (종가 < MA20) )
+        #   ( (MA20이 14거래일 연속 하락) & (종가 < MA20) )
         # =================================================================
         try:
             ma5 = df['종가'].rolling(window=5).mean()
@@ -1088,13 +1094,13 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             delta = (ma5 - ma5_prev) / ma5_prev.replace(0, np.nan)
             df['MA5_Angle_Deg'] = np.degrees(np.arctan(delta.astype(float)))
 
-            # 20일 연속 MA20 하락 확인
+            # 14거래일 연속 MA20 하락 확인
             ma20_diff = ma20_lvl.diff()
             ma20_down = (ma20_diff < 0).astype(int)
-            ma20_down_20_days = ma20_down.rolling(window=20).sum() == 20
+            ma20_down_14_days = ma20_down.rolling(window=14).sum() == 14
 
             cond1 = (ma20_lvl < ma120_lvl) & (ma20_lvl < ma240_lvl) & (df['종가'] < ma60_lvl)
-            cond2 = ma20_down_20_days & (df['종가'] < ma20_lvl)
+            cond2 = ma20_down_14_days & (df['종가'] < ma20_lvl)
 
             df['Exclude_Rank'] = cond1 | cond2
         except Exception:
