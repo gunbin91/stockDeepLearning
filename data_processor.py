@@ -161,12 +161,15 @@ def clear_global_feature_data():
     _global_financial_data = None
     gc.collect()
 
-def fetch_stock_list():
+def fetch_stock_list(min_marcap=10_000_000_000):
     """
     주식 목록 수집 함수
     
     KOSPI와 KOSDAQ에 상장된 모든 종목의 목록을 수집합니다.
     스팩, 리츠 등은 제외하고 일반 주식만 수집합니다.
+    
+    Args:
+        min_marcap: 최소 시가총액 (기본값: 100억원 = 10,000,000,000원)
     
     Returns:
         pandas.DataFrame: 종목코드, 종목명, 시장구분이 포함된 데이터프레임
@@ -199,14 +202,14 @@ def fetch_stock_list():
                     if 'Stocks' in df_marcap.columns:
                         df_marcap = df_marcap[df_marcap['Stocks'] > 0]
                     
-                    # 시가총액 100억 미만 제외 (100억 = 10,000,000,000원)
+                    # 시가총액 필터링 (전 구간 공통 유니버스 컷)
                     if 'Marcap' in df_marcap.columns:
-                        min_marcap = 10_000_000_000  # 100억원
+                        min_marcap_billion = min_marcap / 1_000_000_000  # 억원 단위로 변환
                         before_count = len(df_marcap)
                         df_marcap = df_marcap[df_marcap['Marcap'] >= min_marcap].copy()
                         excluded_count = before_count - len(df_marcap)
                         if excluded_count > 0:
-                            log_info(f"시가총액 100억 미만 종목 {excluded_count}개 제외")
+                            log_info(f"시가총액 {min_marcap_billion:.0f}억 미만 종목 {excluded_count}개 제외")
                     
                     # 컬럼명 정리 및 종목코드 6자리 패딩
                     stock_list = df_marcap[['Code', 'Name']].copy()
@@ -1078,10 +1081,12 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         # 랭킹 제외 규칙 (요구사항 반영)
         # - MA20이 MA120, MA240 둘 다 아래에 있고 종가가 MA60 아래에 있으면 제외
         # - 또는, MA20이 14거래일 연속 하락(전일 대비 변화량 < 0)하고 종가가 MA20 아래에 있으면 제외
+        # - 또는, 당일 시가총액이 1000억 미만이면 제외 (시점별 유니버스 강화용)
         #
         # 조건:
         #   ( (MA20 < MA120) & (MA20 < MA240) & (종가 < MA60) ) |
-        #   ( (MA20이 14거래일 연속 하락) & (종가 < MA20) )
+        #   ( (MA20이 14거래일 연속 하락) & (종가 < MA20) ) |
+        #   ( 시가총액 < 1000억 )
         # =================================================================
         try:
             ma5 = df['종가'].rolling(window=5).mean()
@@ -1102,7 +1107,16 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             cond1 = (ma20_lvl < ma120_lvl) & (ma20_lvl < ma240_lvl) & (df['종가'] < ma60_lvl)
             cond2 = ma20_down_14_days & (df['종가'] < ma20_lvl)
 
-            df['Exclude_Rank'] = cond1 | cond2
+            # 시가총액 1000억 미만 종목 제외 (당일 조건)
+            if '시가총액' in df.columns:
+                try:
+                    cond3 = df['시가총액'] < 100_000_000_000
+                except Exception:
+                    cond3 = False
+            else:
+                cond3 = False
+
+            df['Exclude_Rank'] = cond1 | cond2 | cond3
         except Exception:
             # 계산 실패 시에도 기존 파이프라인은 유지
             df['MA5_Angle_Deg'] = np.nan
@@ -1162,17 +1176,18 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
 
 
 
-def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
+def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False, min_marcap=10_000_000_000):
     """실시간 데이터 수집 및 전처리
     
     Args:
         start_date: 시작 날짜
         end_date: 종료 날짜
         skip_factor_scores: True일 경우 팩터 점수 계산을 건너뜀 (학습용 데이터 생성 시 사용)
+        min_marcap: 최소 시가총액 (기본값: 100억원 = 10,000,000,000원, 공통 유니버스 컷)
     """
     log_info(f"실시간 데이터 수집 시작 ({start_date} ~ {end_date})...")
     
-    stock_list = fetch_stock_list()
+    stock_list = fetch_stock_list(min_marcap=min_marcap)
     if stock_list.empty: 
         raise ValueError("종목 리스트를 가져올 수 없습니다.")
     
@@ -1496,13 +1511,14 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     
     return final_df
 
-def get_preprocessed_data(start_date, end_date, skip_factor_scores=False):
+def get_preprocessed_data(start_date, end_date, skip_factor_scores=False, min_marcap=10_000_000_000):
     """실시간 데이터 전처리 함수
     
     Args:
         start_date: 시작 날짜
         end_date: 종료 날짜
         skip_factor_scores: True일 경우 팩터 점수 계산을 건너뜀 (학습용 데이터 생성 시 사용)
+        min_marcap: 최소 시가총액 (기본값: 100억원 = 10,000,000,000원, 공통 유니버스 컷)
     """
     try:
         log_info("🔄 실시간 데이터 수집 시작", context={
@@ -1511,7 +1527,7 @@ def get_preprocessed_data(start_date, end_date, skip_factor_scores=False):
             "mode": "realtime"
         })
         
-        return _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=skip_factor_scores)
+        return _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=skip_factor_scores, min_marcap=min_marcap)
         
     except Exception as e:
         log_critical("실시간 데이터 수집 중 오류", exception=e, context={

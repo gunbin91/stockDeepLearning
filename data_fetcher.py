@@ -283,8 +283,13 @@ def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
 
 
 
-def _get_stock_list_from_marcap(analysis_date=None):
-    """KRX-MARCAP에서 주식 목록 가져오기 (통일된 함수)"""
+def _get_stock_list_from_marcap(analysis_date=None, min_marcap=10_000_000_000):
+    """KRX-MARCAP에서 주식 목록 가져오기 (통일된 함수)
+    
+    Args:
+        analysis_date: 분석 기준일 (None이면 현재 날짜)
+        min_marcap: 최소 시가총액 (기본값: 100억원 = 10,000,000,000원)
+    """
     try:
         if analysis_date:
             # 과거 날짜용
@@ -308,14 +313,14 @@ def _get_stock_list_from_marcap(analysis_date=None):
         if 'Stocks' in df_marcap.columns:
             df_marcap = df_marcap[df_marcap['Stocks'] > 0]
         
-        # 시가총액 100억 미만 제외 (100억 = 10,000,000,000원)
+        # 시가총액 필터링 (전 구간 공통 유니버스 컷)
         if 'Marcap' in df_marcap.columns:
-            min_marcap = 10_000_000_000  # 100억원
+            min_marcap_billion = min_marcap / 1_000_000_000  # 억원 단위로 변환
             before_count = len(df_marcap)
             df_marcap = df_marcap[df_marcap['Marcap'] >= min_marcap].copy()
             excluded_count = before_count - len(df_marcap)
             if excluded_count > 0:
-                log_info(f"시가총액 100억 미만 종목 {excluded_count}개 제외")
+                log_info(f"시가총액 {min_marcap_billion:.0f}억 미만 종목 {excluded_count}개 제외")
         
         # 컬럼명 정리 및 종목코드 6자리 패딩
         stock_list = df_marcap[['Code', 'Name', 'Stocks']].copy()
@@ -332,13 +337,22 @@ def _get_stock_list_from_marcap(analysis_date=None):
         log_error(error_msg)
         raise DataFetchError(error_msg, source="FinanceDataReader")
 
-def fetch_stock_list():
-    """현재 날짜 기준 주식 목록 가져오기 (캐시 없이 실시간 수집)"""
-    return _get_stock_list_from_marcap()
+def fetch_stock_list(min_marcap=10_000_000_000):
+    """현재 날짜 기준 주식 목록 가져오기 (캐시 없이 실시간 수집)
+    
+    Args:
+        min_marcap: 최소 시가총액 (기본값: 100억원 = 10,000,000,000원)
+    """
+    return _get_stock_list_from_marcap(analysis_date=None, min_marcap=min_marcap)
 
-def fetch_stock_list_for_date(analysis_date):
-    """특정 날짜 기준 주식 목록 가져오기 (캐시 없음)"""
-    return _get_stock_list_from_marcap(analysis_date)
+def fetch_stock_list_for_date(analysis_date, min_marcap=10_000_000_000):
+    """특정 날짜 기준 주식 목록 가져오기 (캐시 없음)
+    
+    Args:
+        analysis_date: 분석 기준일
+        min_marcap: 최소 시가총액 (기본값: 100억원 = 10,000,000,000원)
+    """
+    return _get_stock_list_from_marcap(analysis_date=analysis_date, min_marcap=min_marcap)
 
 def _fetch_macro_data(start_date, end_date):
     log_info(f"거시 경제 지표 데이터 수집 중 ({start_date} ~ {end_date})...")
@@ -619,10 +633,12 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         # 랭킹 제외 규칙 (요구사항 반영)
         # - MA20이 MA120, MA240 둘 다 아래에 있고 종가가 MA60 아래에 있으면 제외
         # - 또는, MA20이 14거래일 연속 하락(전일 대비 변화량 < 0)하고 종가가 MA20 아래에 있으면 제외
+        # - 또는, 당일 시가총액이 1000억 미만이면 제외 (당일 조건)
         #
         # 조건:
         #   ( (MA20 < MA120) & (MA20 < MA240) & (종가 < MA60) ) |
-        #   ( (MA20이 14거래일 연속 하락) & (종가 < MA20) )
+        #   ( (MA20이 14거래일 연속 하락) & (종가 < MA20) ) |
+        #   ( 시가총액 < 1000억 )
         # =================================================================
         try:
             ma5_series = df_for_indicators['종가'].rolling(window=5).mean()
@@ -663,8 +679,16 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
                         cond2 = False
                 else:
                     cond2 = False
+                
+                # 시가총액 1000억 미만 종목 제외 (당일 조건, 억 단위 값 사용)
+                # latest_data['시가총액']은 억 단위로 저장됨
+                try:
+                    market_cap_billion = latest_data.get('시가총액', None)
+                    cond3 = bool(pd.notna(market_cap_billion) and market_cap_billion < 1000)
+                except Exception:
+                    cond3 = False
 
-                latest_data['Exclude_Rank'] = bool(cond1 or cond2)
+                latest_data['Exclude_Rank'] = bool(cond1 or cond2 or cond3)
             else:
                 latest_data['Exclude_Rank'] = False
         except Exception:

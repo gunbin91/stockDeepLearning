@@ -600,7 +600,8 @@ def prepare_data_and_save(data_path, start_date, end_date):
         # 이 단계에서 메모리 사용량이 일시적으로 크게 증가함
 
         # 학습용 데이터 생성 시 팩터 점수 계산 건너뛰기 (백테스팅에서만 필요)
-        full_df = data_processor.get_preprocessed_data(actual_start_date, end_date, skip_factor_scores=True)
+        # 학습 데이터는 100억 미만 종목도 포함 (100억 = 10,000,000,000원)
+        full_df = data_processor.get_preprocessed_data(actual_start_date, end_date, skip_factor_scores=True, min_marcap=10_000_000_000)
 
         log_memory_usage("전체 데이터 로딩 완료")
 

@@ -117,7 +117,8 @@ def prepare_data_and_save(data_path, start_date, end_date):
 
     try:
         # data_processor를 통해 모든 피처가 계산된 거대 데이터프레임 생성
-        full_df = data_processor.get_preprocessed_data(actual_start_date, end_date, skip_factor_scores=True)
+        # 학습 데이터는 100억 미만 종목도 포함 (100억 = 10,000,000,000원)
+        full_df = data_processor.get_preprocessed_data(actual_start_date, end_date, skip_factor_scores=True, min_marcap=10_000_000_000)
 
         log_memory_usage("전체 데이터 로딩 완료")
 
