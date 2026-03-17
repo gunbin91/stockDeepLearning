@@ -133,8 +133,9 @@ DATA_DIR = str(path_manager.data_dir)
 # Copy-on-Write로 공유되어 메모리 효율적이고 빠르게 접근 가능합니다.
 _global_marcap_data = None
 _global_financial_data = None
+_global_apply_daily_exclusion = True  # 기본값: True (백테스트/실시간 분석 모드)
 
-def set_global_feature_data(marcap_data, financial_data):
+def set_global_feature_data(marcap_data, financial_data, apply_daily_exclusion=True):
     """
     전역 피처 데이터 설정 함수
     
@@ -145,10 +146,12 @@ def set_global_feature_data(marcap_data, financial_data):
     Args:
         marcap_data: 시가총액 데이터 (pandas.DataFrame)
         financial_data: 재무 데이터 (pandas.DataFrame)
+        apply_daily_exclusion: True일 경우 당일 제외 조건(1000억 미만 등) 적용, False일 경우 학습 모드로 cond3 제외
     """
-    global _global_marcap_data, _global_financial_data
+    global _global_marcap_data, _global_financial_data, _global_apply_daily_exclusion
     _global_marcap_data = marcap_data
     _global_financial_data = financial_data
+    _global_apply_daily_exclusion = apply_daily_exclusion
 
 def clear_global_feature_data():
     """
@@ -156,9 +159,10 @@ def clear_global_feature_data():
     
     사용 후 메모리 해제를 위해 호출합니다.
     """
-    global _global_marcap_data, _global_financial_data
+    global _global_marcap_data, _global_financial_data, _global_apply_daily_exclusion
     _global_marcap_data = None
     _global_financial_data = None
+    _global_apply_daily_exclusion = True  # 기본값으로 리셋
     gc.collect()
 
 def fetch_stock_list(min_marcap=10_000_000_000):
@@ -645,7 +649,7 @@ def fetch_ticker_price_data(stock_info, start_date, end_date):
 
 
 
-def calculate_ticker_features(ticker, df_price, stock_name=None):
+def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exclusion=None):
     """
     단일 종목 피처 계산 함수 (CPU 작업)
     
@@ -656,10 +660,17 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
     Args:
         ticker: 종목코드
         df_price: 다운로드된 주가 데이터 (시가, 종가, 고가, 저가, 거래량)
+        stock_name: 종목명 (선택사항)
+        apply_daily_exclusion: None일 경우 전역 변수 사용, True일 경우 당일 제외 조건(1000억 미만 등) 적용, False일 경우 학습 모드로 cond3 제외
         
     Returns:
         pandas.DataFrame: 처리된 종목 데이터
     """
+    global _global_apply_daily_exclusion
+    
+    # apply_daily_exclusion이 None이면 전역 변수 사용
+    if apply_daily_exclusion is None:
+        apply_daily_exclusion = _global_apply_daily_exclusion
     global _global_marcap_data, _global_financial_data
     
     try:
@@ -790,6 +801,22 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         except Exception as e:
             log_warning(f"ADX 계산 실패 ({ticker}): {e}")
             df['ADX_14'] = np.nan
+        
+        # =================================================================
+        # [단일 핵심 피처] CLV (Close Location Value, 종가 위치 지수)
+        # 캔들 내 매수/매도 힘의 우위를 -1(매도 압승) ~ +1(매수 압승)로 수치화
+        # =================================================================
+        try:
+            # 수식: (2 * 종가 - 고가 - 저가) / (고가 - 저가)
+            # 분모가 0이 되는 것(예: 점상한가/점하한가)을 방지하기 위해 1e-8 추가
+            df['CLV'] = (2 * df['종가'] - df['고가'] - df['저가']) / (df['고가'] - df['저가'] + 1e-8)
+            
+            # 부동소수점 오차로 인해 -1이나 1을 미세하게 넘는 경우를 방지
+            df['CLV'] = df['CLV'].clip(-1.0, 1.0)
+            
+        except Exception as e:
+            log_warning(f"CLV 계산 실패 ({ticker}): {e}")
+            df['CLV'] = np.nan
         
         # RSI_14 계산
         try:
@@ -1107,8 +1134,8 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             cond1 = (ma20_lvl < ma120_lvl) & (ma20_lvl < ma240_lvl) & (df['종가'] < ma60_lvl)
             cond2 = ma20_down_14_days & (df['종가'] < ma20_lvl)
 
-            # 시가총액 1000억 미만 종목 제외 (당일 조건)
-            if '시가총액' in df.columns:
+            # 시가총액 1000억 미만 종목 제외 (당일 조건, 학습 모드에서는 제외)
+            if apply_daily_exclusion and '시가총액' in df.columns:
                 try:
                     cond3 = df['시가총액'] < 100_000_000_000
                 except Exception:
@@ -1373,7 +1400,9 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False, min_
         raise ValueError("다운로드된 데이터가 없습니다.")
     
     # 전역 변수에 데이터 설정 (fork 방식에서 Copy-on-Write로 효율적으로 공유됨)
-    set_global_feature_data(df_marcap_long, df_financial_long)
+    # skip_factor_scores가 True면 학습 모드이므로 apply_daily_exclusion=False
+    apply_daily_exclusion = not skip_factor_scores
+    set_global_feature_data(df_marcap_long, df_financial_long, apply_daily_exclusion=apply_daily_exclusion)
     
     # =================================================================
     # 2단계: ProcessPoolExecutor로 피처 계산 (CPU 작업)

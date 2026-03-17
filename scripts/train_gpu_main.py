@@ -591,6 +591,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
         # Gap 피처 제거
         # 신규 추가
         'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
+        'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
     ]
 
     try:
@@ -2231,6 +2232,7 @@ def main():
         # Gap 피처 제거
         # 신규 추가
         'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
+        'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
     ]
     
     # 전체 데이터 중앙값 계산 제거 (Fold별로 Train 데이터만으로 계산)

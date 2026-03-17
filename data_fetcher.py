@@ -586,6 +586,27 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         
         df_for_indicators.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
         
+        # =================================================================
+        # [단일 핵심 피처] CLV (Close Location Value, 종가 위치 지수)
+        # 캔들 내 매수/매도 힘의 우위를 -1(매도 압승) ~ +1(매수 압승)로 수치화
+        # =================================================================
+        try:
+            # 수식: (2 * 종가 - 고가 - 저가) / (고가 - 저가)
+            # 분모가 0이 되는 것(예: 점상한가/점하한가)을 방지하기 위해 1e-8 추가
+            close_last = df_for_indicators['종가'].iloc[-1]
+            high_last = df_for_indicators['고가'].iloc[-1]
+            low_last = df_for_indicators['저가'].iloc[-1]
+            
+            denominator = high_last - low_last + 1e-8
+            clv_value = (2 * close_last - high_last - low_last) / denominator
+            
+            # 부동소수점 오차로 인해 -1이나 1을 미세하게 넘는 경우를 방지
+            latest_data['CLV'] = float(np.clip(clv_value, -1.0, 1.0))
+            
+        except Exception as e:
+            log_warning(f"CLV 계산 실패 ({ticker}): {e}")
+            latest_data['CLV'] = np.nan
+        
         # RSI_14 계산
         rsi_14 = df_for_indicators.ta.rsi(close='종가', length=14)
         

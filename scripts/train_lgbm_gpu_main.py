@@ -113,6 +113,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
         'HV_Volatility_60',
         'VWAP_Disparity_5',
         'Max_Drawdown_20',
+        'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
     ]
 
     try:
@@ -1205,6 +1206,7 @@ def main():
         'HV_Volatility_60',
         'VWAP_Disparity_5',
         'Max_Drawdown_20',
+        'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
     ]
 
     # --- 3. Fold 분할 (날짜 기반) ---

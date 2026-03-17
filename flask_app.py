@@ -1616,6 +1616,7 @@ def get_stock_features(ticker_code):
             # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
             # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
             'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
+            'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
         ]
         
         # 등락율 계산 등 다른 부분에 영향있는 필수 피처 (표시용)
@@ -2025,6 +2026,7 @@ def calculate_feature_correlation():
             # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
             # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
             'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
+            'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
         ]
         
         data_source = None

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 정리할 데이터 경로 설정
-DATA_PATH=~/stock_data/processed_feathe
+DATA_PATH=~/stock_data/processed_feather
 IMPUTATION_VALUES_PATH=~/stock_data/imputation_values.joblib
 FOLD_CACHE_PATH=~/stock_data/fold_cache
 
@@ -32,7 +32,7 @@ if [ "$HAS_DATA" = true ]; then
         
         # 전처리 데이터 디렉토리 삭제
         if [ -d "$DATA_PATH" ]; then
-        rm -rf "$DATA_PATH"
+            rm -rf "$DATA_PATH"
             echo "   ✅ 전처리 데이터 디렉토리가 삭제되었습니다."
         fi
         
