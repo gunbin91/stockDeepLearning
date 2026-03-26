@@ -120,6 +120,8 @@ CUML_MODEL_FILE = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
 MODEL_FILE = str(path_manager.get_model_path())
 JSON_REPORT_FILE = str(path_manager.data_dir / 'backtest_report.json')
 TOP_N_STOCKS = 5
+# 캐시에 Exclude_Rank(cond3: 시총 1000억 미만) 반영 여부 등 파이프라인 변경 시 올려 무효화
+BACKTEST_CACHE_SCHEMA_VERSION = 2
 
 # --- 백테스팅 캐시 관련 함수 ---
 
@@ -139,6 +141,13 @@ def load_backtest_cache():
             # 메타데이터 로드
             with open(meta_file, 'r', encoding='utf-8') as f:
                 meta = json.load(f)
+            cached_ver = meta.get('backtest_cache_schema_version', 1)
+            if cached_ver != BACKTEST_CACHE_SCHEMA_VERSION:
+                log_warning(
+                    f"⚠️ 백테스팅 캐시 스키마 불일치(파일: {cached_ver}, 필요: {BACKTEST_CACHE_SCHEMA_VERSION}). "
+                    "시총 1000억 미만 제외 등 반영을 위해 재수집합니다."
+                )
+                return None, None
             # 데이터 로드
             data = pd.read_feather(cache_file)
             # final_score는 가중치에 따라 달라지므로 캐시에서 제거
@@ -196,7 +205,8 @@ def save_backtest_cache(data, start_date, end_date):
             'end_date': end_date_str,
             'created_at': datetime.now().isoformat(),
             'data_rows': len(data),
-            'data_columns': list(data.columns)
+            'data_columns': list(data.columns),
+            'backtest_cache_schema_version': BACKTEST_CACHE_SCHEMA_VERSION,
         }
         with open(meta_file, 'w', encoding='utf-8') as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -1457,7 +1467,8 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                 test_data = data_processor.get_preprocessed_data(
                     backtest_start_date_with_warmup,
                     end_date,
-                    skip_factor_scores=True
+                    skip_factor_scores=True,
+                    apply_daily_exclusion=True,
                 )
                 
                 # 즉시 빈 데이터 검증 (초기 수집/병합 실패 조기 발견)

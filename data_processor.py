@@ -16,6 +16,7 @@
 
 import pandas as pd
 import numpy as np
+from typing import Optional
 import FinanceDataReader as fdr
 import data_fetcher  # KRX 세션 패치 적용
 from pykrx import stock
@@ -1203,7 +1204,13 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exc
 
 
 
-def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False, min_marcap=10_000_000_000):
+def _fetch_and_prepare_data(
+    start_date,
+    end_date,
+    skip_factor_scores=False,
+    min_marcap=10_000_000_000,
+    apply_daily_exclusion: Optional[bool] = None,
+):
     """실시간 데이터 수집 및 전처리
     
     Args:
@@ -1211,6 +1218,9 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False, min_
         end_date: 종료 날짜
         skip_factor_scores: True일 경우 팩터 점수 계산을 건너뜀 (학습용 데이터 생성 시 사용)
         min_marcap: 최소 시가총액 (기본값: 100억원 = 10,000,000,000원, 공통 유니버스 컷)
+        apply_daily_exclusion: None이면 skip_factor_scores와 연동(not skip_factor_scores).
+            True/False를 주면 시총 1000억 미만 등 일별 랭킹 제외(cond3) 적용 여부를 직접 지정
+            (백테스트는 skip_factor_scores=True 유지하면서 True로 줄 수 있음).
     """
     log_info(f"실시간 데이터 수집 시작 ({start_date} ~ {end_date})...")
     
@@ -1400,9 +1410,16 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False, min_
         raise ValueError("다운로드된 데이터가 없습니다.")
     
     # 전역 변수에 데이터 설정 (fork 방식에서 Copy-on-Write로 효율적으로 공유됨)
-    # skip_factor_scores가 True면 학습 모드이므로 apply_daily_exclusion=False
-    apply_daily_exclusion = not skip_factor_scores
-    set_global_feature_data(df_marcap_long, df_financial_long, apply_daily_exclusion=apply_daily_exclusion)
+    # 기본: skip_factor_scores가 True면 학습 모드 → apply_daily_exclusion=False
+    # 명시 인자가 있으면 백테스트 등에서 skip_factor_scores와 독립적으로 cond3(시총 1000억 미만) 제어 가능
+    effective_apply_daily_exclusion = (
+        apply_daily_exclusion if apply_daily_exclusion is not None else (not skip_factor_scores)
+    )
+    if apply_daily_exclusion is not None and skip_factor_scores and effective_apply_daily_exclusion:
+        log_info("   ℹ️ skip_factor_scores=True 이지만 apply_daily_exclusion=True → 시총 1000억 미만 랭킹 제외(cond3) 적용")
+    set_global_feature_data(
+        df_marcap_long, df_financial_long, apply_daily_exclusion=effective_apply_daily_exclusion
+    )
     
     # =================================================================
     # 2단계: ProcessPoolExecutor로 피처 계산 (CPU 작업)
@@ -1540,7 +1557,13 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False, min_
     
     return final_df
 
-def get_preprocessed_data(start_date, end_date, skip_factor_scores=False, min_marcap=10_000_000_000):
+def get_preprocessed_data(
+    start_date,
+    end_date,
+    skip_factor_scores=False,
+    min_marcap=10_000_000_000,
+    apply_daily_exclusion: Optional[bool] = None,
+):
     """실시간 데이터 전처리 함수
     
     Args:
@@ -1548,6 +1571,7 @@ def get_preprocessed_data(start_date, end_date, skip_factor_scores=False, min_ma
         end_date: 종료 날짜
         skip_factor_scores: True일 경우 팩터 점수 계산을 건너뜀 (학습용 데이터 생성 시 사용)
         min_marcap: 최소 시가총액 (기본값: 100억원 = 10,000,000,000원, 공통 유니버스 컷)
+        apply_daily_exclusion: None이면 skip_factor_scores와 연동. 백테스트는 True로 시총 1000억 미만 제외 적용.
     """
     try:
         log_info("🔄 실시간 데이터 수집 시작", context={
@@ -1556,7 +1580,13 @@ def get_preprocessed_data(start_date, end_date, skip_factor_scores=False, min_ma
             "mode": "realtime"
         })
         
-        return _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=skip_factor_scores, min_marcap=min_marcap)
+        return _fetch_and_prepare_data(
+            start_date,
+            end_date,
+            skip_factor_scores=skip_factor_scores,
+            min_marcap=min_marcap,
+            apply_daily_exclusion=apply_daily_exclusion,
+        )
         
     except Exception as e:
         log_critical("실시간 데이터 수집 중 오류", exception=e, context={
