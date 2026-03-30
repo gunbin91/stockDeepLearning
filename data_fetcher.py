@@ -542,6 +542,15 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             latest_data['시총 회전율(3M)'] = np.nan
         
         latest_data['log_mktcap'] = np.log(reference_date_price * shares) if (reference_date_price * shares) > 0 else np.nan
+        # Exclude_Rank(cond3: 시총 1000억 미만) 계산에 사용되므로
+        # 시가총액(억) 값은 제외 규칙 평가 전에 먼저 세팅합니다.
+        try:
+            if '시가총액_기준일' in stock_info and pd.notna(stock_info['시가총액_기준일']):
+                latest_data['시가총액'] = stock_info['시가총액_기준일'] / 1_0000_0000
+            else:
+                latest_data['시가총액'] = (reference_date_price * shares) / 1_0000_0000
+        except Exception:
+            latest_data['시가총액'] = np.nan
         # 이익수익률(=1/PER)은 재무데이터가 있을 때만 계산 (없으면 NaN)
         try:
             if (not fs_data.empty) and ('PER' in fs_data.columns) and pd.notna(fs_data['PER'].values[0]) and fs_data['PER'].values[0] != 0:
@@ -705,7 +714,12 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
                 # latest_data['시가총액']은 억 단위로 저장됨
                 try:
                     market_cap_billion = latest_data.get('시가총액', None)
-                    cond3 = bool(pd.notna(market_cap_billion) and market_cap_billion < 1000)
+                    if pd.isna(market_cap_billion):
+                        cond3 = False
+                    else:
+                        # 값이 문자열 등으로 들어오는 경우를 대비해 숫자로 강제 변환
+                        market_cap_billion = float(market_cap_billion)
+                        cond3 = bool(market_cap_billion < 1000)
                 except Exception:
                     cond3 = False
 

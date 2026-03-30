@@ -2071,7 +2071,12 @@ def calculate_feature_correlation():
             start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
             
             # data_processor를 통해 데이터 수집
-            feature_data = data_processor.get_preprocessed_data(start_date, end_date, skip_factor_scores=True)
+            feature_data = data_processor.get_preprocessed_data(
+                start_date,
+                end_date,
+                skip_factor_scores=True,
+                apply_daily_exclusion=True,
+            )
             
             if feature_data is None or feature_data.empty:
                 return jsonify({'error': '데이터를 수집할 수 없습니다.'}), 500
