@@ -649,7 +649,7 @@ def _fetch_macro_data(start_date, end_date):
                 try:
                     from data_processor import calculate_normalized_linear_regression_slope
                     ixic_ma20 = ixic_close.rolling(window=20).mean()
-                    macro_df['IXIC_MA20_Slope'] = calculate_normalized_linear_regression_slope(ixic_ma20, window=20)
+                    macro_df['IXIC_MA20_Slope'] = calculate_normalized_linear_regression_slope(ixic_ma20, window=5)
                 except Exception as e:
                     log_warning(f"IXIC_MA20_Slope 계산 실패: {e}")
                     macro_df['IXIC_MA20_Slope'] = np.nan
@@ -1079,28 +1079,6 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             log_warning(f"Trend_Pullback_Score 계산 실패 ({ticker}): {e}")
             latest_data['Trend_Pullback_Score'] = np.nan
             
-        # MA120_Slope 계산 (회귀 윈도우 20)
-        try:
-            if len(df_for_indicators) >= 120:
-                ma120_series = df_for_indicators['종가'].rolling(window=120).mean()
-                latest_data['MA120_Slope'] = calculate_normalized_linear_regression_slope_latest(ma120_series, window=5)
-            else:
-                latest_data['MA120_Slope'] = np.nan
-        except Exception as e:
-            log_warning(f"MA120_Slope 계산 실패 ({ticker}): {e}")
-            latest_data['MA120_Slope'] = np.nan
-        
-        # MA240_Slope 계산 (회귀 윈도우 20)
-        try:
-            if len(df_for_indicators) >= 240:
-                ma240_series = df_for_indicators['종가'].rolling(window=240).mean()
-                latest_data['MA240_Slope'] = calculate_normalized_linear_regression_slope_latest(ma240_series, window=5)
-            else:
-                latest_data['MA240_Slope'] = np.nan
-        except Exception as e:
-            log_warning(f"MA240_Slope 계산 실패 ({ticker}): {e}")
-            latest_data['MA240_Slope'] = np.nan
-        
         latest_data['종목명'] = stock_info['종목명']
         latest_data['현재가'] = latest_current_price
         latest_data['기준일가'] = reference_date_price
