@@ -143,8 +143,10 @@
                             {% endif %}
                         </td>
                         <td>
-                            {% if 'ml_pred_proba' in row.index and row['ml_pred_proba'] is not none and not (row['ml_pred_proba'] != row['ml_pred_proba']) %}
-                                {{ "{:.2f}".format(row['ml_pred_proba']) }}
+                            {% if '상승확률(%)' in row.index and row['상승확률(%)'] is not none and not (row['상승확률(%)'] != row['상승확률(%)']) %}
+                                {{ "{:.2f}".format(row['상승확률(%)']) }}
+                            {% elif 'ml_pred_proba' in row.index and row['ml_pred_proba'] is not none and not (row['ml_pred_proba'] != row['ml_pred_proba']) %}
+                                {% if row['ml_pred_proba'] <= 1 %}{{ "{:.2f}".format(row['ml_pred_proba'] * 100) }}{% else %}{{ "{:.2f}".format(row['ml_pred_proba']) }}{% endif %}
                             {% else %}
                                 <span class="text-muted">-</span>
                             {% endif %}
