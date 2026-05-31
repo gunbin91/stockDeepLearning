@@ -677,13 +677,16 @@ def create_stock_chart(ticker_code, stock_name):
         df = None
         try:
             df = fdr.DataReader(padded_ticker_code, start_date, end_date)
-        except:
+        except Exception as e1:
+            log_warning(f"차트 데이터 수집 실패 (1차 - 기본): {e1}")
             try:
                 df = fdr.DataReader(f'KRX:{padded_ticker_code}', start_date, end_date)
-            except:
+            except Exception as e2:
+                log_warning(f"차트 데이터 수집 실패 (2차 - KRX): {e2}")
                 try:
                     df = fdr.DataReader(f'NAVER:{padded_ticker_code}', start_date, end_date)
-                except:
+                except Exception as e3:
+                    log_error(f"차트 데이터 수집 최종 실패 (3차 - NAVER): {e3}")
                     df = None
         
         if df is None or df.empty:
@@ -1938,11 +1941,12 @@ def optimize_weights_sync(backtest_params):
             _atomic_write_json(weights_path, backup_weights)
         
         # 모든 테스트 완료 후 logger 종료
-        try:
-            from logger import shutdown_logger
-            shutdown_logger()
-        except Exception:
-            pass
+        # 웹 서버 환경(flask_app.py)에서는 전역 로거 스레드가 계속 살아있어야 하므로 주석 처리함 (실시간 로그 증발 방지)
+        # try:
+        #     from logger import shutdown_logger
+        #     shutdown_logger()
+        # except Exception:
+        #     pass
         
         # 총수익률 기준 정렬
         results.sort(key=lambda x: x['total_return'], reverse=True)
@@ -2203,7 +2207,7 @@ if __name__ == '__main__':
     # 명령행 인수 파싱
     parser = argparse.ArgumentParser(description='AI 주식 분석 시스템 - Flask 앱')
     parser.add_argument('--port', type=int, default=None, help='사용할 포트 번호 (기본값: 자동 검색)')
-    parser.add_argument('--host', type=str, default='0.0.0.0', help='바인딩할 호스트 (기본값: 0.0.0.0)')
+    parser.add_argument('--host', type=str, default='127.0.0.1', help='바인딩할 호스트 (기본값: 127.0.0.1)')
     parser.add_argument('--debug', action='store_true', help='디버그 모드 활성화')
     args = parser.parse_args()
     
