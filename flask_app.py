@@ -1553,14 +1553,9 @@ def stop_backtest():
 def get_stock_chart(ticker_code):
     """종목 차트 데이터 API"""
     try:
-        # 종목명 가져오기 (종목코드 정규화)
-        stock_list_df = data_fetcher.fetch_stock_list()
+        # 종목명 가져오기 (프론트엔드 파라미터 활용)
         normalized_ticker = str(ticker_code).zfill(6)
-        stock_info = stock_list_df[stock_list_df['종목코드'] == normalized_ticker]
-        if stock_info.empty:
-            return jsonify({'error': '종목을 찾을 수 없습니다.'}), 404
-        
-        stock_name = stock_info.iloc[0]['종목명']
+        stock_name = request.args.get('name', f'종목({normalized_ticker})')
         
         # 차트 생성
         fig = create_stock_chart(normalized_ticker, stock_name)

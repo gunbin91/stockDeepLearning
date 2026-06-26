@@ -458,7 +458,7 @@ $(document).ready(function() {
         $('#stock_chart').html('<div class="text-center"><i class="fas fa-spinner fa-spin fa-2x"></i><br>차트를 불러오는 중...</div>');
         
         // 차트 데이터 요청
-        $.get(`/api/stock_chart/${paddedTicker}`)
+        $.get(`/api/stock_chart/${paddedTicker}?name=${encodeURIComponent(name)}`)
             .done(function(data) {
                 if (data.chart) {
                     try {
