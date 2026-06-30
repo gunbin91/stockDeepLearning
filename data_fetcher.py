@@ -323,13 +323,19 @@ def _get_stock_list_from_marcap(analysis_date=None, min_marcap=10_000_000_000):
                 log_info(f"시가총액 {min_marcap_billion:.0f}억 미만 종목 {excluded_count}개 제외")
         
         # 컬럼명 정리 및 종목코드 6자리 패딩
-        stock_list = df_marcap[['Code', 'Name', 'Stocks']].copy()
-        stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명', 'Stocks': '상장주식수'}, inplace=True)
+        stock_list = df_marcap[['Code', 'Name', 'Stocks', 'Marcap']].copy()
+        stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명', 'Stocks': '상장주식수', 'Marcap': '시가총액'}, inplace=True)
         
         # 종목코드를 6자리로 패딩
         stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.zfill(6)
         
-        log_info(f"총 {len(stock_list)}개 종목을 찾았습니다.")
+        # 시가총액 오름차순 정렬 (큰 종목이 마지막에 처리되도록)
+        stock_list.sort_values(by='시가총액', ascending=True, inplace=True)
+        
+        # 시가총액 컬럼 제거 (기존 로직과 호환성 유지)
+        stock_list.drop(columns=['시가총액'], inplace=True)
+        
+        log_info(f"총 {len(stock_list)}개 종목을 찾았습니다. (시가총액 오름차순 정렬됨)")
         return stock_list
         
     except Exception as e:
