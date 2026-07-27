@@ -281,6 +281,43 @@
     </div>
 </div>
 
+<!-- 일별 매수 순위 팝업 모달 -->
+<div class="modal fade" id="daily_ranking_modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-list-ol text-info me-2"></i>매수일 기준 순위 (<span id="ranking_modal_date"></span>)
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="table-responsive">
+                    <table class="table table-hover table-striped">
+                        <thead class="table-dark">
+                            <tr>
+                                <th class="text-center" style="width: 60px;">순위</th>
+                                <th>종목코드</th>
+                                <th>종목명</th>
+                                <th class="text-end">종가</th>
+                                <th class="text-end">앙상블 점수</th>
+                            </tr>
+                        </thead>
+                        <tbody id="daily_ranking_table_body">
+                            <!-- 순위 데이터가 동적으로 추가됩니다 -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                    <i class="fas fa-times me-1"></i>닫기
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 {% endblock %}
 
 {% block extra_scripts %}

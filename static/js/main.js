@@ -1316,7 +1316,7 @@ $(document).ready(function() {
                 const cumulativeProfitClass = trade.cumulative_profit !== null && trade.cumulative_profit !== undefined ? (trade.cumulative_profit >= 0 ? 'text-danger' : 'text-primary') : '';
                 
                 tradeLogHtml += `
-                    <tr>
+                    <tr class="trade-row" data-buy-date="${trade.buy_date}" style="cursor: pointer;" title="클릭하여 매수일 기준 순위 확인">
                         <td class="d-none">${trade.trade_seq !== null && trade.trade_seq !== undefined ? trade.trade_seq : ''}</td>
                         <td>${trade.trade_date || 'N/A'}</td>
                         <td><span class="badge ${trade.type === 'buy' ? 'bg-primary' : 'bg-success'}">${trade.type === 'buy' ? '매수' : '매도'}</span></td>
@@ -1408,6 +1408,55 @@ $(document).ready(function() {
                 });
             }
         }
+        
+        // 일별 순위 데이터 저장 (전역 변수)
+        window.dailyRankingsData = data.daily_rankings || {};
+        
+        // 거래 내역 행 클릭 이벤트 (매수일 기준 일별 팝업) - DataTables 이벤트 위임
+        $(document).on('click', '#backtest_trade_table tbody tr.trade-row', function() {
+            const date = $(this).data('buy-date');
+            if (!date || date === 'N/A') return; // 매수일이 없는 경우 무시
+            
+            const rankings = window.dailyRankingsData[date];
+            
+            if (rankings && rankings.length > 0) {
+                $('#ranking_modal_date').text(date);
+                
+                let tableHtml = '';
+                rankings.forEach(function(item) {
+                    tableHtml += `
+                        <tr>
+                            <td class="text-center">${item.rank}</td>
+                            <td>${item.ticker}</td>
+                            <td>${item.name}</td>
+                            <td class="text-end">${formatCurrency(item.close_price)}</td>
+                            <td class="text-end">${item.score.toFixed(2)}</td>
+                        </tr>
+                    `;
+                });
+                
+                $('#daily_ranking_table_body').html(tableHtml);
+                
+                // 모달 표시 (인스턴스 중복 생성 방지)
+                const modalElement = document.getElementById('daily_ranking_modal');
+                const rankingModal = bootstrap.Modal.getInstance(modalElement) || new bootstrap.Modal(modalElement);
+                rankingModal.show();
+            } else {
+                // 데이터가 없는 경우
+                $('#ranking_modal_date').text(date);
+                $('#daily_ranking_table_body').html(`
+                    <tr>
+                        <td colspan="5" class="text-center py-4 text-muted">
+                            해당 일자(${date})의 순위 데이터가 없습니다.
+                        </td>
+                    </tr>
+                `);
+                
+                const modalElement = document.getElementById('daily_ranking_modal');
+                const rankingModal = bootstrap.Modal.getInstance(modalElement) || new bootstrap.Modal(modalElement);
+                rankingModal.show();
+            }
+        });
     }
     
     function renderBacktestChart(data) {

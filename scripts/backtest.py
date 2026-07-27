@@ -558,6 +558,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         log_info("✅ 모델 로딩 완료")
         
         final_df_list = []
+        daily_rankings = {}
         # reset_index() 전에 인덱스의 date가 컬럼에도 있으면 컬럼의 date 제거 (중복 방지)
         if isinstance(data.index, pd.MultiIndex) and 'date' in data.index.names:
             if 'date' in data.columns:
@@ -901,6 +902,21 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                 # 1. 전체 거래 가능 종목 중에서 '최종 점수' 기준으로 상위 buy_universe_rank에 드는 종목들만 매수 고려 대상이 됩니다.
                 overall_top_universe = daily_data_tradable.nlargest(buy_universe_rank, 'final_score')
                 
+                # UI의 일별 팝업에 표시할 상위 20개 종목 순위 저장
+                top_20_universe = overall_top_universe.head(20)
+                top_rankings_list = []
+                for rank, (idx, row_data) in enumerate(top_20_universe.iterrows()):
+                    ticker_val = idx if not isinstance(idx, tuple) else idx[1]
+                    top_rankings_list.append({
+                        'rank': rank + 1,
+                        'ticker': str(ticker_val),
+                        'name': row_data.get('종목명', str(ticker_val)),
+                        'score': float(row_data['final_score']),
+                        'close_price': float(row_data.get('종가', 0.0))
+                    })
+                date_str = date.strftime('%Y-%m-%d') if hasattr(date, 'strftime') else str(date)
+                daily_rankings[date_str] = top_rankings_list
+                
                 # 2. 이렇게 1차로 걸러진 종목들 중에서 현재 보유하고 있는 종목들을 제외합니다.
                 # 3. 남은 종목들 중에서 '최종 점수'가 높은 순서대로 top_n (매수 종목 수)개만큼 매수합니다.
                 #    만약 남은 종목 수가 top_n보다 적다면, 그만큼만 매수하고 나머지는 현금으로 보유합니다.
@@ -1158,7 +1174,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         
     return {"portfolio_history": portfolio_ts, "total_return": total_return, "annual_return": annual_return,
             "sharpe_ratio": sharpe_ratio, "mdd": mdd, "trade_log": trade_log_df, "win_rate": win_rate,
-            "initial_capital": initial_capital, "final_asset": final_asset}
+            "initial_capital": initial_capital, "final_asset": final_asset, "daily_rankings": daily_rankings}
 
 
 def create_json_report(results, output_path=None):
@@ -1297,8 +1313,9 @@ def create_json_report(results, output_path=None):
             'annual_return': float(results.get('annual_return', 0)),
             'sharpe_ratio': float(results.get('sharpe_ratio', 0)),
             'mdd': float(results.get('mdd', 0)),
-            'win_rate': float(results.get('win_rate', 0))
+            'win_rate': float(results.get('win_rate', 0)),
         },
+        'daily_rankings': results.get('daily_rankings', {}),
         'strategy_parameters': {
             'transaction_fee_rate': float(results.get('transaction_fee_rate', 0)),
             'securities_transaction_tax_rate': float(results.get('securities_transaction_tax_rate', SECURITIES_TRANSACTION_TAX_RATE)),
