@@ -73,7 +73,7 @@ import joblib
 import optuna
 from sklearn.model_selection import KFold
 from sklearn.metrics import roc_auc_score
-from sklearn.preprocessing import StandardScaler
+
 import psutil
 
 # LightGBM은 lazy import로 처리 (OpenMP 충돌 방지)
@@ -636,9 +636,9 @@ def objective(trial, fold_data_cache, features):
         'deterministic': True,
         # 핵심 파라미터
         'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),
-        'num_leaves': trial.suggest_int('num_leaves', 31, 150),
-        'max_depth': trial.suggest_int('max_depth', 10, 30),
-        'min_child_samples': trial.suggest_int('min_child_samples', 50, 200),
+        'num_leaves': trial.suggest_int('num_leaves', 15, 63),
+        'max_depth': trial.suggest_int('max_depth', 4, 10),
+        'min_child_samples': trial.suggest_int('min_child_samples', 100, 300),
         # 정규화
         'reg_alpha': trial.suggest_float('reg_alpha', 1e-3, 10.0, log=True),
         'reg_lambda': trial.suggest_float('reg_lambda', 1e-3, 30.0, log=True),
@@ -710,11 +710,9 @@ def objective(trial, fold_data_cache, features):
                 X_train_resampled = X_train
                 y_train_resampled = y_train
 
-            # 스케일링 (StandardScaler)
-            # 캐싱 시 이미 피처를 맞췄다고 가정
-            scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train_resampled)
-            X_val_scaled = scaler.transform(X_val)
+            # 트리 기반 모델이므로 StandardScaler 생략 (메모리 및 속도 최적화)
+            X_train_scaled = X_train_resampled
+            X_val_scaled = X_val
             
             # LightGBM Dataset 생성
             train_data = lgb.Dataset(X_train_scaled, label=y_train_resampled)
@@ -903,9 +901,8 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
             median_val = X_all[col].replace([np.inf, -np.inf], np.nan).median()
             X_all[col] = X_all[col].replace([np.inf, -np.inf], np.nan).fillna(median_val)
     
-    # 스케일링
-    scaler = StandardScaler()
-    X_all_scaled = scaler.fit_transform(X_all)
+    # 스케일링 생략
+    X_all_scaled = X_all
     
     # GPU 사용 가능 여부 확인
     gpu_available, device = check_gpu_availability()
@@ -943,8 +940,8 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
                 median_val = X_all[col].replace([np.inf, -np.inf], np.nan).median()
                 X_val[col] = X_val[col].replace([np.inf, -np.inf], np.nan).fillna(median_val)
         
-        # 스케일링 (학습 데이터의 scaler 사용)
-        X_val_scaled = scaler.transform(X_val)
+        # 스케일링 생략: 원본 데이터 사용
+        X_val_scaled = X_val
         val_data = lgb.Dataset(X_val_scaled, label=y_val, reference=train_data)
         log_info(f"   ✅ 검증 데이터셋 준비 완료: {len(X_val_scaled):,}행")
     
@@ -1149,7 +1146,7 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
         'best_params': best_params,
         'best_iteration': best_iteration,
         'best_score': best_score,  # Optuna 최적 점수 저장
-        'scaler': scaler,
+        'scaler': None,
     }
 
     # Optuna 탐색(Trial) 결과/학습 설정은 있을 때만 저장 (하위 호환)

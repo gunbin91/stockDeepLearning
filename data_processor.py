@@ -35,6 +35,9 @@ import json
 import urllib.request
 import warnings
 
+# 가장 강력한 경고 무시: 환경 변수로 Python 레벨에서 차단
+os.environ['PYTHONWARNINGS'] = 'ignore'
+
 # yfinance의 pandas deprecated API 경고 무시 (yfinance 라이브러리 자체 문제)
 # Pandas4Warning을 직접 import하여 필터링
 try:
@@ -243,53 +246,7 @@ def fetch_daily_ohlcv(symbol: str, start=None, end=None) -> pd.DataFrame:
 
         return None
 
-# =================================================================
-# 미국 시가총액 보강용 (Yahoo 차단 대비): Nasdaq Screener API
-# - 한 번 호출로 다수 심볼의 marketCap(USD)을 확보할 수 있어 대량 티커에도 안정적
-# - 표준 라이브러리(urllib)만 사용하여 환경 의존 최소화
-# =================================================================
-def _fetch_nasdaq_screener_marketcap_map() -> dict:
-    """
-    NASDAQ Screener API에서 symbol -> marketCap(USD) 매핑을 가져옵니다.
-    Returns:
-        dict: { 'AAPL': 4004539426530.0, ... }
-    """
-    url = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true"
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://www.nasdaq.com/",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raw = resp.read()
-    data = json.loads(raw.decode("utf-8", "replace"))
-    rows = (data.get("data") or {}).get("rows") or []
 
-    def _to_float_marketcap(v):
-        if v is None:
-            return np.nan
-        if isinstance(v, (int, float)):
-            return float(v)
-        s = str(v).strip()
-        if not s or s.upper() in ("N/A", "NA", "NULL", "NONE", "-"):
-            return np.nan
-        s = s.replace("$", "").replace(",", "")
-        try:
-            return float(s)
-        except Exception:
-            return np.nan
-
-    m = {}
-    for r in rows:
-        sym = str(r.get("symbol") or "").strip()
-        if not sym:
-            continue
-        mc = _to_float_marketcap(r.get("marketCap"))
-        if np.isfinite(mc) and mc > 0:
-            m[sym] = mc
-    return m
 
 # =================================================================
 # 유틸리티 함수: 정규화된 선형회귀기울기 계산
@@ -400,7 +357,7 @@ def fetch_stock_list():
         pandas.DataFrame: 종목코드, 종목명, 시장구분이 포함된 데이터프레임
     """
     try:
-        exchanges = ["NASDAQ", "NYSE", "AMEX"]
+        exchanges = ["NASDAQ", "NYSE"]
         stock_lists = []
 
         for exchange in exchanges:
@@ -435,7 +392,7 @@ def fetch_stock_list():
             stock_lists.append(stock_list)
 
         if not stock_lists:
-            log_error("미국(NYSE/NASDAQ/AMEX) 종목 리스트를 가져올 수 없습니다.")
+            log_error("미국(NYSE/NASDAQ) 종목 리스트를 가져올 수 없습니다.")
             return pd.DataFrame()
 
         stock_list = pd.concat(stock_lists, ignore_index=True)
@@ -447,34 +404,8 @@ def fetch_stock_list():
         if dup_count > 0:
             log_warning(f"중복 티커 {dup_count}개 제거됨 (종목코드 기준)")
 
-        # --------------------------------------------------------------
-        # 학습/전처리 경로용 시가총액 보정 (Nasdaq Screener API)
-        # - 리스트 값이 부정확한 케이스가 있어 Screener 값을 우선 적용
-        # - Yahoo quote는 차단 이슈로 제외
-        # --------------------------------------------------------------
-        try:
-            screener_map = _fetch_nasdaq_screener_marketcap_map()
-            tickers = stock_list['종목코드'].astype(str).str.strip()
-            mapped = tickers.map(screener_map)
-            mapped2 = tickers.str.replace('.', '-', regex=False).map(screener_map)
-            combined = mapped.combine_first(mapped2)
-            valid_mask = pd.to_numeric(combined, errors='coerce') > 0
-            if valid_mask.any():
-                stock_list.loc[valid_mask, '시가총액'] = combined[valid_mask].values
-                still_missing = int(stock_list['시가총액'].isna().sum())
-                log_info(f"✅ Screener 시가총액 우선 적용: {int(valid_mask.sum()):,}개 | 남은 NaN {still_missing:,}개")
-        except Exception as e:
-            log_warning(f"시가총액 보정 중 오류(무시하고 진행): {e}")
-
-        # 시가총액 조회 불가 종목 제외
-        mktcap = pd.to_numeric(stock_list['시가총액'], errors='coerce')
-        before_filter = len(stock_list)
-        stock_list = stock_list[mktcap > 0].copy()
-        removed = before_filter - len(stock_list)
-        if removed > 0:
-            log_info(f"시가총액 미확인 종목 {removed}개 제외")
-
-        log_info(f"주식 목록 수집 완료: {len(stock_list)}개 미국(NYSE/NASDAQ/AMEX) 종목")
+        # 시가총액 관련 필터링 제거 (이후 병렬로 get_shares_full 수집하여 처리)
+        log_info(f"주식 목록 수집 완료: {len(stock_list)}개 미국(NYSE/NASDAQ) 종목")
         return stock_list
 
     except Exception as e:
@@ -693,17 +624,18 @@ def fetch_ticker_price_data(stock_info, start_date, end_date, df_price=None):
 
 
 
-def calculate_ticker_features(ticker, df_price, stock_name=None):
+def calculate_ticker_features(ticker, df_price, stock_name=None, df_marcap_ticker=None):
     """
     단일 종목 피처 계산 함수 (CPU 작업)
     
     ProcessPoolExecutor로 병렬 처리되는 CPU 작업만 수행합니다.
-    전역 변수(_global_marcap_data, _global_financial_data)를 사용하여
+    전역 변수(_global_financial_data)를 사용하여
     fork 방식에서 Copy-on-Write로 효율적으로 데이터에 접근합니다.
     
     Args:
         ticker: 종목코드
         df_price: 다운로드된 주가 데이터 (시가, 종가, 고가, 저가, 거래량)
+        df_marcap_ticker: 해당 종목의 주식수(Shares) 이력 데이터
         
     Returns:
         pandas.DataFrame: 처리된 종목 데이터
@@ -718,47 +650,41 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
         except (ImportError, AttributeError):
             pass
         
-        global _global_marcap_data, _global_financial_data
+        global _global_financial_data
         
         try:
             df = df_price.copy()
             
-            # 전역 변수 검증
-            if _global_marcap_data is None:
-                log_error(f"종목 {ticker} 피처 계산 중 오류: 전역 시가총액 데이터가 설정되지 않았습니다.")
-                return None
-            
-            # 시가총액 데이터 주입 (NASDAQ 버전: 정적 MarketCap 기반, 없으면 NaN)
-            df_marcap_ticker = _global_marcap_data[_global_marcap_data['Code'] == ticker].copy()
-            if df_marcap_ticker.empty:
+            # 과거 주식 수(Shares) 데이터 병합 및 시가총액 계산
+            if df_marcap_ticker is None or df_marcap_ticker.empty or 'Shares' not in df_marcap_ticker.columns:
                 df['시가총액'] = np.nan
             else:
-                if 'Marcap' in df_marcap_ticker.columns and 'date' in df_marcap_ticker.columns:
-                    df_marcap_ticker.sort_values(by='date', inplace=True)
-                    # 날짜 dtype 통일 (나노초로 통일하여 merge_asof 호환성 보장)
-                    df_marcap_ticker['date'] = pd.to_datetime(df_marcap_ticker['date']).astype('datetime64[ns]')
-                    if isinstance(df.index, pd.DatetimeIndex):
-                        df.index = pd.to_datetime(df.index).astype('datetime64[ns]')
-                    try:
-                        df = pd.merge_asof(left=df, right=df_marcap_ticker[['date', 'Marcap']], left_index=True, right_on='date', direction='backward')
-                        df.rename(columns={'Marcap': '시가총액'}, inplace=True)
-                    except Exception as e:
-                        # merge_asof 실패 시 일반 merge로 대체
-                        log_warning(f"⚠️ {ticker} 시가총액 merge_asof 실패, 일반 merge로 시도: {e}")
-                        df = df.reset_index()
-                        df = pd.merge(df, df_marcap_ticker[['date', 'Marcap']], on='date', how='left')
-                        df.rename(columns={'Marcap': '시가총액'}, inplace=True)
-                        df = df.set_index('date')
-                elif 'MarketCap' in df_marcap_ticker.columns:
-                    mc = pd.to_numeric(df_marcap_ticker['MarketCap'].iloc[0], errors='coerce')
-                    df['시가총액'] = mc
-                elif '시가총액' in df_marcap_ticker.columns:
-                    mc = pd.to_numeric(df_marcap_ticker['시가총액'].iloc[0], errors='coerce')
-                    df['시가총액'] = mc
+                df_marcap_ticker = df_marcap_ticker.copy()
+                df_marcap_ticker.sort_values(by='date', inplace=True)
+                df_marcap_ticker['date'] = pd.to_datetime(df_marcap_ticker['date']).astype('datetime64[ns]')
+                if isinstance(df.index, pd.DatetimeIndex):
+                    df.index = pd.to_datetime(df.index).astype('datetime64[ns]')
+                try:
+                    df = pd.merge_asof(left=df, right=df_marcap_ticker[['date', 'Shares']], left_index=True, right_on='date', direction='backward')
+                except Exception as e:
+                    log_warning(f"⚠️ {ticker} Shares merge_asof 실패, 일반 merge로 시도: {e}")
+                    df = df.reset_index()
+                    df = pd.merge(df, df_marcap_ticker[['date', 'Shares']], on='date', how='left')
+                    df = df.set_index('date')
+                
+                # 빈 날짜는 과거 주식 수로 채우기
+                df['Shares'] = df['Shares'].ffill()
+                
+                # 시가총액 = 종가 * 주식 수
+                if '종가' in df.columns:
+                    df['시가총액'] = df['종가'] * df['Shares']
                 else:
                     df['시가총액'] = np.nan
 
-            del df_marcap_ticker
+            try:
+                del df_marcap_ticker
+            except:
+                pass
             gc.collect()
             
             # 재무데이터 병합 (백업 프로젝트와 동일한 방식, 전역 변수 사용)
@@ -1016,7 +942,6 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             mask = df['시가총액'] > 0
             df.loc[mask, 'log_mktcap'] = np.log(df.loc[mask, '시가총액'])
             
-            
             # 2. PBR_log (PBR 로그 변환) - 2024년 12월 제거
             # PBR이 0보다 큰 경우에만 로그 적용 (경고 방지)
             # df['PBR_log'] = np.nan  # float 타입으로 초기화
@@ -1106,30 +1031,31 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
                 df['MA240_Slope'] = np.nan
 
             # =================================================================
-            # 랭킹 제외 규칙 (요구사항 반영)
-            # - MA60이 MA120, MA240 아래에 있고
-            # - 종가가 MA60 아래에 있으면 제외
-            # - 5거래일 평균 거래대금이 2,000,000달러 미만이면 제외
-            #
-            # 조건:
-            #   (MA60 < MA120) & (MA60 < MA240) & (Close < MA60)
-            #   OR
-            #   (거래대금_5일_평균 < 2,000,000 USD)
+            # 랭킹 제외 규칙 (KrStockTmp 기준 반영)
+            # - MA20이 MA120, MA240 아래에 있고 종가가 MA60 아래에 있으면 제외
+            # - 14거래일 연속 MA20 하락 중이며 종가가 MA20 아래에 있으면 제외
             # =================================================================
             try:
                 ma5 = df['종가'].rolling(window=5).mean()
+                ma20_lvl = df['종가'].rolling(window=20).mean()
                 ma60_lvl = df['종가'].rolling(window=60).mean()
                 ma120_lvl = df['종가'].rolling(window=120).mean()
                 ma240_lvl = df['종가'].rolling(window=240).mean()
-
+                
+                # 단기 모멘텀 (MA5 기울기)
                 ma5_prev = ma5.shift(1)
                 delta = (ma5 - ma5_prev) / ma5_prev.replace(0, np.nan)
                 df['MA5_Angle_Deg'] = np.degrees(np.arctan(delta.astype(float)))
 
-                거래대금_5일_평균 = df['거래대금'].rolling(window=5).mean()
-                exclude_trend = (ma60_lvl < ma120_lvl) & (ma60_lvl < ma240_lvl) & (df['종가'] < ma60_lvl)
-                exclude_liquidity = 거래대금_5일_평균 < 2_000_000
-                df['Exclude_Rank'] = exclude_trend | exclude_liquidity
+                # 14거래일 연속 MA20 하락 확인
+                ma20_diff = ma20_lvl.diff()
+                ma20_down = (ma20_diff < 0).astype(int)
+                ma20_down_14_days = ma20_down.rolling(window=14).sum() == 14
+
+                cond1 = (ma20_lvl < ma120_lvl) & (ma20_lvl < ma240_lvl) & (df['종가'] < ma60_lvl)
+                cond2 = ma20_down_14_days & (df['종가'] < ma20_lvl)
+
+                df['Exclude_Rank'] = cond1 | cond2
             except Exception:
                 # 계산 실패 시에도 기존 파이프라인은 유지
                 df['MA5_Angle_Deg'] = np.nan
@@ -1140,16 +1066,16 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
             df['52주_신고가_비율'] = df['종가'] / df['52주_최고가']
             
             # target 변수 생성:
-            # - 향후 10거래일 동안 최저가가 현재가 대비 -5% 이하로 내려가지 않고 (>= 0.95)
-            # - 향후 10거래일 동안 최고가가 현재가 대비 +8% 이상 한 번이라도 상승하면 (>= 1.08)
+            # - 향후 14거래일 동안 최저가가 현재가 대비 -10% 이하로 내려가지 않고 (>= 0.90)
+            # - 향후 14거래일 동안 최고가가 현재가 대비 +8% 이상 한 번이라도 상승하면 (>= 1.08)
             # => 1, 아니면 0
-            min_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).min()
-            max_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).max()
-            # 조건: 최소값 >= 현재가격 * 0.95 AND 최대값 >= 현재가격 * 1.08
-            df['target'] = ((min_price_10d / df['종가'] >= 0.95) & (max_price_10d / df['종가'] >= 1.08)).astype(int)
+            min_price_14d = df['종가'].rolling(window=14, min_periods=1).min().shift(-14)
+            max_price_14d = df['종가'].rolling(window=14, min_periods=1).max().shift(-14)
+            # 조건: 최소값 >= 현재가격 * 0.90 AND 최대값 >= 현재가격 * 1.08
+            df['target'] = ((min_price_14d / df['종가'] >= 0.90) & (max_price_14d / df['종가'] >= 1.08)).astype(int)
             
             # 중간 변수 삭제 (메모리 최적화)
-            del min_price_10d, max_price_10d
+            del min_price_14d, max_price_14d
 
             # =================================================================
             # 학습 타겟 제외 규칙 (요청사항)
@@ -1190,29 +1116,51 @@ def calculate_ticker_features(ticker, df_price, stock_name=None):
 
 
 def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
-    """실시간 데이터 수집 및 전처리
-    
-    Args:
-        start_date: 시작 날짜
-        end_date: 종료 날짜
-        skip_factor_scores: True일 경우 팩터 점수 계산을 건너뜀 (학습용 데이터 생성 시 사용)
-    """
+    """실시간 데이터 수집 및 전처리 (파이프라인 최적화 적용)"""
     log_info(f"실시간 데이터 수집 시작 ({start_date} ~ {end_date})...")
     
     stock_list = fetch_stock_list()
     if stock_list.empty: 
         raise ValueError("종목 리스트를 가져올 수 없습니다.")
     
-    # 미국 버전: 정적 시가총액(가능 시)을 사용
-    df_marcap_long = stock_list[['종목코드']].copy()
-    df_marcap_long.rename(columns={'종목코드': 'Code'}, inplace=True)
-    if '시가총액' in stock_list.columns:
-        df_marcap_long['MarketCap'] = pd.to_numeric(stock_list['시가총액'], errors='coerce')
-    else:
-        df_marcap_long['MarketCap'] = np.nan
-    log_info("✅ 미국 정적 시가총액(가능 시) 준비 완료")
+    import yfinance as yf
+    import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    # 429 차단 우회를 위한 스마트 리트라이 세션 구성
+    session = requests.Session()
+    retry = Retry(
+        total=5,
+        backoff_factor=1.0,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=50, pool_maxsize=50)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+
+    def _fetch_shares_for_ticker(ticker_sym):
+        try:
+            t = str(ticker_sym).replace(".", "-").strip()
+            tk = yf.Ticker(t, session=session)
+            start_str = pd.to_datetime(start_date).strftime('%Y-%m-%d')
+            end_str = (pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+            
+            # sleep 없이 최고 속도로 수집 (세션에서 자동 재시도)
+            shares = tk.get_shares_full(start=start_str, end=end_str)
+            if shares is not None and not shares.empty:
+                df_s = pd.DataFrame(shares, columns=['Shares'])
+                df_s.index = pd.to_datetime(df_s.index).tz_localize(None)
+                df_s = df_s.reset_index().rename(columns={'index': 'date'})
+                df_s['Code'] = ticker_sym
+                return df_s
+        except Exception:
+            pass
+        return None
     
-    # 재무데이터 수집 추가
+    # -------------------------------------------------------------------------
+    # 재무데이터 수집 (기존 동일)
+    # -------------------------------------------------------------------------
     try:
         log_info("📊 재무데이터 수집 시작...")
         df_financial_long = _fetch_financial_data(start_date, end_date)
@@ -1226,124 +1174,91 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
         log_warning(f"재무데이터 수집 실패: {e}. 분석을 계속합니다.")
         df_financial_long = pd.DataFrame()
     
+    # 전역 변수에 재무 데이터 설정
+    set_global_feature_data(None, df_financial_long)
+    
     all_data = []
     stock_records = stock_list.to_dict('records')
-    total_count = len(stock_records)  # 전체 종목 수 저장
+    total_count = len(stock_records)
     
-    log_info(f"개별 종목 피처 데이터 생성 시작: {total_count}개 종목")
+    log_info(f"🚀 개별 종목 파이프라인 수집/연산 시작: 총 {total_count}개 종목")
     
-    # =================================================================
-    # 1단계: ThreadPoolExecutor로 데이터 다운로드 (I/O 작업)
-    # 배치 처리로 멈춘 future 문제 해결
-    # =================================================================
-    log_info("📥 1단계: 주가 데이터 다운로드 중...")
-    downloaded_data = {}  # {ticker: df_price}
     download_failed = []
+    failed_count = 0
+    completed_count = 0
     
-    # 배치 단위로 처리하여 멈춘 future 문제 해결
     batch_size = 50
     total_batches = (total_count + batch_size - 1) // batch_size
-    download_completed = 0
     
-    log_info(f"총 {total_count}개 종목을 {total_batches}개 배치로 처리합니다.")
-    
-    for batch_idx in range(0, total_count, batch_size):
-        batch = stock_records[batch_idx:batch_idx + batch_size]
-        current_batch = batch_idx // batch_size + 1
-        
-        batch_tickers = [str(row.get('종목코드', '')).strip() for row in batch]
-        batch_price_map = fetch_daily_ohlcv_batch(batch_tickers, start_date, end_date)
-
-        batch_completed = 0
-        for row in batch:
-            ticker = str(row.get('종목코드', '')).strip()
-            df_price = batch_price_map.get(ticker)
-            _, df_prepared = _prepare_price_df(ticker, df_price)
-            if df_prepared is not None:
-                downloaded_data[ticker] = df_prepared
-            else:
-                download_failed.append(ticker)
-
-            batch_completed += 1
-            download_completed += 1
-            log_progress("주가 데이터 다운로드", download_completed, total_count)
-
-        # 배치 완료 로그
-        log_info(f"배치 {current_batch}/{total_batches} 완료 ({batch_completed}/{len(batch)}개 종목)")
-        
-        # 배치 간 메모리 정리 및 API 부하 방지
-        gc.collect()
-        if current_batch < total_batches:
-            time.sleep(0.5)  # 배치 간 0.5초 대기
-    
-    # 실패 리스트 정리
-    download_failed = list({t for t in download_failed if t})
-    log_info(f"✅ 데이터 다운로드 완료: {len(downloaded_data)}/{total_count}개 성공 (실패: {len(download_failed)}개)")
-    
-    if not downloaded_data:
-        log_error("다운로드된 데이터가 없습니다.")
-        raise ValueError("다운로드된 데이터가 없습니다.")
-    
-    # 전역 변수에 데이터 설정 (fork 방식에서 Copy-on-Write로 효율적으로 공유됨)
-    set_global_feature_data(df_marcap_long, df_financial_long)
-    
-    # =================================================================
-    # 2단계: ProcessPoolExecutor로 피처 계산 (CPU 작업)
-    # =================================================================
-    log_info("⚙️ 2단계: 피처 계산 중...")
-    failed_count = 0
+    cpu_workers = max(2, int((os.cpu_count() or 8) * 2 / 3))
     
     try:
-        # 논리 프로세서 수의 2/3 사용 (최소 2개)
-        cpu_workers = max(2, int((os.cpu_count() or 8) * 2 / 3))
-        
-        # ProcessPoolExecutor 사용 (CPU 작업 병렬 처리)
-        # WSL2 환경에서는 fork 방식으로 효율적으로 동작
-        # 전역 변수를 사용하므로 큰 데이터를 인자로 전달하지 않아도 됨
-        with concurrent.futures.ProcessPoolExecutor(max_workers=cpu_workers) as executor:
-            # 전역 변수를 사용하므로 df_marcap_long, df_financial_long 인자 제거
-            # 종목명 정보도 함께 전달
-            stock_name_map = {row['종목코드']: row.get('종목명', None) for row in stock_records}
-            future_to_ticker = {executor.submit(calculate_ticker_features, ticker, df_price, stock_name_map.get(ticker)): ticker 
-                               for ticker, df_price in downloaded_data.items()}
-        completed_count = 0
-        total_calc_count = len(downloaded_data)
-        
-        for future in concurrent.futures.as_completed(future_to_ticker):
-            try:
-                result_df = future.result(timeout=300)  # 5분 타임아웃
-                if result_df is not None and isinstance(result_df, pd.DataFrame):
-                    # 데이터 무결성 검증
-                    if not result_df.empty and '종목코드' in result_df.columns:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=cpu_workers) as cpu_executor:
+            futures_to_ticker = {}
+            
+            for batch_idx in range(0, total_count, batch_size):
+                batch = stock_records[batch_idx:batch_idx + batch_size]
+                current_batch = batch_idx // batch_size + 1
+                batch_tickers = [str(row.get('종목코드', '')).strip() for row in batch]
+                
+                # [1] 주가 데이터 다운로드 (Bulk)
+                batch_price_map = fetch_daily_ohlcv_batch(batch_tickers, start_date, end_date)
+                
+                # [2] 주식수 데이터 다운로드 (ThreadPool 20개 극대화)
+                batch_shares_map = {}
+                with concurrent.futures.ThreadPoolExecutor(max_workers=20) as io_executor:
+                    io_futures = {io_executor.submit(_fetch_shares_for_ticker, t): t for t in batch_tickers}
+                    for f in concurrent.futures.as_completed(io_futures):
+                        t = io_futures[f]
+                        try:
+                            batch_shares_map[t] = f.result()
+                        except:
+                            batch_shares_map[t] = None
+                
+                # [3] CPU 풀에 즉시 투입
+                batch_submitted = 0
+                for row in batch:
+                    ticker = str(row.get('종목코드', '')).strip()
+                    df_price = batch_price_map.get(ticker)
+                    
+                    _, df_prepared = _prepare_price_df(ticker, df_price)
+                    if df_prepared is not None:
+                        stock_name = row.get('종목명')
+                        df_marcap_ticker = batch_shares_map.get(ticker)
+                        
+                        fut = cpu_executor.submit(
+                            calculate_ticker_features, 
+                            ticker, df_prepared, stock_name, df_marcap_ticker
+                        )
+                        futures_to_ticker[fut] = ticker
+                        batch_submitted += 1
+                    else:
+                        download_failed.append(ticker)
+                
+                log_info(f"배치 {current_batch}/{total_batches} 파이프라인 투입 완료 ({batch_submitted}/{len(batch)}개 종목)")
+                gc.collect()
+                
+            # [4] 연산 결과 취합
+            log_info("⚙️ 파이프라인 연산 완료 대기 중...")
+            for future in concurrent.futures.as_completed(futures_to_ticker):
+                ticker = futures_to_ticker[future]
+                try:
+                    result_df = future.result(timeout=300)
+                    if result_df is not None and isinstance(result_df, pd.DataFrame) and not result_df.empty and '종목코드' in result_df.columns:
                         all_data.append(result_df)
                     else:
                         failed_count += 1
-                        ticker = future_to_ticker.get(future, 'Unknown')
-                        log_warning(f"⚠️ 종목 {ticker} 데이터 무결성 검증 실패: 빈 데이터프레임 또는 필수 컬럼 누락")
-                else:
+                except Exception as e:
                     failed_count += 1
-                    ticker = future_to_ticker.get(future, 'Unknown')
-            except concurrent.futures.TimeoutError:
-                failed_count += 1
-                ticker = future_to_ticker.get(future, 'Unknown')
-                log_error(f"⏱️ 종목 {ticker} 피처 계산 타임아웃 (5분 초과)")
-            except Exception as e:
-                failed_count += 1
-                ticker = future_to_ticker.get(future, 'Unknown')
-                log_error(f"❌ 종목 {ticker} 피처 계산 중 오류: {e}")
-            
-            completed_count += 1
-            # 진행률 로그 메시지 (PROGRESS 접두사 자동 추가됨) - 매번 출력하되 같은 줄에서 덮어쓰기
-            log_progress("피처 계산", completed_count, total_calc_count)
-            # 주기적 메모리 정리 (10개마다)
-            if completed_count % 10 == 0:
-                gc.collect()
+                    log_error(f"❌ 종목 {ticker} 연산 중 오류: {e}")
+                    
+                completed_count += 1
+                log_progress("파이프라인 진행", completed_count, len(futures_to_ticker))
+                if completed_count % 50 == 0:
+                    gc.collect()
+
     finally:
-        # 전역 변수 초기화 (메모리 해제)
         clear_global_feature_data()
-        
-        # 다운로드된 데이터 메모리 해제
-        del downloaded_data
         gc.collect()
 
     if not all_data: 

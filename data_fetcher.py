@@ -500,7 +500,7 @@ def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
 def _get_stock_list_from_marcap(analysis_date=None):
     """미국 주식 목록 가져오기 (NYSE/NASDAQ/AMEX 통일)"""
     try:
-        exchanges = ["NASDAQ", "NYSE", "AMEX"]
+        exchanges = ["NASDAQ", "NYSE"]
         stock_lists = []
 
         for exchange in exchanges:
@@ -537,7 +537,7 @@ def _get_stock_list_from_marcap(analysis_date=None):
             stock_lists.append(stock_list)
 
         if not stock_lists:
-            raise DataFetchError("미국(NYSE/NASDAQ/AMEX) 종목 리스트가 비어있습니다.", source="FinanceDataReader")
+            raise DataFetchError("미국(NYSE/NASDAQ) 종목 리스트가 비어있습니다.", source="FinanceDataReader")
 
         stock_list = pd.concat(stock_lists, ignore_index=True)
 
@@ -572,7 +572,7 @@ def _get_stock_list_from_marcap(analysis_date=None):
         if removed > 0:
             log_info(f"시가총액 미확인 종목 {removed}개 제외")
 
-        log_info(f"총 {len(stock_list)}개 미국(NYSE/NASDAQ/AMEX) 종목을 찾았습니다.")
+        log_info(f"총 {len(stock_list)}개 미국(NYSE/NASDAQ) 종목을 찾았습니다.")
         return stock_list
         
     except Exception as e:
@@ -725,7 +725,7 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         
         # RVOL (상대 거래량) 계산
         try:
-            거래량_20일_평균 = df_for_indicators['거래량'].rolling(window=20).mean().iloc[-1]
+            거래량_20일_평균 = df_for_indicators['거래량'].iloc[-20:].mean()
             현재_거래량 = df_for_indicators['거래량'].iloc[-1]
             if pd.notna(거래량_20일_평균) and 거래량_20일_평균 > 0 and pd.notna(현재_거래량):
                 latest_data['RVOL'] = 현재_거래량 / 거래량_20일_평균
@@ -737,8 +737,8 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         
         # RVOL(1W): 5일 평균 거래량 / 20일 평균 거래량
         try:
-            거래량_5일_평균 = df_for_indicators['거래량'].rolling(window=5).mean().iloc[-1]
-            거래량_20일_평균 = df_for_indicators['거래량'].rolling(window=20).mean().iloc[-1]
+            거래량_5일_평균 = df_for_indicators['거래량'].iloc[-5:].mean()
+            거래량_20일_평균 = df_for_indicators['거래량'].iloc[-20:].mean()
             if pd.notna(거래량_5일_평균) and pd.notna(거래량_20일_평균) and 거래량_20일_평균 > 0:
                 latest_data['RVOL(1W)'] = 거래량_5일_평균 / 거래량_20일_평균
             else:
@@ -770,14 +770,14 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             시가총액 = marketcap_usd_ref
             if pd.notna(시가총액) and 시가총액 > 0:
                 # 시총 회전율(1W): 5일 평균 거래대금 / 시가총액 * 100
-                거래대금_5일_평균 = df_for_indicators['거래대금'].rolling(window=5).mean().iloc[-1]
+                거래대금_5일_평균 = df_for_indicators['거래대금'].iloc[-5:].mean()
                 if pd.notna(거래대금_5일_평균):
                     latest_data['시총 회전율(1W)'] = (거래대금_5일_평균 / 시가총액) * 100
                 else:
                     latest_data['시총 회전율(1W)'] = np.nan
                 
                 # 시총 회전율(3M): 60일 평균 거래대금 / 시가총액 * 100
-                거래대금_60일_평균 = df_for_indicators['거래대금'].rolling(window=60).mean().iloc[-1]
+                거래대금_60일_평균 = df_for_indicators['거래대금'].iloc[-60:].mean()
                 if pd.notna(거래대금_60일_평균):
                     latest_data['시총 회전율(3M)'] = (거래대금_60일_평균 / 시가총액) * 100
                 else:
@@ -910,7 +910,7 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
                 ma120_last = ma120_lvl.iloc[-1]
                 ma240_last = ma240_lvl.iloc[-1]
                 close_last = df_for_indicators['종가'].iloc[-1]
-                거래대금_5일_평균 = df_for_indicators['거래대금'].rolling(window=5).mean().iloc[-1]
+                거래대금_5일_평균 = df_for_indicators['거래대금'].iloc[-5:].mean()
                 latest_data['Exclude_Rank'] = bool(
                     (
                         pd.notna(ma240_last) and pd.notna(ma120_last) and pd.notna(ma60_last)
@@ -928,21 +928,21 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             latest_data['MA5_Angle_Deg'] = latest_data.get('MA5_Angle_Deg', np.nan)
             latest_data['Exclude_Rank'] = False
 
-        latest_data['52주_신고가_비율'] = (df_for_indicators['종가'] / df_for_indicators['종가'].rolling(250).max()).iloc[-1]
+        latest_data['52주_신고가_비율'] = df_for_indicators['종가'].iloc[-1] / df_for_indicators['종가'].iloc[-250:].max()
         
         # Relative_Strength_20, RVOL 피처는 제거됨
         
         # Z_Score_20 계산 (표준화 이격)
-        mean_20 = df_for_indicators['종가'].rolling(20).mean().iloc[-1]
-        std_20 = df_for_indicators['종가'].rolling(20).std().iloc[-1]
+        mean_20 = df_for_indicators['종가'].iloc[-20:].mean()
+        std_20 = df_for_indicators['종가'].iloc[-20:].std()
         if pd.notna(mean_20) and pd.notna(std_20) and std_20 != 0:
             latest_data['Z_Score_20'] = (df_for_indicators['종가'].iloc[-1] - mean_20) / std_20
         else:
             latest_data['Z_Score_20'] = np.nan
         
         # Position_Range_60 계산 (Donchian)
-        high_60 = df_for_indicators['고가'].rolling(60).max().iloc[-1]
-        low_60 = df_for_indicators['저가'].rolling(60).min().iloc[-1]
+        high_60 = df_for_indicators['고가'].iloc[-60:].max()
+        low_60 = df_for_indicators['저가'].iloc[-60:].min()
         if pd.notna(high_60) and pd.notna(low_60) and (high_60 - low_60) != 0:
             latest_data['Position_Range_60'] = (df_for_indicators['종가'].iloc[-1] - low_60) / (high_60 - low_60)
             latest_data['Position_Range_60'] = max(0, min(1, latest_data['Position_Range_60']))
@@ -988,9 +988,9 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         # HV 변동성 (5일, 20일, 60일)
         try:
             log_ret_1d = np.log(df_for_indicators['종가'] / df_for_indicators['종가'].shift(1))
-            latest_data['HV_Volatility_5'] = log_ret_1d.rolling(window=5).std().iloc[-1] if len(log_ret_1d) >= 5 else np.nan
-            latest_data['HV_Volatility_20'] = log_ret_1d.rolling(window=20).std().iloc[-1] if len(log_ret_1d) >= 20 else np.nan
-            latest_data['HV_Volatility_60'] = log_ret_1d.rolling(window=60).std().iloc[-1] if len(log_ret_1d) >= 60 else np.nan
+            latest_data['HV_Volatility_5'] = log_ret_1d.iloc[-5:].std() if len(log_ret_1d) >= 5 else np.nan
+            latest_data['HV_Volatility_20'] = log_ret_1d.iloc[-20:].std() if len(log_ret_1d) >= 20 else np.nan
+            latest_data['HV_Volatility_60'] = log_ret_1d.iloc[-60:].std() if len(log_ret_1d) >= 60 else np.nan
         except Exception as e:
             log_warning(f"HV 변동성 계산 실패 ({ticker}): {e}")
             latest_data['HV_Volatility_5'] = np.nan
@@ -1011,8 +1011,8 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
                 tp = (df_for_indicators['고가'] + df_for_indicators['저가'] + df_for_indicators['종가']) / 3
                 money = tp * df_for_indicators['거래량']
                 
-                sum_money_5 = money.rolling(window=5).sum().iloc[-1]
-                sum_vol_5 = df_for_indicators['거래량'].rolling(window=5).sum().iloc[-1]
+                sum_money_5 = money.iloc[-5:].sum()
+                sum_vol_5 = df_for_indicators['거래량'].iloc[-5:].sum()
                 
                 if sum_vol_5 > 0:
                     vwap_5 = sum_money_5 / sum_vol_5
@@ -1030,9 +1030,9 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         # daily_dd = (저가 / roll_max) - 1
         # Max_Drawdown_20 = daily_dd.rolling(20).min() * 100
         try:
-            roll_max_20 = df_for_indicators['고가'].rolling(window=20).max()
-            daily_dd_20 = (df_for_indicators['저가'] / roll_max_20) - 1
-            latest_data['Max_Drawdown_20'] = (daily_dd_20.rolling(window=20).min() * 100).iloc[-1]
+            roll_max_20 = df_for_indicators['고가'].iloc[-39:].rolling(window=20).max()
+            daily_dd_20 = (df_for_indicators['저가'].iloc[-39:] / roll_max_20) - 1
+            latest_data['Max_Drawdown_20'] = (daily_dd_20.iloc[-20:].min() * 100)
         except Exception as e:
             log_warning(f"Max_Drawdown_20 계산 실패 ({ticker}): {e}")
             latest_data['Max_Drawdown_20'] = np.nan
@@ -1165,7 +1165,7 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     stock_records = stock_list.to_dict('records')
     
     # 배치 단위로 처리하여 메모리 효율성 향상
-    batch_size = 50
+    batch_size = 100
     total_batches = (len(stock_records) + batch_size - 1) // batch_size
     total_stocks = len(stock_records)
     
@@ -1174,7 +1174,7 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     # NOTE:
     # - 배치마다 ThreadPoolExecutor를 생성/종료하면(특히 Windows) 종료(shutdown/join)에서 간헐적으로 스톨하는 사례가 있음
     # - executor를 전체 루프 동안 재사용하고, 마지막에 한 번만 종료하여 스톨 가능성을 크게 낮춤
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)  # 워커 수 감소
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)  # 워커 수 감소
     try:
         for i in range(0, len(stock_records), batch_size):
             batch = stock_records[i:i + batch_size]

@@ -17,7 +17,7 @@ import warnings
 import os
 
 # 환경 변수로 pandas 경고 비활성화
-os.environ['PYTHONWARNINGS'] = 'ignore::pandas.errors.Pandas4Warning'
+os.environ['PYTHONWARNINGS'] = 'ignore'
 
 # yfinance의 pandas deprecated API 경고 무시 (yfinance 라이브러리 자체 문제)
 # 모든 방법으로 필터링 시도 - 가장 강력한 설정
@@ -66,9 +66,16 @@ if platform.system() == 'Windows':
 # - 거래세는 0으로 고정합니다. (수수료는 transaction_fee_rate로만 반영)
 SECURITIES_TRANSACTION_TAX_RATE = 0.0
 
-# stdout/stderr를 UTF-8로 설정
-sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
+# stdout/stderr를 UTF-8로 설정 (직접 실행 시에만 적용)
+if __name__ == '__main__':
+    try:
+        # 이미 detached 되었거나 유효하지 않은 경우 대비
+        if hasattr(sys.stdout, 'detach'):
+            sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
+        if hasattr(sys.stderr, 'detach'):
+            sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
+    except (ValueError, AttributeError):
+        pass # 이미 detached 되었거나 수정할 수 없는 경우 무시
 
 
 # pandas 호환성 패치: cuDF가 pandas.api.types.is_interval을 사용하는데 최신 pandas에서는 제거됨
@@ -643,6 +650,25 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
     take_profit_multiplier = 1 + (take_profit_pct / 100)
     stop_loss_multiplier = 1 - (stop_loss_pct / 100)
 
+    def resolve_close_price(date, ticker, fallback_price):
+        """종가 조회: NaN/누락 시 최근 5일 이내 가격 또는 fallback 사용"""
+        current_price = None
+        if (date, ticker) in data.index:
+            current_price = data.loc[(date, ticker), '종가']
+            if pd.isna(current_price):
+                current_price = None
+        if current_price is None:
+            for days_back in range(1, 6):
+                prev_date = date - timedelta(days=days_back)
+                if (prev_date, ticker) in data.index:
+                    prev_price = data.loc[(prev_date, ticker), '종가']
+                    if not pd.isna(prev_price):
+                        current_price = prev_price
+                        break
+        if current_price is None or pd.isna(current_price):
+            current_price = fallback_price
+        return current_price
+
     total_dates = len(daily_dates)
     for i, date in enumerate(tqdm(daily_dates, desc="상세 백테스팅 중")):
         # 진행률 로그 메시지 처리
@@ -673,25 +699,9 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                 stock_info = portfolio[ticker]
                 is_holding_period_expired = (date - stock_info['buy_date']).days >= max_hold_period
 
-                # 현재 가격 조회 (데이터가 없으면 이전 가격 사용)
-                current_price = None
-                if (date, ticker) in data.index:
-                    current_price = data.loc[(date, ticker), '종가']
-                else:
-                    # 이전 가격 사용 (최대 5일 전까지)
-                    for days_back in range(1, 6):
-                        prev_date = date - timedelta(days=days_back)
-                        if (prev_date, ticker) in data.index:
-                            current_price = data.loc[(prev_date, ticker), '종가']
-                            break
-                    
-                    # 5일 내에 데이터가 없으면 매수가로 대체 (보수적 평가)
-                    if current_price is None:
-                        current_price = stock_info['buy_price']
-                
-                # NASDAQ 전용: 상한가(+29%) 예외 로직 제거
+                current_price = resolve_close_price(date, ticker, stock_info['buy_price'])
 
-                # 매도 조건 확인 (current_price는 이미 위에서 None이 아닌 값으로 설정됨)
+                # 매도 조건 확인
                 sell_condition_price = (current_price >= stock_info['buy_price'] * take_profit_multiplier) or \
                                        (current_price <= stock_info['buy_price'] * stop_loss_multiplier)
 
@@ -786,29 +796,8 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             # 포트폴리오 가치 계산
             current_portfolio_value = 0
             for ticker, info in portfolio.items():
-                # 현재 가격 조회 (데이터가 없으면 이전 가격 사용)
-                current_price = None
-                if (date, ticker) in data.index:
-                    current_price = data.loc[(date, ticker), '종가']
-                    # NaN 체크
-                    if pd.isna(current_price):
-                        current_price = None
-                else:
-                    # 이전 가격 사용 (최대 5일 전까지)
-                    for days_back in range(1, 6):
-                        prev_date = date - timedelta(days=days_back)
-                        if (prev_date, ticker) in data.index:
-                            current_price = data.loc[(prev_date, ticker), '종가']
-                            # NaN 체크
-                            if not pd.isna(current_price):
-                                break
-                            else:
-                                current_price = None
-                    
-                    # 5일 내에 데이터가 없으면 매수가로 대체 (보수적 평가)
-                    if current_price is None or pd.isna(current_price):
-                        current_price = info['buy_price']
-                
+                current_price = resolve_close_price(date, ticker, info['buy_price'])
+
                 # 가격과 주식 수가 유효한 경우에만 계산
                 if current_price is not None and not pd.isna(current_price) and info['shares'] > 0:
                     current_portfolio_value += current_price * info['shares']
@@ -839,7 +828,8 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                 "cash": cash,
                 "portfolio_count": len(portfolio)
             })
-            # 치명적 에러 발생 시 해당 날짜는 건너뛰고 계속 진행
+            # 예외 발생 시에도 날짜 정합성 유지 (이전 총자산 유지)
+            portfolio_history.append(portfolio_history[-1] if portfolio_history else initial_capital)
             continue
             
         # 로그: 9월 17일 이후 포트폴리오 상태
@@ -995,9 +985,16 @@ def create_json_report(results, output_path=None, stock_list=None):
         print("백테스트 결과가 없어 리포트를 생성할 수 없습니다.")
         return
 
+    def clean_float(val):
+        try:
+            f_val = float(val)
+            return f_val if np.isfinite(f_val) else None
+        except (ValueError, TypeError):
+            return None
+
     # 포트폴리오 히스토리: 실제 총자산 값(USD) 저장
     portfolio_dates = [d.strftime('%Y-%m-%d') for d in results["portfolio_history"].index]
-    portfolio_values = [float(v) for v in results["portfolio_history"].values]
+    portfolio_values = [clean_float(v) for v in results["portfolio_history"].values]
     
     # NASDAQ Composite(IXIC) 데이터 가져오기 (비교용 누적 수익률)
     try:
@@ -1010,7 +1007,7 @@ def create_json_report(results, output_path=None, stock_list=None):
         
         # IXIC 초기값 기준으로 정규화 (포트폴리오와 비교 가능하도록)
         initial_capital = float(results.get('initial_capital', 0))
-        ixic_values = [float(v * initial_capital) for v in ixic_cumulative.values]
+        ixic_values = [clean_float(v * initial_capital) for v in ixic_cumulative.values]
         ixic_dates = [d.strftime('%Y-%m-%d') for d in ixic_cumulative.index]
     except Exception as e:
         log_warning(f"IXIC 데이터 로딩 실패: {e}")
@@ -1056,27 +1053,27 @@ def create_json_report(results, output_path=None, stock_list=None):
             record = {
                 'type': row['type'],
                 'trade_date': row['trade_date'].strftime('%Y-%m-%d') if pd.notna(row['trade_date']) else None,
-                'ticker': row['ticker'],
-                'stock_name': row.get('종목명', 'N/A'),
-                'market': row.get('시장구분', 'N/A'),
+                'ticker': str(row['ticker']),
+                'stock_name': str(row['종목명']) if pd.notna(row.get('종목명')) else 'N/A',
+                'market': str(row['시장구분']) if pd.notna(row.get('시장구분')) else 'N/A',
                 'buy_date': row['buy_date'].strftime('%Y-%m-%d') if pd.notna(row['buy_date']) else None,
-                'sell_date': row['sell_date'].strftime('%Y-%m-%d') if pd.notna(row['sell_date']) and 'sell_date' in row else None,
-                'holding_period': int((row['sell_date'] - row['buy_date']).days) if 'sell_date' in row and pd.notna(row['sell_date']) and pd.notna(row['buy_date']) else None,
-                'buy_price': float(row['buy_price']) if pd.notna(row['buy_price']) else None,
-                'actual_buy_price': float(row['actual_buy_price']) if pd.notna(row['actual_buy_price']) else None,
-                'sell_price': float(row['sell_price']) if 'sell_price' in row and pd.notna(row['sell_price']) else None,
-                'actual_sell_price': float(row['actual_sell_price']) if 'actual_sell_price' in row and pd.notna(row['actual_sell_price']) else None,
-                'shares': int(row['shares']) if 'shares' in row and pd.notna(row['shares']) else None,
-                'buy_amount': float(row['buy_amount']) if pd.notna(row['buy_amount']) else None,
-                'profit': float(row['profit']) if 'profit' in row and pd.notna(row['profit']) else None,
-                'return': float(row['return']) if 'return' in row and pd.notna(row['return']) else None,
-                'buy_market_cap': float(row['buy_market_cap']) if 'buy_market_cap' in row and pd.notna(row['buy_market_cap']) else None,
-                'total_asset': float(row['total_asset']) if 'total_asset' in row and pd.notna(row['total_asset']) else None,
-                'cumulative_profit': float(row['cumulative_profit']) if 'cumulative_profit' in row and pd.notna(row['cumulative_profit']) else None,
-                'final_score': float(row['final_score']) if 'final_score' in row and pd.notna(row['final_score']) else None,
-                'ml_pred_proba': float(row['ml_pred_proba']) if 'ml_pred_proba' in row and pd.notna(row['ml_pred_proba']) else None,
-                'lgbm_pred_proba': float(row['lgbm_pred_proba']) if 'lgbm_pred_proba' in row and pd.notna(row['lgbm_pred_proba']) else None,
-                'catboost_pred_proba': float(row['catboost_pred_proba']) if 'catboost_pred_proba' in row and pd.notna(row['catboost_pred_proba']) else None
+                'sell_date': row['sell_date'].strftime('%Y-%m-%d') if pd.notna(row.get('sell_date')) else None,
+                'holding_period': int((row['sell_date'] - row['buy_date']).days) if pd.notna(row.get('sell_date')) and pd.notna(row['buy_date']) else None,
+                'buy_price': clean_float(row['buy_price']),
+                'actual_buy_price': clean_float(row.get('actual_buy_price')),
+                'sell_price': clean_float(row.get('sell_price')),
+                'actual_sell_price': clean_float(row.get('actual_sell_price')),
+                'shares': int(row['shares']) if pd.notna(row.get('shares')) else None,
+                'buy_amount': clean_float(row['buy_amount']),
+                'profit': clean_float(row.get('profit')),
+                'return': clean_float(row.get('return')),
+                'buy_market_cap': clean_float(row.get('buy_market_cap')),
+                'total_asset': clean_float(row.get('total_asset')),
+                'cumulative_profit': clean_float(row.get('cumulative_profit')),
+                'final_score': clean_float(row.get('final_score')),
+                'ml_pred_proba': clean_float(row.get('ml_pred_proba')),
+                'lgbm_pred_proba': clean_float(row.get('lgbm_pred_proba')),
+                'catboost_pred_proba': clean_float(row.get('catboost_pred_proba'))
             }
             trade_log_records.append(record)
     
@@ -1091,13 +1088,13 @@ def create_json_report(results, output_path=None, stock_list=None):
             }
         },
         'performance_metrics': {
-            'initial_capital': float(results.get('initial_capital', 0)),
-            'final_asset': float(results.get('final_asset', 0)),
-            'total_return': float(results.get('total_return', 0)),
-            'annual_return': float(results.get('annual_return', 0)),
-            'sharpe_ratio': float(results.get('sharpe_ratio', 0)),
-            'mdd': float(results.get('mdd', 0)),
-            'win_rate': float(results.get('win_rate', 0))
+            'initial_capital': clean_float(results.get('initial_capital')),
+            'final_asset': clean_float(results.get('final_asset')),
+            'total_return': clean_float(results.get('total_return')),
+            'annual_return': clean_float(results.get('annual_return')),
+            'sharpe_ratio': clean_float(results.get('sharpe_ratio')),
+            'mdd': clean_float(results.get('mdd')),
+            'win_rate': clean_float(results.get('win_rate'))
         },
         'strategy_parameters': {
             'transaction_fee_rate': float(results.get('transaction_fee_rate', 0)),
@@ -1119,9 +1116,9 @@ def create_json_report(results, output_path=None, stock_list=None):
         'trade_log': trade_log_records
     }
     
-    # JSON 파일로 저장
+    # JSON 파일로 저장 (NaN/Inf 금지: 브라우저 JSON.parse 호환)
     with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(report_data, f, ensure_ascii=False, indent=2)
+        json.dump(report_data, f, ensure_ascii=False, indent=2, allow_nan=False)
     
     log_info(f"JSON 리포트 생성 완료: {output_path}")
     return report_data
@@ -1584,63 +1581,23 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                 else:
                     test_data_for_pred.fillna(0, inplace=True)
                 
-                # 스케일러의 피처 수 확인 (cuML scaler는 n_features_in_ 속성 사용)
-                scaler_expected_features = None
-                if scaler and hasattr(scaler, 'n_features_in_'):
-                    scaler_expected_features = scaler.n_features_in_
-                elif scaler and hasattr(scaler, 'mean_'):
-                    # cuML StandardScaler는 mean_ 속성의 길이로 피처 수 확인 가능
-                    scaler_expected_features = len(scaler.mean_) if hasattr(scaler.mean_, '__len__') else None
+                # 스케일링 제거: 트리기반 알고리즘은 스케일링 불필요
+                use_scaler = False
                 
-                # 현재 데이터의 피처 수
-                current_features_count = len(available_features)
-                
-                # 스케일러와 데이터의 피처 수가 일치하는지 확인
-                use_scaler = scaler is not None
-                if scaler_expected_features is not None and scaler_expected_features != current_features_count:
-                    log_warning(f"스케일러 피처 수 불일치: 스케일러는 {scaler_expected_features}개를 기대하지만 데이터는 {current_features_count}개입니다. 스케일링을 건너뜁니다.")
-                    use_scaler = False
-                
-                # cuML 모델인 경우 cuDF DataFrame으로 변환 필요
+                # 모델 종류에 따라 데이터 타입 맞추기
                 if is_cuml_model:
-                    # 호환성 패치 적용 (import cudf 전에 실행)
-                    apply_pandas_compatibility_patch()
-                    import cudf
-                    # cuML scaler인지 확인
-                    if use_scaler and hasattr(scaler, 'transform'):
-                        # cuML scaler는 cuDF DataFrame을 받아야 함
-                        try:
-                            # 모델이 저장된 피처 순서대로 컬럼 정렬 (중요: 순서가 정확히 일치해야 함)
-                            test_data_ordered = test_data_for_pred[available_features]
-                            test_data_cudf = cudf.from_pandas(test_data_ordered)
-                            X_test_scaled_cudf = scaler.transform(test_data_cudf)
-                            # cuML 모델은 cuDF DataFrame을 받을 수 있음
-                            X_test_scaled = X_test_scaled_cudf
-                        except ImportError:
-                            log_warning("cuDF를 사용할 수 없습니다. 원본 데이터 사용")
-                            test_data_ordered = test_data_for_pred[available_features]
-                            X_test_scaled = cudf.from_pandas(test_data_ordered)
-                        except Exception as e:
-                            log_warning(f"cuML 스케일링 오류: {e}, 원본 데이터 사용")
-                            test_data_ordered = test_data_for_pred[available_features]
-                            X_test_scaled = cudf.from_pandas(test_data_ordered)
-                    else:
-                        # 스케일러를 사용하지 않음 (피처 수 불일치 또는 스케일러 없음)
-                        # cuML 모델은 cuDF DataFrame을 기대하므로 변환
-                        # 모델이 저장된 피처 순서대로 컬럼 정렬 (중요: 순서가 정확히 일치해야 함)
+                    try:
+                        apply_pandas_compatibility_patch()
+                        import cudf
                         test_data_ordered = test_data_for_pred[available_features]
                         X_test_scaled = cudf.from_pandas(test_data_ordered)
-                elif use_scaler:
-                    # sklearn scaler (sklearn 모델)
-                    try:
-                        X_test_scaled = scaler.transform(test_data_for_pred)
                     except Exception as e:
-                        log_warning(f"sklearn 스케일링 오류: {e}, 원본 데이터 사용")
-                        X_test_scaled = test_data_for_pred.values
+                        log_warning(f"cuML/cuDF 변환 오류: {e}, 원본 데이터 사용")
+                        test_data_ordered = test_data_for_pred[available_features]
+                        X_test_scaled = cudf.from_pandas(test_data_ordered)
                 else:
-                    # 스케일러를 사용하지 않음 (sklearn 모델)
-                    X_test_scaled = test_data_for_pred.values
-                
+                    X_test_scaled = test_data_for_pred[available_features].values
+                    
                 # 예측 수행 (큰 데이터셋의 경우 배치 처리)
                 # cuDF DataFrame인 경우 len() 사용, numpy 배열인 경우 shape[0] 사용
                 if hasattr(X_test_scaled, '__len__'):

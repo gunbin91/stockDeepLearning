@@ -79,7 +79,6 @@ import numpy as np
 import joblib
 import optuna
 from cuml.ensemble import RandomForestClassifier as cuRF
-from cuml.preprocessing import StandardScaler as cuStandardScaler
 from cuml.metrics import roc_auc_score
 from sklearn.model_selection import KFold
 from sklearn.inspection import permutation_importance
@@ -1421,9 +1420,9 @@ def objective(trial, fold_data_cache, features, max_depth_list, rng):
         # 스케일러 학습 및 데이터 변환 (샘플링된 데이터로 학습)
         step_start = datetime.now()
         try:
-            scaler = cuStandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train_resampled)
-            X_val_scaled = scaler.transform(X_val)
+            # 트리 기반 모델이므로 스케일링 생략 (메모리 최적화)
+            X_train_scaled = X_train_resampled
+            X_val_scaled = X_val
         except Exception as scale_e:
             log_error(f"   ❌ Fold #{fold+1} 스케일링 실패: {scale_e}")
             import traceback
@@ -1537,7 +1536,7 @@ def objective(trial, fold_data_cache, features, max_depth_list, rng):
         
         # 사용 완료된 객체 정리
         # 변수 정리 (배치 처리 경로에서는 pred_proba_cudf가 없을 수 있음)
-        del scaler, model, X_val_scaled, y_val, y_pred_proba
+        del model, X_val_scaled, y_val, y_pred_proba
         try:
             del pred_proba_cudf
         except NameError:
@@ -1750,9 +1749,8 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
         #    X_all = X_all.drop(columns=['is_crash'])
         
         log_info("   [PREPROC] 데이터 스케일링 중...")
-        final_scaler = cuStandardScaler()
-        final_scaler.fit(X_all)
-        X_all_scaled = final_scaler.transform(X_all)
+        final_scaler = None
+        X_all_scaled = X_all
         del X_all
         enhanced_gpu_memory_cleanup(force_defrag=True)
         gc.collect()
@@ -2051,7 +2049,7 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
             model_data_to_save = {
                 'model': final_model,
                 'features': features,
-                'scaler': final_scaler,
+                'scaler': None,
                 'imputation_values': convert_cudf_to_pandas_for_joblib(final_imputation_values),  # 전체 데이터 기준 중앙값 (실전 추론용)
                 'best_params': best_params,
                 'model_type': 'single_model',
@@ -2100,7 +2098,7 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
     finally:
         # 모든 주요 변수 정리
         if 'final_model' in locals(): del final_model
-        if 'final_scaler' in locals(): del final_scaler
+        pass # scaler removed
         if 'X_all_scaled' in locals(): del X_all_scaled
         if 'y_all' in locals(): del y_all
         enhanced_gpu_memory_cleanup(force_defrag=True)
