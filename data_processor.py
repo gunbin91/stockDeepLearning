@@ -43,13 +43,40 @@ os.environ['PYTHONWARNINGS'] = 'ignore'
 try:
     from pandas.errors import Pandas4Warning
     warnings.filterwarnings("ignore", category=Pandas4Warning)
+    warnings.simplefilter("ignore", Pandas4Warning)
 except ImportError:
     # pandas 버전에 따라 Pandas4Warning이 없을 수 있음
     pass
 # 추가로 FutureWarning도 필터링
 warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*", category=FutureWarning)
-# 더 포괄적으로 모든 Pandas4Warning 무시
+warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*")
 warnings.filterwarnings("ignore", message=".*deprecated.*", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*will be removed.*")
+warnings.simplefilter("ignore", FutureWarning)
+
+# yfinance가 warnings 시스템을 우회해 stderr로 직접 찍는 경우 대비
+import sys as _sys
+if not isinstance(getattr(_sys, "stderr", None), type(None)):
+    _orig_stderr = _sys.stderr
+    if not getattr(_orig_stderr, "_yf_warning_filtered", False):
+        class _YFinanceFilteredStderr:
+            def __init__(self, original):
+                self.original = original
+                self._yf_warning_filtered = True
+            def write(self, text):
+                if text and (
+                    "Pandas4Warning" in text
+                    or "Timestamp.utcnow" in text
+                    or ("deprecated" in text and ("yfinance" in text or "Timestamp" in text))
+                    or ("will be removed" in text and "Timestamp" in text)
+                ):
+                    return
+                self.original.write(text)
+            def flush(self):
+                self.original.flush()
+            def __getattr__(self, name):
+                return getattr(self.original, name)
+        _sys.stderr = _YFinanceFilteredStderr(_orig_stderr)
 
 # WSL2/Linux 환경에서 multiprocessing 최적화
 # fork 방식 사용 (spawn보다 빠르고 메모리 효율적)
@@ -675,9 +702,14 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, df_marcap_ticke
                 # 빈 날짜는 과거 주식 수로 채우기
                 df['Shares'] = df['Shares'].ffill()
                 
-                # 시가총액 = 종가 * 주식 수
+                # 시가총액: 월 첫 거래일(종가×Shares)만 계산 후 월내 ffill
                 if '종가' in df.columns:
                     df['시가총액'] = df['종가'] * df['Shares']
+                    if isinstance(df.index, pd.DatetimeIndex) and len(df) > 0:
+                        month_key = df.index.to_period('M')
+                        is_month_first = ~month_key.duplicated(keep='first')
+                        df.loc[~is_month_first, '시가총액'] = np.nan
+                        df['시가총액'] = df['시가총액'].ffill()
                 else:
                     df['시가총액'] = np.nan
 
@@ -936,6 +968,13 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, df_marcap_ticke
                 df['PBR'] = df['종가'] / (df['시가총액'] / df['거래량'])  # 간단한 PBR 계산
         
             # 핵심 피처 추가
+            # 0. 등락율(5D): 5거래일 종가 대비 수익률 (비율)
+            try:
+                df['등락율(5D)'] = df['종가'].pct_change(5)
+            except Exception as e:
+                log_warning(f"등락율(5D) 계산 실패 ({ticker}): {e}")
+                df['등락율(5D)'] = np.nan
+
             # 1. log_mktcap (시가총액 로그 변환)
             # 시가총액이 0보다 큰 경우에만 로그 적용 (경고 방지)
             df['log_mktcap'] = np.nan  # float 타입으로 초기화
@@ -1124,39 +1163,40 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
         raise ValueError("종목 리스트를 가져올 수 없습니다.")
     
     import yfinance as yf
-    import requests
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
 
-    # 429 차단 우회를 위한 스마트 리트라이 세션 구성
-    session = requests.Session()
-    retry = Retry(
-        total=5,
-        backoff_factor=1.0,
-        status_forcelist=[429, 500, 502, 503, 504],
-    )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=50, pool_maxsize=50)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
+    # yfinance 0.2.66+: 커스텀 requests.Session 전달 시 YFDataException 발생
+    # → session 없이 yf.Ticker()에 맡김 (get_shares_full 정상 동작 확인됨)
+    shares_fetch_ok = {'count': 0}
+    shares_fetch_fail = {'count': 0}
 
     def _fetch_shares_for_ticker(ticker_sym):
         try:
             t = str(ticker_sym).replace(".", "-").strip()
-            tk = yf.Ticker(t, session=session)
+            tk = yf.Ticker(t)
             start_str = pd.to_datetime(start_date).strftime('%Y-%m-%d')
             end_str = (pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
-            
-            # sleep 없이 최고 속도로 수집 (세션에서 자동 재시도)
+
             shares = tk.get_shares_full(start=start_str, end=end_str)
-            if shares is not None and not shares.empty:
-                df_s = pd.DataFrame(shares, columns=['Shares'])
-                df_s.index = pd.to_datetime(df_s.index).tz_localize(None)
-                df_s = df_s.reset_index().rename(columns={'index': 'date'})
-                df_s['Code'] = ticker_sym
-                return df_s
-        except Exception:
-            pass
-        return None
+            if shares is None or shares.empty:
+                shares_fetch_fail['count'] += 1
+                return None
+
+            # Series → DataFrame (columns= 지정 방식 대신 to_frame 사용)
+            df_s = shares.to_frame(name='Shares')
+            idx = pd.to_datetime(df_s.index)
+            if getattr(idx, 'tz', None) is not None:
+                idx = idx.tz_convert('UTC').tz_localize(None)
+            df_s.index = idx
+            df_s = df_s.rename_axis('date').reset_index()
+            df_s['date'] = pd.to_datetime(df_s['date']).astype('datetime64[ns]')
+            df_s['Code'] = ticker_sym
+            shares_fetch_ok['count'] += 1
+            return df_s
+        except Exception as e:
+            shares_fetch_fail['count'] += 1
+            if shares_fetch_fail['count'] <= 5:
+                log_warning(f"Shares 수집 실패 ({ticker_sym}): {type(e).__name__}: {e}")
+            return None
     
     # -------------------------------------------------------------------------
     # 재무데이터 수집 (기존 동일)
@@ -1204,7 +1244,7 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
                 # [1] 주가 데이터 다운로드 (Bulk)
                 batch_price_map = fetch_daily_ohlcv_batch(batch_tickers, start_date, end_date)
                 
-                # [2] 주식수 데이터 다운로드 (ThreadPool 20개 극대화)
+                # [2] 주식수 데이터 다운로드 (ThreadPool)
                 batch_shares_map = {}
                 with concurrent.futures.ThreadPoolExecutor(max_workers=20) as io_executor:
                     io_futures = {io_executor.submit(_fetch_shares_for_ticker, t): t for t in batch_tickers}
@@ -1212,8 +1252,18 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
                         t = io_futures[f]
                         try:
                             batch_shares_map[t] = f.result()
-                        except:
+                        except Exception as e:
                             batch_shares_map[t] = None
+                            shares_fetch_fail['count'] += 1
+                            if shares_fetch_fail['count'] <= 5:
+                                log_warning(f"Shares future 실패 ({t}): {type(e).__name__}: {e}")
+
+                batch_shares_ok = sum(1 for v in batch_shares_map.values() if v is not None and not v.empty)
+                log_info(
+                    f"배치 {current_batch}/{total_batches} Shares 수집: "
+                    f"{batch_shares_ok}/{len(batch_tickers)} 성공 "
+                    f"(누적 성공 {shares_fetch_ok['count']}, 실패 {shares_fetch_fail['count']})"
+                )
                 
                 # [3] CPU 풀에 즉시 투입
                 batch_submitted = 0
@@ -1275,6 +1325,7 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     success_rate = (success_count / total_attempted) * 100 if total_attempted > 0 else 0
     log_info(f"✅ 개별 종목 피처 데이터 생성 완료: {success_count}/{total_attempted}개 종목 처리됨 (성공률: {success_rate:.1f}%)")
     log_info(f"   - 다운로드 실패: {download_fail_count}개, 피처 계산 실패: {calc_fail_count}개")
+    log_info(f"   - Shares 수집: 성공 {shares_fetch_ok['count']} / 실패 {shares_fetch_fail['count']}")
     
     # 성공률이 너무 낮으면 경고
     if success_rate < 50:
@@ -1289,6 +1340,12 @@ def _fetch_and_prepare_data(start_date, end_date, skip_factor_scores=False):
     raw_feature_df = raw_feature_df.reset_index(drop=True)
     
     raw_feature_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    if 'log_mktcap' in raw_feature_df.columns:
+        mktcap_nn = float(raw_feature_df['log_mktcap'].notna().mean())
+        log_info(f"   - log_mktcap non-null 비율: {mktcap_nn:.1%}")
+        if mktcap_nn < 0.5:
+            log_warning(f"⚠️ log_mktcap 결측이 많습니다 ({mktcap_nn:.1%}). Shares 수집/시총 계산을 확인하세요.")
     raw_feature_df.dropna(subset=['date', '종목코드'], inplace=True)
     raw_feature_df['date'] = pd.to_datetime(raw_feature_df['date'])
     raw_feature_df.drop_duplicates(subset=['date', '종목코드'], keep='first', inplace=True)

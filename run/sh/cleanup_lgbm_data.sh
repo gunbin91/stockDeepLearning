@@ -1,18 +1,23 @@
 #!/bin/bash
 
-# 정리할 데이터 경로 설정 (LGBM 전용)
-DATA_PATH=~/stock_data/processed_feather_lgbm
+# 정리할 데이터 경로 설정 (3모델 공용 feather + 구 LGBM 전용 잔여)
+DATA_PATH=~/stock_data/processed_feather
+OLD_DATA_PATH=~/stock_data/processed_feather_lgbm
 IMPUTATION_VALUES_PATH=~/stock_data/imputation_values_lgbm.joblib
 FOLD_CACHE_PATH=~/stock_data/fold_cache_lgbm
 
-echo "🧹 LightGBM 전처리 데이터 정리를 시작합니다..."
-echo "   - 대상 경로: $DATA_PATH"
+echo "🧹 LightGBM/공용 전처리 데이터 정리를 시작합니다..."
+echo "   - 공용 경로: $DATA_PATH"
+echo "   - 구 LGBM 경로: $OLD_DATA_PATH"
 echo "   - imputation_values 파일: $IMPUTATION_VALUES_PATH"
 echo "   - fold_cache 디렉토리: $FOLD_CACHE_PATH"
 
 # 삭제할 항목이 있는지 확인
 HAS_DATA=false
 if [ -d "$DATA_PATH" ]; then
+    HAS_DATA=true
+fi
+if [ -d "$OLD_DATA_PATH" ]; then
     HAS_DATA=true
 fi
 if [ -f "$IMPUTATION_VALUES_PATH" ]; then
@@ -23,6 +28,7 @@ if [ -d "$FOLD_CACHE_PATH" ]; then
 fi
 
 if [ "$HAS_DATA" = true ]; then
+    echo "   ⚠️ 공용 feather($DATA_PATH)도 삭제됩니다. (RF/CatBoost와 공유)"
     echo "   'y'를 입력하면 데이터가 영구적으로 삭제됩니다."
     read -p "   정말로 삭제하시겠습니까? [y/n]: " choice
     echo ""
@@ -30,19 +36,21 @@ if [ "$HAS_DATA" = true ]; then
     if [[ "$choice" == "y" || "$choice" == "Y" ]]; then
         echo "   삭제를 진행합니다..."
         
-        # 전처리 데이터 디렉토리 삭제
         if [ -d "$DATA_PATH" ]; then
             rm -rf "$DATA_PATH"
-            echo "   ✅ 전처리 데이터 디렉토리가 삭제되었습니다."
+            echo "   ✅ 공용 전처리 데이터 디렉토리가 삭제되었습니다."
+        fi
+
+        if [ -d "$OLD_DATA_PATH" ]; then
+            rm -rf "$OLD_DATA_PATH"
+            echo "   ✅ 구 LGBM 전처리 데이터 디렉토리가 삭제되었습니다."
         fi
         
-        # imputation_values 파일 삭제
         if [ -f "$IMPUTATION_VALUES_PATH" ]; then
             rm -f "$IMPUTATION_VALUES_PATH"
             echo "   ✅ imputation_values 파일이 삭제되었습니다."
         fi
         
-        # fold_cache 디렉토리 삭제
         if [ -d "$FOLD_CACHE_PATH" ]; then
             rm -rf "$FOLD_CACHE_PATH"
             echo "   ✅ fold_cache 디렉토리가 삭제되었습니다."
@@ -57,4 +65,3 @@ else
 fi
 
 echo "🧹 정리 작업이 완료되었습니다."
-

@@ -21,6 +21,8 @@ os.environ['PYTHONWARNINGS'] = 'ignore'
 
 # yfinance의 pandas deprecated API 경고 무시 (yfinance 라이브러리 자체 문제)
 # 모든 방법으로 필터링 시도 - 가장 강력한 설정
+warnings.simplefilter("ignore")
+warnings.filterwarnings("ignore")
 warnings.simplefilter("ignore", FutureWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 try:
@@ -36,11 +38,35 @@ warnings.filterwarnings("ignore", message=".*will be removed.*")
 warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*", category=UserWarning)
 
+# yfinance stderr 직접 출력 필터
+import sys as _sys
+_orig_stderr = _sys.stderr
+if not getattr(_orig_stderr, "_yf_warning_filtered", False):
+    class _YFinanceFilteredStderr:
+        def __init__(self, original):
+            self.original = original
+            self._yf_warning_filtered = True
+        def write(self, text):
+            if text and (
+                "Pandas4Warning" in text
+                or "Timestamp.utcnow" in text
+                or ("deprecated" in text and ("yfinance" in text or "Timestamp" in text))
+                or ("will be removed" in text and "Timestamp" in text)
+            ):
+                return
+            self.original.write(text)
+        def flush(self):
+            self.original.flush()
+        def __getattr__(self, name):
+            return getattr(self.original, name)
+    _sys.stderr = _YFinanceFilteredStderr(_orig_stderr)
+
 import pandas as pd
 import numpy as np
 import json
 import sys
 import argparse
+import hashlib
 from tqdm import tqdm
 import joblib
 from datetime import datetime, timedelta
@@ -48,6 +74,7 @@ import io
 import traceback
 import threading
 import time
+from pathlib import Path
 import locale
 import platform
 
@@ -1132,14 +1159,107 @@ def get_cache_path():
     meta_file = cache_dir / 'backtest_cache_meta.json'
     return cache_file, meta_file
 
-def load_backtest_cache():
-    """백테스팅 캐시 로드 (단일 파일)"""
+
+def _file_fingerprint(path_obj):
+    """파일 mtime+size 기반 fingerprint 조각"""
+    p = Path(path_obj)
+    if not p.exists():
+        return f"{p.name}:missing"
+    st = p.stat()
+    return f"{p.name}:{st.st_mtime_ns}:{st.st_size}"
+
+
+def get_backtest_cache_fingerprint():
+    """
+    모델 변경 시 캐시를 자동 무효화하기 위한 fingerprint.
+    - 예측확률(ml/lgbm/catboost_pred_proba)은 모델에 종속
+    - 가중치(optimal_weights)는 final_score만 바꾸며 캐시에서 제외/재계산되므로 fingerprint에 넣지 않음
+      (가중치 최적화 중 매 쓰기마다 재수집되는 문제 방지)
+    """
+    data_dir = path_manager.data_dir
+    files = [
+        data_dir / 'cuml_ensemble_model.joblib',
+        data_dir / 'cuml_ensemble_model_metadata.joblib',
+        data_dir / 'lgbm_model.txt',
+        data_dir / 'lgbm_model_metadata.joblib',
+        data_dir / 'catboost_model.cbm',
+        data_dir / 'catboost_model_metadata.joblib',
+    ]
+    raw = "|".join(_file_fingerprint(f) for f in files)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def validate_backtest_cache(meta, required_start_date, required_end_date):
+    """
+    캐시 유효성 검사.
+    Returns: (ok: bool, reason: str|None)
+    """
+    if not meta:
+        return False, "메타데이터 없음"
+
+    cache_start = meta.get("start_date")
+    cache_end = meta.get("end_date")
+    if not cache_start or not cache_end:
+        return False, "캐시 기간 정보 없음"
+
+    try:
+        cache_start_dt = pd.to_datetime(cache_start)
+        cache_end_dt = pd.to_datetime(cache_end)
+        req_start_dt = pd.to_datetime(required_start_date)
+        req_end_dt = pd.to_datetime(required_end_date)
+    except Exception:
+        return False, "날짜 파싱 실패"
+
+    if pd.isna(cache_start_dt) or pd.isna(cache_end_dt) or pd.isna(req_start_dt) or pd.isna(req_end_dt):
+        return False, "날짜 값 비정상"
+
+    # 요청 기간이 캐시 기간에 포함되어야 함
+    if cache_start_dt > req_start_dt:
+        return False, f"캐시 시작일({cache_start})이 요청 시작일({required_start_date})보다 늦음"
+    if cache_end_dt < req_end_dt:
+        return False, f"캐시 종료일({cache_end})이 요청 종료일({required_end_date})보다 이름"
+
+    current_fp = get_backtest_cache_fingerprint()
+    cached_fp = meta.get("fingerprint")
+    if not cached_fp:
+        return False, "구버전 캐시(fingerprint 없음)"
+    if cached_fp != current_fp:
+        return False, "모델 변경으로 fingerprint 불일치"
+
+    # 핵심 컬럼 존재 여부 (피처/예측 컬럼 변경 감지)
+    cols = set(meta.get("data_columns") or [])
+    required_cols = [
+        "등락율(5D)",
+        "log_mktcap",
+        "시총 회전율(1W)",
+        "시총 회전율(3M)",
+        "ml_pred_proba",
+        "lgbm_pred_proba",
+        "catboost_pred_proba",
+    ]
+    missing = [c for c in required_cols if c not in cols]
+    if missing:
+        return False, f"필수 컬럼 누락: {missing}"
+
+    return True, None
+
+
+def load_backtest_cache(required_start_date=None, required_end_date=None):
+    """백테스팅 캐시 로드 (단일 파일). 기간/모델 fingerprint 불일치 시 무효화."""
     try:
         cache_file, meta_file = get_cache_path()
         if cache_file.exists() and meta_file.exists():
             # 메타데이터 로드
             with open(meta_file, 'r', encoding='utf-8') as f:
                 meta = json.load(f)
+
+            if required_start_date is not None and required_end_date is not None:
+                ok, reason = validate_backtest_cache(meta, required_start_date, required_end_date)
+                if not ok:
+                    log_warning(f"⚠️ 백테스팅 캐시 무효화: {reason}")
+                    print(f"📦 백테스팅 캐시 무효화 → 재수집합니다. 사유: {reason}")
+                    return None, None
+
             # 데이터 로드
             data = pd.read_feather(cache_file)
             # final_score는 가중치에 따라 달라지므로 캐시에서 제거
@@ -1159,6 +1279,7 @@ def load_backtest_cache():
                 "start_date": meta.get('start_date'),
                 "end_date": meta.get('end_date'),
                 "created_at": meta.get('created_at'),
+                "fingerprint": meta.get('fingerprint'),
                 "data_rows": len(data)
             })
             return data, meta
@@ -1196,6 +1317,7 @@ def save_backtest_cache(data, start_date, end_date):
             'start_date': start_date_str,
             'end_date': end_date_str,
             'created_at': datetime.now().isoformat(),
+            'fingerprint': get_backtest_cache_fingerprint(),
             'data_rows': len(data),
             'data_columns': list(data.columns)
         }
@@ -1205,6 +1327,7 @@ def save_backtest_cache(data, start_date, end_date):
             "cache_file": str(cache_file),
             "start_date": meta['start_date'],
             "end_date": meta['end_date'],
+            "fingerprint": meta['fingerprint'],
             "data_rows": len(data)
         })
         return True
@@ -1321,7 +1444,10 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         try:
             # 캐시 사용 여부 확인
             if use_cache:
-                cached_data, cache_meta = load_backtest_cache()
+                cached_data, cache_meta = load_backtest_cache(
+                    required_start_date=backtest_start_date_with_warmup,
+                    required_end_date=end_date,
+                )
                 if cached_data is not None and cache_meta is not None:
                     test_data = cached_data
                     cache_used = True
@@ -1329,12 +1455,13 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                         "start_date": cache_meta.get('start_date'),
                         "end_date": cache_meta.get('end_date'),
                         "created_at": cache_meta.get('created_at'),
+                        "fingerprint": cache_meta.get('fingerprint'),
                         "data_rows": len(test_data)
                     })
                     print(f"📦 백테스팅 캐시 파일 사용: {cache_meta.get('start_date')} ~ {cache_meta.get('end_date')} (생성일: {cache_meta.get('created_at')})")
                 else:
-                    log_info("백테스팅 캐시 파일이 없습니다. 데이터 수집을 시작합니다.")
-                    print("📦 백테스팅 캐시 파일이 없습니다. 데이터 수집을 시작합니다.")
+                    log_info("백테스팅 캐시 파일이 없거나 무효합니다. 데이터 수집을 시작합니다.")
+                    print("📦 백테스팅 캐시 파일이 없거나 무효합니다. 데이터 수집을 시작합니다.")
             
             # 캐시를 사용하지 않거나 캐시 파일이 없는 경우 데이터 수집
             if not cache_used:

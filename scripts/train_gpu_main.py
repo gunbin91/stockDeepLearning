@@ -10,6 +10,7 @@
 
 import os
 import sys
+os.environ['PYTHONWARNINGS'] = 'ignore'
 import argparse
 import shutil
 import glob
@@ -19,6 +20,32 @@ from bisect import bisect_left
 import gc
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+warnings.simplefilter("ignore")
+warnings.filterwarnings("ignore")
+try:
+    from pandas.errors import Pandas4Warning
+    warnings.filterwarnings("ignore", category=Pandas4Warning)
+except Exception:
+    pass
+warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*")
+_orig_stderr = sys.stderr
+if not getattr(_orig_stderr, "_yf_warning_filtered", False):
+    class _YFinanceFilteredStderr:
+        def __init__(self, original):
+            self.original = original
+            self._yf_warning_filtered = True
+        def write(self, text):
+            if text and ("Pandas4Warning" in text or "Timestamp.utcnow" in text or
+                         ("deprecated" in text and ("yfinance" in text or "Timestamp" in text)) or
+                         ("will be removed" in text and "Timestamp" in text)):
+                return
+            self.original.write(text)
+        def flush(self):
+            self.original.flush()
+        def __getattr__(self, name):
+            return getattr(self.original, name)
+    sys.stderr = _YFinanceFilteredStderr(_orig_stderr)
 
 # cudf의 feather reader 관련 UserWarning은 예상된 동작이므로 숨김 처리
 warnings.filterwarnings("ignore", message="Using CPU via PyArrow to read feather dataset", category=UserWarning)
@@ -605,13 +632,12 @@ def prepare_data_and_save(data_path, start_date, end_date):
         # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
         # 새로 추가된 피처
         'RVOL',  # 상대 거래량 (Relative Volume)
-        'RVOL(1W)',  # 5일/20일 상대 거래량
         '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
         '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
         'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
         'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
         'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
-        # 'ATRr_60',  # ATR 비율 60일 (제거)
+        'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
         # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
         # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
         
@@ -625,6 +651,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
         # Gap 피처 제거
         # 신규 추가
         'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
+        '등락율(5D)',  # 5거래일 종가 대비 수익률 (비율)
     ]
 
     try:
@@ -1379,20 +1406,24 @@ def objective(trial, fold_data_cache, features, max_depth_list, rng):
         
         # 스케일링 전 데이터 검증 및 정리
         # NaN/Inf 값 확인 및 처리
-        numeric_cols_train = X_train_resampled.select_dtypes(include=[np.number]).columns
-        numeric_cols_val = X_val.select_dtypes(include=[np.number]).columns
+        # cuDF: 컬럼별 .sum().sum()은 MixedTypeError 가능 → float만, 행축 합산
+        numeric_cols_train = X_train_resampled.select_dtypes(include=[np.floating]).columns
+        numeric_cols_val = X_val.select_dtypes(include=[np.floating]).columns
         
         median_values = None  # Val 데이터 NaN 대체용
         
         if len(numeric_cols_train) > 0:
             # 무한대 값 처리
-            inf_count_train = (X_train_resampled[numeric_cols_train] == np.inf).sum().sum() + (X_train_resampled[numeric_cols_train] == -np.inf).sum().sum()
+            inf_mask_train = (X_train_resampled[numeric_cols_train] == np.inf) | (X_train_resampled[numeric_cols_train] == -np.inf)
+            inf_mask_train = inf_mask_train.fillna(False)
+            inf_count_train = int(inf_mask_train.astype(np.int8).sum(axis=1).sum())
             if inf_count_train > 0:
                 log_warning(f"   ⚠️ Fold #{fold+1} Train 데이터에 무한대 값 {inf_count_train:,}개 발견. NaN으로 변환합니다.")
                 X_train_resampled[numeric_cols_train] = X_train_resampled[numeric_cols_train].replace([np.inf, -np.inf], np.nan)
             
             # NaN 개수 확인 및 중앙값 계산
-            nan_count_train = X_train_resampled[numeric_cols_train].isna().sum().sum()
+            nan_mask_train = X_train_resampled[numeric_cols_train].isna().fillna(False)
+            nan_count_train = int(nan_mask_train.astype(np.int8).sum(axis=1).sum())
             if nan_count_train > 0:
                 log_warning(f"   ⚠️ Fold #{fold+1} Train 데이터에 NaN {nan_count_train:,}개 발견. 중앙값으로 대체합니다.")
                 # 중앙값 계산 (Val 데이터 대체용으로도 사용)
@@ -1401,13 +1432,16 @@ def objective(trial, fold_data_cache, features, max_depth_list, rng):
         
         if len(numeric_cols_val) > 0:
             # 검증 데이터도 동일하게 처리
-            inf_count_val = (X_val[numeric_cols_val] == np.inf).sum().sum() + (X_val[numeric_cols_val] == -np.inf).sum().sum()
+            inf_mask_val = (X_val[numeric_cols_val] == np.inf) | (X_val[numeric_cols_val] == -np.inf)
+            inf_mask_val = inf_mask_val.fillna(False)
+            inf_count_val = int(inf_mask_val.astype(np.int8).sum(axis=1).sum())
             if inf_count_val > 0:
                 log_warning(f"   ⚠️ Fold #{fold+1} Val 데이터에 무한대 값 {inf_count_val:,}개 발견. NaN으로 변환합니다.")
                 X_val[numeric_cols_val] = X_val[numeric_cols_val].replace([np.inf, -np.inf], np.nan)
             
             # 검증 데이터는 Train의 중앙값으로 대체 (데이터 누출 방지)
-            nan_count_val = X_val[numeric_cols_val].isna().sum().sum()
+            nan_mask_val = X_val[numeric_cols_val].isna().fillna(False)
+            nan_count_val = int(nan_mask_val.astype(np.int8).sum(axis=1).sum())
             if nan_count_val > 0:
                 if median_values is not None:
                     log_warning(f"   ⚠️ Fold #{fold+1} Val 데이터에 NaN {nan_count_val:,}개 발견. Train 중앙값으로 대체합니다.")
@@ -2241,6 +2275,7 @@ def main():
         # Gap 피처 제거
         # 신규 추가
         'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
+        '등락율(5D)',  # 5거래일 종가 대비 수익률 (비율)
     ]
     
     # 전체 데이터 중앙값 계산 제거 (Fold별로 Train 데이터만으로 계산)

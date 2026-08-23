@@ -1764,37 +1764,34 @@ def get_stock_features(ticker_code):
         if selected_stock_features.empty:
             return jsonify({'error': '해당 종목의 피처 데이터를 찾을 수 없습니다.'}), 404
         
-        # 학습 모델에서 사용하는 피처 리스트 (train_gpu_main.py와 동일)
+        # 학습 모델에서 사용하는 피처 리스트 (공통 26개)
         model_features = [
             'log_mktcap',
             '52주_신고가_비율',
             'ADX_14',
-            'disparity_120',     # 120일 이격도
-            'disparity_240',     # 240일 이격도
-            'disparity_20',      # 20일 이격도
-            'IXIC_disparity_20',  # IXIC 20일 이격도 (NASDAQ 지수)
-            # 추가된 피처
+            'disparity_120',
+            'disparity_240',
+            'disparity_20',
+            'IXIC_disparity_20',
             'Trend_Pullback_Score',
             'Position_Range_60',
-            # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
-            # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
-            'MA20_Slope',   # 20일 이동평균선 기울기
-            'MA120_Slope',   # 120일 이동평균선 기울기
-            'MA240_Slope',   # 240일 이동평균선 기울기
-            'IXIC_MA20_Slope',  # IXIC 20일 이동평균선 기울기 (NASDAQ 지수)
-            # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
-            # 새로 추가된 피처
-            'RVOL',  # 상대 거래량 (Relative Volume)
-            '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
-            '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
-            'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
-            'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
-            'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
-            'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
-            'HV_Volatility_5',  # HV 변동성 1주
-            # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
-            # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
-            'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
+            'MA20_Slope',
+            'MA120_Slope',
+            'MA240_Slope',
+            'IXIC_MA20_Slope',
+            'RVOL',
+            '시총 회전율(1W)',
+            '시총 회전율(3M)',
+            'RSI_Signal_Oscillator',
+            'ATRr_5',
+            'ATRr_20',
+            'ATRr_60',
+            'HV_Volatility_5',
+            'HV_Volatility_20',
+            'HV_Volatility_60',
+            'VWAP_Disparity_5',
+            'Max_Drawdown_20',
+            '등락율(5D)',
         ]
         
         # 등락율 계산 등 다른 부분에 영향있는 필수 피처 (표시용)
@@ -2224,36 +2221,34 @@ def calculate_feature_correlation():
         data_path = os.path.expanduser("~/stock_data/processed_feather")
         feather_files = glob.glob(os.path.join(data_path, "*.feather"))
         
-        # 학습 모델에서 사용하는 피처 리스트 (train_gpu_main.py와 동일)
+        # 학습 모델에서 사용하는 피처 리스트 (공통 26개)
         model_features = [
             'log_mktcap',
             '52주_신고가_비율',
             'ADX_14',
-            'disparity_120',  # 120일 이격도
-            'disparity_240',  # 240일 이격도
-            'IXIC_disparity_20',  # IXIC 20일 이격도 (NASDAQ 지수)
-            # 추가된 피처
+            'disparity_120',
+            'disparity_240',
+            'disparity_20',
+            'IXIC_disparity_20',
             'Trend_Pullback_Score',
             'Position_Range_60',
-            # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
-            # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
-            'MA20_Slope',  # 20일 이동평균선 기울기
-            'MA120_Slope',  # 120일 이동평균선 기울기
-            'MA240_Slope',  # 240일 이동평균선 기울기
-            'IXIC_MA20_Slope',  # IXIC 20일 이동평균선 기울기 (NASDAQ 지수)
-            # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
-            # 새로 추가된 피처
-            'RVOL',  # 상대 거래량 (Relative Volume)
-            '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
-            '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
-            'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
-            'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
-            'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
-            'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
-            'HV_Volatility_5',  # HV 변동성 1주
-            # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
-            # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
-            'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
+            'MA20_Slope',
+            'MA120_Slope',
+            'MA240_Slope',
+            'IXIC_MA20_Slope',
+            'RVOL',
+            '시총 회전율(1W)',
+            '시총 회전율(3M)',
+            'RSI_Signal_Oscillator',
+            'ATRr_5',
+            'ATRr_20',
+            'ATRr_60',
+            'HV_Volatility_5',
+            'HV_Volatility_20',
+            'HV_Volatility_60',
+            'VWAP_Disparity_5',
+            'Max_Drawdown_20',
+            '등락율(5D)',
         ]
         
         data_source = None

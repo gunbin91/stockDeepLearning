@@ -7,10 +7,11 @@
 # - Hyperparameter optimization using Optuna.
 # - Full dataset usage (no undersampling) with scale_pos_weight for class imbalance.
 # - Early Stopping to prevent overfitting.
-# - Separate data path from RandomForest: ~/stock_data/processed_feather_lgbm
+# - Shared data path with RF/CatBoost: ~/stock_data/processed_feather
 
 import os
 import sys
+os.environ['PYTHONWARNINGS'] = 'ignore'
 import argparse
 import shutil
 import glob
@@ -19,6 +20,31 @@ from datetime import datetime, timedelta
 from bisect import bisect_left
 import gc
 import warnings
+warnings.simplefilter("ignore")
+warnings.filterwarnings("ignore")
+try:
+    from pandas.errors import Pandas4Warning
+    warnings.filterwarnings("ignore", category=Pandas4Warning)
+except Exception:
+    pass
+warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*")
+_orig_stderr = sys.stderr
+if not getattr(_orig_stderr, "_yf_warning_filtered", False):
+    class _YFinanceFilteredStderr:
+        def __init__(self, original):
+            self.original = original
+            self._yf_warning_filtered = True
+        def write(self, text):
+            if text and ("Pandas4Warning" in text or "Timestamp.utcnow" in text or
+                         ("deprecated" in text and ("yfinance" in text or "Timestamp" in text)) or
+                         ("will be removed" in text and "Timestamp" in text)):
+                return
+            self.original.write(text)
+        def flush(self):
+            self.original.flush()
+        def __getattr__(self, name):
+            return getattr(self.original, name)
+    sys.stderr = _YFinanceFilteredStderr(_orig_stderr)
 
 # pandas 호환성 패치: cuDF가 pandas.api.types.is_interval을 사용하는데 최신 pandas에서는 제거됨
 def apply_pandas_compatibility_patch():
@@ -195,6 +221,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
         'HV_Volatility_60',
         'VWAP_Disparity_5',
         'Max_Drawdown_20',
+        '등락율(5D)',
     ]
 
     try:
@@ -1180,7 +1207,7 @@ def main():
         n_trials = args.n_iter
     
     # 별도 데이터 경로 설정 (RF와 분리)
-    data_path = os.path.expanduser("~/stock_data/processed_feather_lgbm")
+    data_path = os.path.expanduser("~/stock_data/processed_feather")
     
     # --- 1. 데이터 준비 단계 ---
     run_preparation = False
@@ -1262,6 +1289,7 @@ def main():
         'HV_Volatility_60',
         'VWAP_Disparity_5',
         'Max_Drawdown_20',
+        '등락율(5D)',
     ]
 
     # --- 3. Fold 분할 (날짜 기반) ---

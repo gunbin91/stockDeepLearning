@@ -19,10 +19,12 @@ import warnings
 import os
 
 # 환경 변수로 pandas 경고 비활성화
-os.environ['PYTHONWARNINGS'] = 'ignore::pandas.errors.Pandas4Warning'
+os.environ['PYTHONWARNINGS'] = 'ignore'
 
 # yfinance의 pandas deprecated API 경고 무시 (yfinance 라이브러리 자체 문제)
 # 모든 방법으로 필터링 시도
+warnings.simplefilter("ignore")
+warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", category=FutureWarning)
 try:
     from pandas.errors import Pandas4Warning
@@ -33,6 +35,25 @@ except (ImportError, AttributeError):
 warnings.filterwarnings("ignore", message=".*Timestamp.utcnow.*")
 warnings.filterwarnings("ignore", message=".*deprecated.*")
 warnings.filterwarnings("ignore", message=".*will be removed.*")
+
+import sys as _sys
+_orig_stderr = _sys.stderr
+if not getattr(_orig_stderr, "_yf_warning_filtered", False):
+    class _YFinanceFilteredStderr:
+        def __init__(self, original):
+            self.original = original
+            self._yf_warning_filtered = True
+        def write(self, text):
+            if text and ("Pandas4Warning" in text or "Timestamp.utcnow" in text or
+                         ("deprecated" in text and ("yfinance" in text or "Timestamp" in text)) or
+                         ("will be removed" in text and "Timestamp" in text)):
+                return
+            self.original.write(text)
+        def flush(self):
+            self.original.flush()
+        def __getattr__(self, name):
+            return getattr(self.original, name)
+    _sys.stderr = _YFinanceFilteredStderr(_orig_stderr)
 
 import pandas as pd
 import numpy as np
@@ -1036,6 +1057,16 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         except Exception as e:
             log_warning(f"Max_Drawdown_20 계산 실패 ({ticker}): {e}")
             latest_data['Max_Drawdown_20'] = np.nan
+
+        # 등락율(5D): 5거래일 종가 대비 수익률 (비율) — 학습 피처와 동일 정의
+        try:
+            if len(df_for_indicators) >= 6:
+                latest_data['등락율(5D)'] = float(df_for_indicators['종가'].pct_change(5).iloc[-1])
+            else:
+                latest_data['등락율(5D)'] = np.nan
+        except Exception as e:
+            log_warning(f"등락율(5D) 계산 실패 ({ticker}): {e}")
+            latest_data['등락율(5D)'] = np.nan
 
         # Trend_Pullback_Score (내부 MA20_Slope 활용)
         try:
