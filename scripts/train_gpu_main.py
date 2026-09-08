@@ -572,18 +572,14 @@ def prepare_data_and_save(data_path, start_date, end_date):
         # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
         # 새로 추가된 피처
         'RVOL',  # 상대 거래량 (Relative Volume)
-        'RVOL(1W)',  # 5일/20일 상대 거래량
         '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
         '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
         'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
         'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
         'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
-        # 'ATRr_60',  # ATR 비율 60일 (제거)
-        # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
-        # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
+        'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
         
-        # 2024년 12월 신규 추가 피처 (3종)
-        'Log_Return_20',     # 로그 수익률 1개월 (20일)
+        # HV / VWAP / 낙폭 / CLV
         'HV_Volatility_20',  # HV 변동성 1개월 (일별 로그 수익률의 20일 표준편차)
         'HV_Volatility_60',  # HV 변동성 3개월 (일별 로그 수익률의 60일 표준편차)
         'HV_Volatility_5',   # HV 변동성 1주 (일별 로그 수익률의 5일 표준편차)
@@ -591,6 +587,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
         # Gap 피처 제거
         # 신규 추가
         'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
+        '등락율(5D)',  # 5거래일 전 종가 대비 누적 등락율 (%)
         'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
     ]
 
@@ -2106,7 +2103,7 @@ def main():
     parser.add_argument('--max_depth', type=int, nargs='+', default=[10, 15, 20, 25, 30], help='max_depth 후보 리스트 (과적합 방지를 위해 10-30 권장)')
     args = parser.parse_args()
     
-    # WSL 홈 디렉토리 내에 데이터 저장 경로 설정
+    # RF / LGBM / CatBoost 공용 학습 데이터 캐시
     data_path = os.path.expanduser("~/stock_data/processed_feather")
     
     # --- 1. 데이터 준비 단계 ---
@@ -2232,6 +2229,7 @@ def main():
         # Gap 피처 제거
         # 신규 추가
         'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
+        '등락율(5D)',  # 5거래일 전 종가 대비 누적 등락율 (%)
         'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
     ]
     

@@ -673,23 +673,13 @@ def create_stock_chart(ticker_code, stock_name):
         end_date = datetime.now()
         start_date = end_date - timedelta(days=2*365)
         
-        # 하이브리드 방식으로 주가 데이터 수집 (Yahoo Finance → KRX → NAVER)
-        df = None
-        try:
-            df = fdr.DataReader(padded_ticker_code, start_date, end_date)
-        except Exception as e1:
-            log_warning(f"차트 데이터 수집 실패 (1차 - 기본): {e1}")
-            try:
-                df = fdr.DataReader(f'KRX:{padded_ticker_code}', start_date, end_date)
-            except Exception as e2:
-                log_warning(f"차트 데이터 수집 실패 (2차 - KRX): {e2}")
-                try:
-                    df = fdr.DataReader(f'NAVER:{padded_ticker_code}', start_date, end_date)
-                except Exception as e3:
-                    log_error(f"차트 데이터 수집 최종 실패 (3차 - NAVER): {e3}")
-                    df = None
+        # NAVER → KRX → NAVER(명시) 폴백 (단건 차트: 소스 로그 생략)
+        df, _ = data_fetcher.fetch_stock_ohlcv_with_fallback(
+            padded_ticker_code, start_date, end_date, verbose=False
+        )
         
         if df is None or df.empty:
+            log_warning(f"차트 데이터 수집 실패: {padded_ticker_code} (NAVER → KRX → NAVER 모두 실패)")
             return None
 
         # 이동평균선(MA) 계산
@@ -1611,9 +1601,11 @@ def get_stock_features(ticker_code):
             'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
             'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
             'HV_Volatility_5',  # HV 변동성 1주
-            # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
-            # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
+            'HV_Volatility_20',  # HV 변동성 1개월
+            'HV_Volatility_60',  # HV 변동성 3개월
+            'VWAP_Disparity_5',  # VWAP 괴리율 1주
             'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
+            '등락율(5D)',  # 5거래일 전 종가 대비 누적 등락율 (%)
             'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
         ]
         
@@ -1992,40 +1984,35 @@ def calculate_feature_correlation():
         data_path = os.path.expanduser("~/stock_data/processed_feather")
         feather_files = glob.glob(os.path.join(data_path, "*.feather"))
         
-        # 학습 모델에서 사용하는 피처 리스트 (train_gpu_main.py와 동일)
+        # 학습 모델에서 사용하는 피처 리스트 (저장된 모델 27개와 동일)
         model_features = [
             'log_mktcap',
             '52주_신고가_비율',
             'ADX_14',
-            'disparity_120',  # 120일 이격도
-            'disparity_240',  # 240일 이격도
-            'KOSPI_disparity_20',  # KOSPI 20일 이격도
-            # 추가된 피처
-            'Z_Score_20',
+            'disparity_120',
+            'disparity_240',
+            'disparity_20',
+            'KOSPI_disparity_20',
+            'Trend_Pullback_Score',
             'Position_Range_60',
-            # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
-            # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
-            'MA20_Slope',  # 20일 이동평균선 기울기
-            'MA120_Slope',  # 120일 이동평균선 기울기
-            'MA240_Slope',  # 240일 이동평균선 기울기
-            'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
-            'Ichi_Kijun_Gap',        # 일목 기준선 괴리율
-            'Ichi_Cloud_Score',      # 일목 구름대 돌파 점수
-            'Ichi_TK_Cross_Power',   # 일목 전환-기준선 크로스 파워
-            'Ichi_Cloud_Thickness',  # 일목 구름대 두께 대비 주가
-            # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
-            # 새로 추가된 피처
-            'RVOL',  # 상대 거래량 (Relative Volume)
-            '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
-            '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
-            'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
-            'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
-            'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
-            'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
-            # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
-            # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
-            'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
-            'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
+            'MA20_Slope',
+            'MA120_Slope',
+            'MA240_Slope',
+            'KOSPI_MA20_Slope',
+            'RVOL',
+            '시총 회전율(1W)',
+            '시총 회전율(3M)',
+            'RSI_Signal_Oscillator',
+            'ATRr_5',
+            'ATRr_20',
+            'ATRr_60',
+            'HV_Volatility_5',
+            'HV_Volatility_20',
+            'HV_Volatility_60',
+            'VWAP_Disparity_5',
+            'Max_Drawdown_20',
+            '등락율(5D)',
+            'CLV',
         ]
         
         data_source = None

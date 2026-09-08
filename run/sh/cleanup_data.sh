@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 정리할 데이터 경로 설정
+# RF / LGBM / CatBoost 공용 학습 데이터 캐시
 DATA_PATH=~/stock_data/processed_feather
 IMPUTATION_VALUES_PATH=~/stock_data/imputation_values.joblib
 FOLD_CACHE_PATH=~/stock_data/fold_cache

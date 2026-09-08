@@ -127,6 +127,134 @@ login_krx("gunbin52", "!rjsqls1357")
 DISABLE_PYKRX_FINANCIAL_FETCH = True
 
 # =================================================================
+# FDR 데이터 수집 공통 헬퍼 (폴백 + 소스 로그)
+# =================================================================
+# KRX 제한이 잦아, FDR에서 NAVER로 가능한 데이터는 NAVER를 먼저 시도한다.
+# FDR은 symbol 형식으로 백엔드를 1개만 고르며, 자동 폴백은 없다.
+# 아래 폴백은 우리 코드가 FDR을 symbol만 바꿔 순차 호출하는 방식이다.
+#
+# - 한국 6자리 종목 OHLCV: NAVER(기본, ticker만 넘김) → KRX → NAVER(명시)
+#   FDR 소스코드: 6자리 한국 종목은 NaverDailyReader가 기본 (Yahoo 아님)
+# - KOSPI 지수: NAVER(NAVER:KOSPI) → KRX(KS11) → YAHOO(^KS11)
+#   FDR에서 KS11 단독 호출은 KRX만 사용하며 자동 폴백 없음
+# - USD/KRW, VIX: FDR 기준 YAHOO 전용 (NAVER 경로 없음)
+# - 종목목록/시가총액(StockListing KRX-MARCAP): FDR 기준 KRX 전용 (NAVER bulk 없음)
+
+KOSPI_INDEX_ATTEMPTS = [
+    ('NAVER', 'NAVER:KOSPI'),
+    ('KRX', 'KS11'),
+    ('YAHOO', '^KS11'),
+]
+
+
+def _build_stock_price_attempts(ticker):
+    """한국 주식 OHLCV 수집 순서: NAVER → KRX → NAVER(명시)"""
+    return [
+        ('NAVER', ticker),
+        ('KRX', f'KRX:{ticker}'),
+        ('NAVER', f'NAVER:{ticker}'),
+    ]
+
+
+def _log_fetch_attempt(category, source, symbol):
+    log_info(f"[{category}] 수집 시도: {source} (symbol={symbol})")
+
+
+def _normalize_fdr_index(df):
+    df = df.copy()
+    df.index = pd.to_datetime(df.index, format='mixed', errors='coerce')
+    return df
+
+
+def fetch_fdr_ohlcv_with_fallback(category, attempts, start_date, end_date, verbose=True):
+    """
+    FDR OHLCV 수집 (소스별 폴백).
+
+    Args:
+        verbose: True면 시도/성공/실패 로그 출력. 주가 배치 수집은 False 권장.
+
+    Returns:
+        tuple: (DataFrame, source_name) 또는 (None, None)
+    """
+    start_date_str = pd.to_datetime(start_date).strftime('%Y-%m-%d')
+    end_date_str = pd.to_datetime(end_date).strftime('%Y-%m-%d')
+
+    last_error = None
+    for source, symbol in attempts:
+        if verbose:
+            _log_fetch_attempt(category, source, symbol)
+        try:
+            df = fdr.DataReader(symbol, start_date_str, end_date_str)
+            if df is not None and not df.empty:
+                if verbose:
+                    log_info(f"[{category}] 수집 성공: {source} (symbol={symbol}, rows={len(df)})")
+                return df, source
+            if verbose:
+                log_warning(f"[{category}] 수집 결과 없음: {source} (symbol={symbol})")
+        except Exception as e:
+            last_error = e
+            if verbose:
+                log_warning(f"[{category}] 수집 실패: {source} (symbol={symbol}) - {e}")
+
+    if verbose:
+        if last_error:
+            log_warning(f"[{category}] 모든 소스 수집 실패 (마지막 오류: {last_error})")
+        else:
+            log_warning(f"[{category}] 모든 소스 수집 실패")
+    return None, None
+
+
+def fetch_stock_ohlcv_with_fallback(ticker, start_date, end_date, category=None, verbose=False):
+    """한국 주식 OHLCV 수집 (NAVER → KRX → NAVER 폴백).
+
+    배치 수집 시 종목별 로그 폭주를 막기 위해 기본 verbose=False.
+    """
+    category = category or f"주가/{ticker}"
+    return fetch_fdr_ohlcv_with_fallback(
+        category,
+        _build_stock_price_attempts(ticker),
+        start_date,
+        end_date,
+        verbose=verbose,
+    )
+
+
+def probe_stock_ohlcv_source(ticker, end_date=None):
+    """첫 종목으로 주가 수집 소스를 1회 판별하고 로그 한 줄만 남긴다.
+
+    Returns:
+        성공한 소스명(str) 또는 None
+    """
+    end = pd.to_datetime(end_date) if end_date is not None else pd.Timestamp.now()
+    probe_start = (end - timedelta(days=30)).strftime('%Y-%m-%d')
+    probe_end = end.strftime('%Y-%m-%d')
+    _, source = fetch_stock_ohlcv_with_fallback(
+        ticker, probe_start, probe_end, category=f'주가소스판별/{ticker}', verbose=False
+    )
+    if source:
+        log_info(f"주가 수집 소스: {source} (첫 종목 {ticker}으로 확인, 순서: NAVER → KRX → NAVER)")
+    else:
+        log_warning(f"주가 수집 소스 판별 실패 (첫 종목 {ticker})")
+    return source
+
+
+def _extract_close_series(df):
+    df = _normalize_fdr_index(df)
+    series = df['Close'].dropna()
+    return series[~series.index.duplicated(keep='first')]
+
+
+def fetch_close_series_with_fallback(category, attempts, start_date, end_date, verbose=True):
+    """FDR Close 시계열 수집 (소스별 폴백). 거시경제 등은 verbose=True 유지."""
+    df, source = fetch_fdr_ohlcv_with_fallback(
+        category, attempts, start_date, end_date, verbose=verbose
+    )
+    if df is None:
+        return None, None
+    return _extract_close_series(df), source
+
+
+# =================================================================
 # 유틸리티 함수: 정규화된 선형회귀기울기 계산 (최신 값만)
 # =================================================================
 
@@ -283,6 +411,70 @@ def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
 
 
 
+# FDR 0.9.110+ 가 KRX-MARCAP에 쓰는 GitHub 일자별 CSV (오늘 파일이 아직 없으면 404)
+_FDR_KRX_MARCAP_CACHE_BASE = (
+    "https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache/"
+    "refs/heads/master/data/listing/krx"
+)
+
+
+def _get_krx_max_work_date():
+    """KRX에서 최신 거래일(max_work_dt)만 조회. 실패 시 None."""
+    try:
+        url = (
+            "http://data.krx.co.kr/comm/bldAttendant/executeForResourceBundle.cmd"
+            "?baseName=krx.mdc.i18n.component&key=B128.bld"
+        )
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://data.krx.co.kr/contents/MDC/MDI/outerLoader/index.cmd",
+        }
+        j = requests.get(url, headers=headers, timeout=15).json()
+        date_str = j["result"]["output"][0]["max_work_dt"]
+        return datetime.strptime(date_str, "%Y%m%d")
+    except Exception as e:
+        log_warning(f"KRX 최신 거래일 조회 실패: {e}")
+        return None
+
+
+def _load_fdr_krx_marcap_cache_csv(preferred_date=None, lookback_days=15):
+    """FDR GitHub KRX-MARCAP CSV를 preferred_date부터 거슬러가며 로드.
+
+    Returns:
+        (DataFrame, 사용된 날짜 datetime) 또는 실패 시 (None, None)
+    """
+    start = preferred_date
+    if start is None:
+        start = _get_krx_max_work_date()
+    if start is None:
+        start = datetime.now()
+    start = pd.to_datetime(start).to_pydatetime().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    last_error = None
+    for i in range(lookback_days + 1):
+        day = start - timedelta(days=i)
+        # 주말 CSV는 보통 없음 → 스킵해도 되지만 HEAD 비용이 작아 그대로 시도
+        url = f"{_FDR_KRX_MARCAP_CACHE_BASE}/{day.strftime('%Y-%m-%d')}.csv"
+        try:
+            df = pd.read_csv(
+                url,
+                index_col=0,
+                dtype={"Code": str, "Dept": str, "ChangeCode": str, "MarketId": str},
+            )
+            df = df.reset_index(drop=True)
+            if df is not None and not df.empty and "Code" in df.columns:
+                return df, day
+        except Exception as e:
+            last_error = e
+            continue
+
+    log_warning(
+        f"FDR GitHub KRX-MARCAP CSV 폴백 실패 "
+        f"(시작일={start.strftime('%Y-%m-%d')}, lookback={lookback_days}): {last_error}"
+    )
+    return None, None
+
+
 def _get_stock_list_from_marcap(analysis_date=None, min_marcap=10_000_000_000):
     """KRX-MARCAP에서 주식 목록 가져오기 (통일된 함수)
     
@@ -291,15 +483,35 @@ def _get_stock_list_from_marcap(analysis_date=None, min_marcap=10_000_000_000):
         min_marcap: 최소 시가총액 (기본값: 100억원 = 10,000,000,000원)
     """
     try:
-        if analysis_date:
-            # 과거 날짜용
-            date_str = analysis_date.strftime('%Y%m%d')
-            log_info(f"FinanceDataReader를 통해 {date_str} 기준 종목 시가총액 정보 수집 (KRX-MARCAP)...")
-            df_marcap = fdr.StockListing('KRX-MARCAP', date_str)
-        else:
-            # 현재 날짜용
-            log_info("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보 수집 (KRX-MARCAP)...")
-            df_marcap = fdr.StockListing('KRX-MARCAP')
+        df_marcap = None
+        cache_fallback_date = None
+        primary_error = None
+
+        try:
+            if analysis_date:
+                # 과거 날짜용
+                date_str = analysis_date.strftime('%Y%m%d')
+                log_info(f"종목목록/시가총액 수집 소스: KRX (StockListing KRX-MARCAP, 기준일={date_str})")
+                log_info(f"FinanceDataReader를 통해 {date_str} 기준 종목 시가총액 정보 수집 (KRX-MARCAP)...")
+                df_marcap = fdr.StockListing('KRX-MARCAP', date_str)
+            else:
+                # 현재 날짜용
+                log_info("종목목록/시가총액 수집 소스: KRX (StockListing KRX-MARCAP, FDR에 NAVER bulk 경로 없음)")
+                log_info("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보 수집 (KRX-MARCAP)...")
+                df_marcap = fdr.StockListing('KRX-MARCAP')
+        except Exception as e:
+            primary_error = e
+            log_warning(f"FDR StockListing(KRX-MARCAP) 실패, GitHub 일자 CSV 폴백 시도: {e}")
+
+        if df_marcap is None or (hasattr(df_marcap, "empty") and df_marcap.empty):
+            preferred = analysis_date if analysis_date is not None else None
+            df_marcap, cache_fallback_date = _load_fdr_krx_marcap_cache_csv(preferred_date=preferred)
+            if df_marcap is None or df_marcap.empty:
+                raise primary_error or RuntimeError("KRX-MARCAP 캐시 CSV를 찾을 수 없습니다.")
+            log_info(
+                f"종목목록/시총 스냅샷 폴백 사용: FDR GitHub CSV "
+                f"({cache_fallback_date.strftime('%Y-%m-%d')}, 오늘자 없음/StockListing 실패)"
+            )
         
         # 스팩, 리츠 제외
         df_marcap = df_marcap[~df_marcap['Name'].str.contains('스팩|리츠', na=False)].copy()
@@ -363,48 +575,31 @@ def fetch_stock_list_for_date(analysis_date, min_marcap=10_000_000_000):
 def _fetch_macro_data(start_date, end_date):
     log_info(f"거시 경제 지표 데이터 수집 중 ({start_date} ~ {end_date})...")
     try:
-        # 날짜 형식을 명시적으로 변환
         start_date_str = pd.to_datetime(start_date).strftime('%Y-%m-%d')
         end_date_str = pd.to_datetime(end_date).strftime('%Y-%m-%d')
-        
-        # 각 데이터 소스별로 개별 처리 (오류 방지)
+
         macro_data = {}
-        
-        try:
-            kospi = fdr.DataReader('KS11', start_date_str, end_date_str)
-            if not kospi.empty:
-                # 날짜 인덱스를 안전하게 처리 (format='mixed' 사용)
-                kospi_copy = kospi.copy()
-                kospi_copy.index = pd.to_datetime(kospi_copy.index, format='mixed', errors='coerce')
-                kospi_series = kospi_copy['Close'].dropna()  # NaT 제거
-                kospi_series = kospi_series[~kospi_series.index.duplicated(keep='first')]  # 중복 인덱스 제거
-                macro_data['KOSPI'] = kospi_series
-        except Exception as e:
-            log_warning(f"KOSPI 데이터 수집 실패: {e}")
-        
-        try:
-            usdkrw = fdr.DataReader('USD/KRW', start_date_str, end_date_str)
-            if not usdkrw.empty:
-                # 날짜 인덱스를 안전하게 처리 (format='mixed' 사용)
-                usdkrw_copy = usdkrw.copy()
-                usdkrw_copy.index = pd.to_datetime(usdkrw_copy.index, format='mixed', errors='coerce')
-                usdkrw_series = usdkrw_copy['Close'].dropna()  # NaT 제거
-                usdkrw_series = usdkrw_series[~usdkrw_series.index.duplicated(keep='first')]  # 중복 인덱스 제거
-                macro_data['USDKRW'] = usdkrw_series
-        except Exception as e:
-            log_warning(f"USD/KRW 데이터 수집 실패: {e}")
-        
-        try:
-            vix = fdr.DataReader('^VIX', start_date_str, end_date_str)
-            if not vix.empty:
-                # 날짜 인덱스를 안전하게 처리 (format='mixed' 사용)
-                vix_copy = vix.copy()
-                vix_copy.index = pd.to_datetime(vix_copy.index, format='mixed', errors='coerce')
-                vix_series = vix_copy['Close'].dropna()  # NaT 제거
-                vix_series = vix_series[~vix_series.index.duplicated(keep='first')]  # 중복 인덱스 제거
-                macro_data['VIX'] = vix_series
-        except Exception as e:
-            log_warning(f"VIX 데이터 수집 실패: {e}")
+
+        # KOSPI: NAVER → KRX → YAHOO (모델 피처: KOSPI_disparity_20, KOSPI_MA20_Slope)
+        kospi_series, _ = fetch_close_series_with_fallback(
+            '거시/KOSPI', KOSPI_INDEX_ATTEMPTS, start_date_str, end_date_str
+        )
+        if kospi_series is not None:
+            macro_data['KOSPI'] = kospi_series
+
+        # USD/KRW: YAHOO만 (모델 피처 아님, 시장현황 표시용)
+        usdkrw_series, _ = fetch_close_series_with_fallback(
+            '거시/USD-KRW', [('YAHOO', 'USD/KRW')], start_date_str, end_date_str
+        )
+        if usdkrw_series is not None:
+            macro_data['USDKRW'] = usdkrw_series
+
+        # VIX: YAHOO만 (모델 피처 아님, 시장현황 표시용)
+        vix_series, _ = fetch_close_series_with_fallback(
+            '거시/VIX', [('YAHOO', '^VIX')], start_date_str, end_date_str
+        )
+        if vix_series is not None:
+            macro_data['VIX'] = vix_series
             
         if macro_data:
             macro_df = pd.concat(macro_data.values(), axis=1, keys=macro_data.keys()).ffill()
@@ -464,18 +659,10 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
     try:
         fetch_start = (pd.to_datetime(start_date_for_fetch) - timedelta(days=60)).strftime('%Y-%m-%d')
         
-        # 하이브리드 방식으로 주가 데이터 수집 (Yahoo Finance → KRX → NAVER)
-        df_price_full = None
-        try:
-            df_price_full = fdr.DataReader(ticker, fetch_start, end_date_for_fetch)
-        except:
-            try:
-                df_price_full = fdr.DataReader(f'KRX:{ticker}', fetch_start, end_date_for_fetch)
-            except:
-                try:
-                    df_price_full = fdr.DataReader(f'NAVER:{ticker}', fetch_start, end_date_for_fetch)
-                except:
-                    df_price_full = None
+        # NAVER → KRX → NAVER(명시) 폴백 (종목별 소스 로그는 배치 시작 시 1회만)
+        df_price_full, _ = fetch_stock_ohlcv_with_fallback(
+            ticker, fetch_start, end_date_for_fetch, verbose=False
+        )
         
         if df_price_full is None or df_price_full.empty or len(df_price_full) < 251 + 60: return None, None
         df_price_full.rename(columns={'Open':'시가', 'Close':'종가', 'High':'고가', 'Low':'저가', 'Volume':'거래량'}, inplace=True)
@@ -488,11 +675,6 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         latest_current_price = df_price_full.iloc[-1]['종가']
         
         df_for_indicators = df_price_full[df_price_full.index <= actual_analysis_date].copy()
-        
-        # 재무데이터는 현재 피처/학습 파이프라인에서 사용하지 않으므로 "필수" 조건으로 두지 않음
-        fs_data = pd.DataFrame()
-        if (latest_fs_df is not None) and (not latest_fs_df.empty) and ('종목코드' in latest_fs_df.columns):
-            fs_data = latest_fs_df[latest_fs_df['종목코드'] == ticker]
         
         latest_data = {} 
 
@@ -509,18 +691,6 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         except Exception as e:
             log_warning(f"RVOL 계산 실패 ({ticker}): {e}")
             latest_data['RVOL'] = np.nan
-        
-        # RVOL(1W): 5일 평균 거래량 / 20일 평균 거래량
-        try:
-            거래량_5일_평균 = df_for_indicators['거래량'].rolling(window=5).mean().iloc[-1]
-            거래량_20일_평균 = df_for_indicators['거래량'].rolling(window=20).mean().iloc[-1]
-            if pd.notna(거래량_5일_평균) and pd.notna(거래량_20일_평균) and 거래량_20일_평균 > 0:
-                latest_data['RVOL(1W)'] = 거래량_5일_평균 / 거래량_20일_평균
-            else:
-                latest_data['RVOL(1W)'] = np.nan
-        except Exception as e:
-            log_warning(f"RVOL(1W) 계산 실패 ({ticker}): {e}")
-            latest_data['RVOL(1W)'] = np.nan
         
         # 시총 회전율 계산
         try:
@@ -551,23 +721,9 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         # Exclude_Rank(cond3: 시총 1000억 미만) 계산에 사용되므로
         # 시가총액(억) 값은 제외 규칙 평가 전에 먼저 세팅합니다.
         try:
-            if '시가총액_기준일' in stock_info and pd.notna(stock_info['시가총액_기준일']):
-                latest_data['시가총액'] = stock_info['시가총액_기준일'] / 1_0000_0000
-            else:
-                latest_data['시가총액'] = (reference_date_price * shares) / 1_0000_0000
+            latest_data['시가총액'] = (reference_date_price * shares) / 1_0000_0000
         except Exception:
             latest_data['시가총액'] = np.nan
-        # 이익수익률(=1/PER)은 재무데이터가 있을 때만 계산 (없으면 NaN)
-        try:
-            if (not fs_data.empty) and ('PER' in fs_data.columns) and pd.notna(fs_data['PER'].values[0]) and fs_data['PER'].values[0] != 0:
-                latest_data['이익수익률'] = 1 / fs_data['PER'].values[0]
-            else:
-                latest_data['이익수익률'] = np.nan
-        except Exception:
-            latest_data['이익수익률'] = np.nan
-
-        latest_data['수익률(1M)'] = df_for_indicators['종가'].pct_change(20).iloc[-1]
-        latest_data['수익률(3M)'] = df_for_indicators['종가'].pct_change(60).iloc[-1]
         
         # ATR 계산 (5일, 20일, 60일)
         atr_5 = df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=5)
@@ -591,13 +747,6 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             latest_data['ATRr_60'] = (atr_60.iloc[-1] / df_for_indicators['종가'].iloc[-1]) * 100
         else:
             latest_data['ATRr_60'] = np.nan
-        
-        # ATRr_14는 기존 호환성을 위해 유지 (다른 곳에서 사용할 수 있음)
-        df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=14, append=True)
-        
-        df_for_indicators.ta.obv(close='종가', volume='거래량', append=True)
-        
-        # OBV는 계산하지만 OBV_Slope 피처는 제거됨
         
         df_for_indicators.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
         
@@ -677,18 +826,10 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         #   ( 시가총액 < 1000억 )
         # =================================================================
         try:
-            ma5_series = df_for_indicators['종가'].rolling(window=5).mean()
             ma20_lvl = df_for_indicators['종가'].rolling(window=20).mean()
             ma60_lvl = df_for_indicators['종가'].rolling(window=60).mean()
             ma120_lvl = df_for_indicators['종가'].rolling(window=120).mean()
             ma240_lvl = df_for_indicators['종가'].rolling(window=240).mean()
-
-            # MA5_Angle_Deg (정의 A: MA5 전일 대비 %변화 각도)
-            if len(ma5_series) >= 2 and pd.notna(ma5_series.iloc[-1]) and pd.notna(ma5_series.iloc[-2]) and ma5_series.iloc[-2] != 0:
-                delta = float((ma5_series.iloc[-1] - ma5_series.iloc[-2]) / ma5_series.iloc[-2])
-                latest_data['MA5_Angle_Deg'] = float(np.degrees(np.arctan(delta)))
-            else:
-                latest_data['MA5_Angle_Deg'] = np.nan
 
             # Exclude_Rank (일자별/시점별 동적 평가)
             if len(ma20_lvl) and len(ma60_lvl) and len(ma120_lvl) and len(ma240_lvl):
@@ -734,20 +875,9 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
                 latest_data['Exclude_Rank'] = False
         except Exception:
             # 계산 실패 시에도 파이프라인은 계속 진행 (제외는 적용하지 않음)
-            latest_data['MA5_Angle_Deg'] = latest_data.get('MA5_Angle_Deg', np.nan)
             latest_data['Exclude_Rank'] = False
 
         latest_data['52주_신고가_비율'] = (df_for_indicators['종가'] / df_for_indicators['종가'].rolling(250).max()).iloc[-1]
-        
-        # Relative_Strength_20, RVOL 피처는 제거됨
-        
-        # Z_Score_20 계산 (표준화 이격)
-        mean_20 = df_for_indicators['종가'].rolling(20).mean().iloc[-1]
-        std_20 = df_for_indicators['종가'].rolling(20).std().iloc[-1]
-        if pd.notna(mean_20) and pd.notna(std_20) and std_20 != 0:
-            latest_data['Z_Score_20'] = (df_for_indicators['종가'].iloc[-1] - mean_20) / std_20
-        else:
-            latest_data['Z_Score_20'] = np.nan
         
         # Position_Range_60 계산 (Donchian)
         high_60 = df_for_indicators['고가'].rolling(60).max().iloc[-1]
@@ -758,47 +888,9 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         else:
             latest_data['Position_Range_60'] = 0.5
         
-        # 변동성(1W), 변동성(3M) 피처 제거됨 (2024년 12월)
-        
-        # Eff_Ratio_10 계산 (효율성 비율) - 2024년 12월 제거
-        # try:
-        #     change = df_for_indicators['종가'].diff(10).abs()
-        #     volatility = df_for_indicators['종가'].diff(1).abs().rolling(10).sum()
-        #     if pd.notna(change.iloc[-1]) and pd.notna(volatility.iloc[-1]):
-        #         latest_data['Eff_Ratio_10'] = change.iloc[-1] / (volatility.iloc[-1] + 1e-9)
-        #     else:
-        #         latest_data['Eff_Ratio_10'] = np.nan
-        # except Exception as e:
-        #     log_warning(f"Eff_Ratio_10 계산 실패 ({ticker}): {e}")
-        #     latest_data['Eff_Ratio_10'] = np.nan
-        
-        # OBV는 OBV_Slope 계산에만 사용되므로 피처 리스트에서 제외
-        # RSI_14는 RSI_Signal_Oscillator 계산에만 사용되므로 피처 리스트에서 제외
-        technical_features_to_add = ['ATRr_14', 'ADX_14']
-        for feature in technical_features_to_add:
-            if feature in df_for_indicators.columns:
-                 latest_data[feature] = df_for_indicators[feature].iloc[-1]
-
-        # 재무데이터가 있을 때만 병합 (없으면 아무 것도 추가하지 않음)
-        if fs_data is not None and not fs_data.empty:
-            latest_data.update(fs_data.iloc[0].to_dict())
-        
-        # PBR_log 계산 (PBR 로그 변환) - 2024년 12월 제거
-        # if 'PBR' in latest_data and pd.notna(latest_data['PBR']) and latest_data['PBR'] > 0:
-        #     latest_data['PBR_log'] = np.log(latest_data['PBR'])
-        # else:
-        #     latest_data['PBR_log'] = np.nan
-            
-        # [신규 추가] 로그 수익률(1M) (Log Return 1M)
-        try:
-            # 최근 20일 전 데이터가 있어야 계산 가능
-            if len(df_for_indicators) >= 21:
-                latest_data['Log_Return_20'] = np.log(df_for_indicators['종가'].iloc[-1] / df_for_indicators['종가'].shift(20).iloc[-1])
-            else:
-                latest_data['Log_Return_20'] = np.nan
-        except Exception as e:
-            log_warning(f"Log_Return_20 계산 실패 ({ticker}): {e}")
-            latest_data['Log_Return_20'] = np.nan
+        # ADX_14 (pandas_ta adx append 결과)
+        if 'ADX_14' in df_for_indicators.columns:
+            latest_data['ADX_14'] = df_for_indicators['ADX_14'].iloc[-1]
             
         # HV 변동성 (5일, 20일, 60일)
         try:
@@ -852,6 +944,13 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             log_warning(f"Max_Drawdown_20 계산 실패 ({ticker}): {e}")
             latest_data['Max_Drawdown_20'] = np.nan
 
+        # 등락율(5D): 5거래일 전 종가 대비 누적 등락율 (%)
+        try:
+            latest_data['등락율(5D)'] = (df_for_indicators['종가'].pct_change(5) * 100).iloc[-1]
+        except Exception as e:
+            log_warning(f"등락율(5D) 계산 실패 ({ticker}): {e}")
+            latest_data['등락율(5D)'] = np.nan
+
         # Trend_Pullback_Score (내부 MA20_Slope 활용)
         try:
             ma20 = df_for_indicators['종가'].rolling(window=20).mean()
@@ -893,39 +992,11 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         except Exception as e:
             log_warning(f"Trend_Pullback_Score 계산 실패 ({ticker}): {e}")
             latest_data['Trend_Pullback_Score'] = np.nan
-            
-        # MA120_Slope 계산 (회귀 윈도우 20)
-        try:
-            if len(df_for_indicators) >= 120:
-                ma120_series = df_for_indicators['종가'].rolling(window=120).mean()
-                latest_data['MA120_Slope'] = calculate_normalized_linear_regression_slope_latest(ma120_series, window=5)
-            else:
-                latest_data['MA120_Slope'] = np.nan
-        except Exception as e:
-            log_warning(f"MA120_Slope 계산 실패 ({ticker}): {e}")
-            latest_data['MA120_Slope'] = np.nan
-        
-        # MA240_Slope 계산 (회귀 윈도우 20)
-        try:
-            if len(df_for_indicators) >= 240:
-                ma240_series = df_for_indicators['종가'].rolling(window=240).mean()
-                latest_data['MA240_Slope'] = calculate_normalized_linear_regression_slope_latest(ma240_series, window=5)
-            else:
-                latest_data['MA240_Slope'] = np.nan
-        except Exception as e:
-            log_warning(f"MA240_Slope 계산 실패 ({ticker}): {e}")
-            latest_data['MA240_Slope'] = np.nan
         
         latest_data['종목명'] = stock_info['종목명']
         latest_data['현재가'] = latest_current_price
         latest_data['기준일가'] = reference_date_price
-        latest_data['전날종가'] = df_price_full.iloc[-2]['종가'] if len(df_price_full) >= 2 else latest_current_price  # 전날 종가 추가
-        if '시가총액_기준일' in stock_info and pd.notna(stock_info['시가총액_기준일']):
-            latest_data['시가총액'] = stock_info['시가총액_기준일'] / 1_0000_0000
-        else:
-            latest_data['시가총액'] = (reference_date_price * shares) / 1_0000_0000
-        
-        
+        latest_data['전날종가'] = df_price_full.iloc[-2]['종가'] if len(df_price_full) >= 2 else latest_current_price
         latest_data['종목코드'] = ticker
 
         return latest_data, actual_analysis_date
@@ -995,6 +1066,8 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     total_stocks = len(stock_records)
     
     log_info(f"주식 분석 시작: {total_stocks:,}개 종목을 {total_batches}개 그룹으로 처리 (예상 5-10분)")
+    if stock_records:
+        probe_stock_ohlcv_source(stock_records[0]['종목코드'], end_date=end_date_for_fetch)
     
     for i in range(0, len(stock_records), batch_size):
         batch = stock_records[i:i + batch_size]

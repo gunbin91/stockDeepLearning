@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 정리할 데이터 경로 설정 (CatBoost 전용)
+# 예전 CatBoost 전용 캐시만 정리 (학습 feather는 공용: cleanup_data.sh)
 DATA_PATH=~/stock_data/processed_feather_catboost
 IMPUTATION_VALUES_PATH=~/stock_data/imputation_values_catboost.joblib
 FOLD_CACHE_PATH=~/stock_data/fold_cache_catboost

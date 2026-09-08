@@ -120,8 +120,6 @@ CUML_MODEL_FILE = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
 MODEL_FILE = str(path_manager.get_model_path())
 JSON_REPORT_FILE = str(path_manager.data_dir / 'backtest_report.json')
 TOP_N_STOCKS = 5
-# 캐시에 Exclude_Rank(cond3: 시총 1000억 미만) 반영 여부 등 파이프라인 변경 시 올려 무효화
-BACKTEST_CACHE_SCHEMA_VERSION = 2
 
 # --- 백테스팅 캐시 관련 함수 ---
 
@@ -141,13 +139,6 @@ def load_backtest_cache():
             # 메타데이터 로드
             with open(meta_file, 'r', encoding='utf-8') as f:
                 meta = json.load(f)
-            cached_ver = meta.get('backtest_cache_schema_version', 1)
-            if cached_ver != BACKTEST_CACHE_SCHEMA_VERSION:
-                log_warning(
-                    f"⚠️ 백테스팅 캐시 스키마 불일치(파일: {cached_ver}, 필요: {BACKTEST_CACHE_SCHEMA_VERSION}). "
-                    "시총 1000억 미만 제외 등 반영을 위해 재수집합니다."
-                )
-                return None, None
             # 데이터 로드
             data = pd.read_feather(cache_file)
             # final_score는 가중치에 따라 달라지므로 캐시에서 제거
@@ -206,7 +197,6 @@ def save_backtest_cache(data, start_date, end_date):
             'created_at': datetime.now().isoformat(),
             'data_rows': len(data),
             'data_columns': list(data.columns),
-            'backtest_cache_schema_version': BACKTEST_CACHE_SCHEMA_VERSION,
         }
         with open(meta_file, 'w', encoding='utf-8') as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -1211,8 +1201,12 @@ def create_json_report(results, output_path=None):
             min_date = results["portfolio_history"].index.min()
             max_date = results["portfolio_history"].index.max()
             if pd.notna(min_date) and pd.notna(max_date):
-                kospi = fdr.DataReader('KS11', start=min_date, end=max_date)
-                kospi_cumulative = (1 + kospi['Close'].pct_change().fillna(0)).cumprod()
+                kospi_series, _kospi_src = data_fetcher.fetch_close_series_with_fallback(
+                    '백테스트비교/KOSPI', data_fetcher.KOSPI_INDEX_ATTEMPTS, min_date, max_date
+                )
+                if kospi_series is None or kospi_series.empty:
+                    raise ValueError("KOSPI 비교용 데이터를 가져올 수 없습니다.")
+                kospi_cumulative = (1 + kospi_series.pct_change().fillna(0)).cumprod()
                 
                 # KOSPI 초기값 기준으로 정규화 (포트폴리오와 비교 가능하도록)
                 initial_capital = float(results.get('initial_capital', 0))

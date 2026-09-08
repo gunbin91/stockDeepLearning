@@ -7,7 +7,7 @@
 # - Hyperparameter optimization using Optuna.
 # - Full dataset usage (no undersampling) with scale_pos_weight for class imbalance.
 # - Early Stopping to prevent overfitting.
-# - Separate data path from RandomForest/LGBM: ~/stock_data/processed_feather_catboost
+# - Shared training data cache with RF/LGBM: ~/stock_data/processed_feather
 
 import os
 import sys
@@ -114,6 +114,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
         'HV_Volatility_60',
         'VWAP_Disparity_5',
         'Max_Drawdown_20',
+        '등락율(5D)',  # 5거래일 전 종가 대비 누적 등락율 (%)
         'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
     ]
 
@@ -1065,8 +1066,8 @@ def main():
         log_warning("   ⚠️ 올바른 숫자를 입력해주세요. 기본값 50을 사용합니다.")
         n_trials = args.n_iter
     
-    # 별도 데이터 경로 설정 (RF/LGBM과 분리)
-    data_path = os.path.expanduser("~/stock_data/processed_feather_catboost")
+    # RF / LGBM / CatBoost 공용 학습 데이터 캐시
+    data_path = os.path.expanduser("~/stock_data/processed_feather")
     
     # --- 1. 데이터 준비 단계 ---
     run_preparation = False
@@ -1148,6 +1149,7 @@ def main():
         'HV_Volatility_60',
         'VWAP_Disparity_5',
         'Max_Drawdown_20',
+        '등락율(5D)',  # 5거래일 전 종가 대비 누적 등락율 (%)
         'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
     ]
 

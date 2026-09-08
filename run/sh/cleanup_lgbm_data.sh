@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 정리할 데이터 경로 설정 (LGBM 전용)
+# 예전 LGBM 전용 캐시만 정리 (학습 feather는 공용: cleanup_data.sh)
 DATA_PATH=~/stock_data/processed_feather_lgbm
 IMPUTATION_VALUES_PATH=~/stock_data/imputation_values_lgbm.joblib
 FOLD_CACHE_PATH=~/stock_data/fold_cache_lgbm
