@@ -5,7 +5,7 @@
 # - Interactive data management (prompts for regeneration).
 # - GPU acceleration using LightGBM.
 # - Hyperparameter optimization using Optuna.
-# - Full dataset usage (no undersampling) with scale_pos_weight for class imbalance.
+# - Stratified flat undersampling + sample_weight (see docs/PLAN_sample_weight_stratified.md).
 # - Early Stopping to prevent overfitting.
 # - Shared training data cache with RF/CatBoost: ~/stock_data/processed_feather
 
@@ -45,6 +45,12 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from logger import log_info, log_warning, log_error, log_critical
 import data_processor
 from path_manager import path_manager
+from cross_sectional import mean_daily_auc, mean_daily_precision_at_k
+
+_scripts_dir = os.path.dirname(os.path.abspath(__file__))
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
+from sample_weight_utils import apply_stratified_flat_undersample, require_sample_meta
 
 # Optuna TPE Sampler의 seed 고정을 위한 설정
 optuna.samplers.TPESampler.init_rng = lambda self: np.random.RandomState()
@@ -88,33 +94,42 @@ def prepare_data_and_save(data_path, start_date, end_date):
 
     # RF와 동일한 피처 목록 (실제 계산되는 피처만 포함)
     features = [
-        'log_mktcap',
+        'log_mktcap_cs',
         '52주_신고가_비율',
-        'ADX_14',
-        'disparity_120',
-        'disparity_240',
-        'disparity_20',
-        'KOSPI_disparity_20',
+        'ADX_14_cs',
+        'disparity_120_cs',
+        'disparity_240_cs',
+        'disparity_20_cs',
+        # 'KOSPI_disparity_20',  # Phase 2-2: 당일 전종목 동일값 → 랭킹 무기여, 제거
         'Trend_Pullback_Score',
         'Position_Range_60',
-        'MA20_Slope',
-        'MA120_Slope',
-        'MA240_Slope',
-        'KOSPI_MA20_Slope',
-        'RVOL',
-        '시총 회전율(1W)',
-        '시총 회전율(3M)',
+        'MA20_Slope_cs',
+        'MA120_Slope_cs',
+        'MA240_Slope_cs',
+        # 'KOSPI_MA20_Slope',  # Phase 2-2: 당일 전종목 동일값 → 랭킹 무기여, 제거
+        'RVOL_cs',
+        '시총 회전율(1W)_cs',
+        '시총 회전율(3M)_cs',
         'RSI_Signal_Oscillator',
-        'ATRr_5',
-        'ATRr_20',
-        'ATRr_60',
-        'HV_Volatility_5',
-        'HV_Volatility_20',
-        'HV_Volatility_60',
-        'VWAP_Disparity_5',
-        'Max_Drawdown_20',
-        '등락율(5D)',  # 5거래일 전 종가 대비 누적 등락율 (%)
+        'ATRr_5_cs',
+        'ATRr_20_cs',
+        'ATRr_60_cs',
+        'HV_Volatility_5_cs',
+        'HV_Volatility_20_cs',
+        'HV_Volatility_60_cs',
+        'VWAP_Disparity_5_cs',
+        'Max_Drawdown_20_cs',
+        '등락율(5D)_cs',  # 5거래일 전 종가 대비 누적 등락율 (%) 횡단면
         'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
+        # Phase C (PLAN_model_improvement_v2): asymmetric features
+        'Downside_Vol_20_cs',
+        'Upside_Downside_Vol_Ratio_20_cs',
+        'Return_Skew_60_cs',
+        'Down_Day_Ratio_20_cs',
+        'Down_Volume_Ratio_20_cs',
+        'Gap_Mean_20_cs',
+        'Intraday_Strength_20_cs',
+        'Amihud_Illiq_20_cs',
     ]
 
     try:
@@ -164,10 +179,11 @@ def prepare_data_and_save(data_path, start_date, end_date):
                     failed_tickers.append(ticker)
                     continue
 
-                # 숫자형 피처만 선택
+                # 숫자형 피처만 선택 (sample_weight는 학습 weight용, 피처 제외)
                 numeric_cols = ticker_df.select_dtypes(include=[np.number]).columns.tolist()
-                if 'target' in numeric_cols:
-                    numeric_cols.remove('target')
+                for drop_col in ('target', 'sample_weight'):
+                    if drop_col in numeric_cols:
+                        numeric_cols.remove(drop_col)
                 
                 if not numeric_cols:
                     log_warning(f"   ⚠️ 종목 {ticker}에 숫자형 피처가 없습니다. 건너뜁니다.")
@@ -197,6 +213,10 @@ def prepare_data_and_save(data_path, start_date, end_date):
                 preprocessed_df = X_all.copy()
                 preprocessed_df['target'] = y
                 preprocessed_df['date'] = pd.to_datetime(ticker_df['date'])
+                if 'sample_weight' in ticker_df.columns:
+                    preprocessed_df['sample_weight'] = ticker_df['sample_weight'].astype(np.float32).values
+                if 'sample_type' in ticker_df.columns:
+                    preprocessed_df['sample_type'] = ticker_df['sample_type'].astype(str).values
                 if '종목코드' in ticker_df.columns:
                     preprocessed_df['종목코드'] = ticker_df['종목코드'].values
                 else:
@@ -272,13 +292,17 @@ def load_data_period(file_paths, features, start_date, end_date, imputation_map=
                 available_features.append('target')
             if 'date' in ticker_df.columns:
                 available_features.append('date')
+            if 'sample_weight' in ticker_df.columns:
+                available_features.append('sample_weight')
+            if 'sample_type' in ticker_df.columns:
+                available_features.append('sample_type')
             
             ticker_df = ticker_df[available_features]
             
             # 결측치 처리 (imputation_map 사용)
             if imputation_map is not None:
                 for col in ticker_df.select_dtypes(include=[np.number]).columns:
-                    if col in imputation_map and col != 'target':
+                    if col in imputation_map and col not in ('target', 'sample_weight'):
                         ticker_df[col] = ticker_df[col].fillna(imputation_map[col])
             
             all_data.append(ticker_df)
@@ -405,7 +429,7 @@ def get_purged_train_end_exclusive(trading_dates: pd.DatetimeIndex, val_start, p
         return None
     return pd.Timestamp(trading_dates[idx - purge_trading_days])
 
-def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days=365, n_folds=3, purge_trading_days=10):
+def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days=365, n_folds=3, purge_trading_days=10, oos_holdout_days=270):
     """
     Expanding Window 방식으로 Fold 범위를 계산합니다.
     
@@ -414,6 +438,7 @@ def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days
         warmup_days: 웜업 기간 (일)
         val_period_days: 검증 기간 (일)
         n_folds: Fold 개수
+        oos_holdout_days: 데이터 끝에서 제외할 OOS 홀드아웃(달력일). CV·최종학습에 미포함.
     
     Returns:
         fold_ranges 리스트: 각 요소는 {'fold': int, 'train_start': Timestamp, 'train_end': Timestamp, 
@@ -434,9 +459,14 @@ def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days
     actual_start_date = min_date + timedelta(days=warmup_days)
     # [중요] 날짜 필터링을 [start, end)로 통일하므로 end는 exclusive 경계로 둡니다.
     # max_date(마지막 거래일)을 포함하려면 +1일을 더한 값을 end 경계로 사용해야 합니다.
-    actual_end_date = max_date + timedelta(days=1)
+    # OOS 홀드아웃: 최근 oos_holdout_days는 CV/최종학습에서 제외 → metadata train_end_date = OOS 시작.
+    data_end_exclusive = max_date + timedelta(days=1)
+    holdout = max(0, int(oos_holdout_days or 0))
+    actual_end_date = data_end_exclusive - timedelta(days=holdout)
     
     log_info(f"   📅 전체 데이터 기간: {min_date.strftime('%Y-%m-%d')} ~ {max_date.strftime('%Y-%m-%d')}")
+    if holdout > 0:
+        log_info(f"   📅 OOS 홀드아웃: {actual_end_date.strftime('%Y-%m-%d')} ~ {data_end_exclusive.strftime('%Y-%m-%d')} ({holdout}일, 학습 미포함)")
     log_info(f"   📅 실제 학습 기간 (웜업 제외): {actual_start_date.strftime('%Y-%m-%d')} ~ {actual_end_date.strftime('%Y-%m-%d')}")
     
     # Expanding Window 방식으로 Fold 범위 계산
@@ -590,96 +620,96 @@ def objective(trial, fold_data_cache, features):
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
         # 불균형 처리 (언더샘플링 적용으로 scale_pos_weight 제거 또는 1.0 고정)
         # 'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 50.0, log=True),
-        'scale_pos_weight': 1.0,  # 1:1 샘플링이므로 가중치 불필요
+        'scale_pos_weight': 1.0,  # sample_weight 사용 시 이중 보정 방지
         # 기타
         'max_bin': 255,
         'n_estimators': 10000,  # 고정 (Early Stopping으로 제어)
     }
+
+    # [개선] 조기종료 patience를 learning_rate에 비례시킨다.
+    # 기존 고정 50라운드는 lr=0.005~0.05 구간에서 너무 짧아,
+    # AUC가 거의 움직이지 않는 초반에 노이즈만으로 조기종료가 발동했다.
+    # (실측: 최종 모델이 best_iteration=4 에서 멈춤)
+    es_rounds = int(min(600, max(200, 5.0 / params['learning_rate'])))
+    log_info(f"   ⏱️ early_stopping patience = {es_rounds} rounds (lr={params['learning_rate']:.5f})")
     
     log_info(f"   📋 파라미터: learning_rate={params['learning_rate']:.6f}, num_leaves={params['num_leaves']}, "
              f"max_depth={params['max_depth']}, min_child_samples={params['min_child_samples']}")
     
     fold_scores = []
+    fold_best_iters = []  # [진단/Task1-2] 폴드별 best_iteration
     
     # 각 Fold 처리 (캐시 사용)
-    for fold_idx, (X_train, y_train, X_val, y_val) in fold_data_cache.items():
+    for fold_idx, cache_item in fold_data_cache.items():
         try:
-            # log_info(f"   📊 Fold #{fold_idx+1} 학습 시작...")
-            
-            # --- 1:1 언더샘플링 (RF와 동일하게 적용) ---
-            # 다수 클래스(0)를 소수 클래스(1) 개수에 맞춰 무작위로 줄임
-            y_train_series = pd.Series(y_train)
-            value_counts = y_train_series.value_counts()
-            
-            if len(value_counts) >= 2:
-                minority_class = value_counts.idxmin()
-                majority_class = value_counts.idxmax()
-                n_minority = value_counts[minority_class]
-                n_majority = value_counts[majority_class]
-                
-                # [로그 추가] 첫 번째 Trial의 첫 번째 Fold에서만 상세 로그 출력
-                if trial.number == 0 and fold_idx == 0:
-                     log_info(f"   📊 [Trial#0-Fold#0] 언더샘플링 전: 소수({minority_class})={n_minority:,}, 다수({majority_class})={n_majority:,}")
-
-                if n_majority > n_minority:
-                    # 인덱스 추출
-                    indices = np.arange(len(y_train))
-                    minority_indices = indices[y_train == minority_class]
-                    majority_indices = indices[y_train == majority_class]
-                    
-                    # 다수 클래스 셔플 및 샘플링 (1:1 비율)
-                    rng_sampler = np.random.RandomState(42 + fold_idx) 
-                    rng_sampler.shuffle(majority_indices)
-                    selected_majority_indices = majority_indices[:n_minority]
-                    
-                    # 합치기
-                    balanced_indices = np.concatenate([minority_indices, selected_majority_indices])
-                    balanced_indices.sort()
-                    
-                    # 데이터 교체 (DataFrame이므로 iloc 사용, y는 numpy array)
-                    X_train_resampled = X_train.iloc[balanced_indices].reset_index(drop=True)
-                    y_train_resampled = y_train[balanced_indices]
-
-                    if trial.number == 0 and fold_idx == 0:
-                        log_info(f"   ✅ [Trial#0-Fold#0] 1:1 언더샘플링 완료: 총 {len(y_train_resampled):,}행 (소수: {n_minority:,}, 다수: {len(selected_majority_indices):,})")
-                else:
-                    X_train_resampled = X_train
-                    y_train_resampled = y_train
-                    if trial.number == 0 and fold_idx == 0:
-                        log_info(f"   ℹ️ [Trial#0-Fold#0] 클래스 불균형이 심하지 않아 샘플링 건너뜀.")
+            if len(cache_item) == 7:
+                X_train, y_train, w_train, type_train, X_val, y_val, date_val = cache_item
+            elif len(cache_item) == 6:
+                X_train, y_train, w_train, type_train, X_val, y_val = cache_item
+                date_val = None
             else:
-                X_train_resampled = X_train
-                y_train_resampled = y_train
+                # 구 캐시 포맷 호환
+                X_train, y_train, X_val, y_val = cache_item
+                w_train, type_train, date_val = None, None, None
 
-            # 스케일링 (StandardScaler)
-            # 캐싱 시 이미 피처를 맞췄다고 가정
-            scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train_resampled)
-            X_val_scaled = scaler.transform(X_val)
+            # --- 횡보 층화 샘플링 + sample_weight (무작위 1:1 폐기) ---
+            require_sample_meta(
+                type_train, w_train, need_weight=True,
+                context=f"Trial#{trial.number} Fold#{fold_idx}",
+            )
+            X_train_resampled, y_train_resampled, w_train_resampled, _ = apply_stratified_flat_undersample(
+                X_train, y_train, type_train, w_train,
+                random_state=42 + fold_idx,
+            )
+            if trial.number == 0 and fold_idx == 0:
+                log_info(
+                    f"   📊 [Trial#0-Fold#0] 층화 후: {len(y_train_resampled):,}행 "
+                    f"(이전 {len(y_train):,}, 클래스분포={pd.Series(y_train_resampled).value_counts().to_dict()})"
+                )
+
+            if w_train_resampled is None:
+                w_train_resampled = np.ones(len(y_train_resampled), dtype=np.float64)
+
+            # [개선] 트리 모델은 스케일 불변 → StandardScaler 미사용
+            # (추론 시 NaN→0 후 스케일링으로 발생한 train/serve skew 제거)
+            X_train_scaled = X_train_resampled
+            X_val_scaled = X_val
             
             # LightGBM Dataset 생성
-            train_data = lgb.Dataset(X_train_scaled, label=y_train_resampled)
+            train_data = lgb.Dataset(X_train_scaled, label=y_train_resampled, weight=w_train_resampled)
             val_data = lgb.Dataset(X_val_scaled, label=y_val, reference=train_data)
             
             # 모델 학습 (Early Stopping 포함)
             # GPU 실패 시 자동으로 CPU로 전환
             try:
-                model = lgb.train(
-                    params,
-                    train_data,
-                    num_boost_round=params['n_estimators'],
-                    valid_sets=[val_data],
-                    valid_names=['val'],
-                    callbacks=[
-                        lgb.early_stopping(stopping_rounds=50, verbose=False),
-                        lgb.log_evaluation(period=0)  # 로그 비활성화
-                    ]
-                )
+                try:
+                    model = lgb.train(
+                        params,
+                        train_data,
+                        num_boost_round=params['n_estimators'],
+                        valid_sets=[val_data],
+                        valid_names=['val'],
+                        callbacks=[
+                            lgb.early_stopping(stopping_rounds=es_rounds, min_delta=1e-5, verbose=False),
+                            lgb.log_evaluation(period=0)  # 로그 비활성화
+                        ]
+                    )
+                except TypeError:
+                    # min_delta 미지원 구버전 LightGBM 폴백
+                    model = lgb.train(
+                        params,
+                        train_data,
+                        num_boost_round=params['n_estimators'],
+                        valid_sets=[val_data],
+                        valid_names=['val'],
+                        callbacks=[
+                            lgb.early_stopping(stopping_rounds=es_rounds, verbose=False),
+                            lgb.log_evaluation(period=0)
+                        ]
+                    )
             except Exception as gpu_error:
                 # GPU 실패 시 CPU로 전환
                 if 'gpu' in str(gpu_error).lower() or 'opencl' in str(gpu_error).lower() or 'device' in str(gpu_error).lower():
-                    # log_warning(f"   ⚠️ GPU 학습 실패: {str(gpu_error)}")
-                    # log_info("   🔄 CPU로 자동 전환하여 재시도합니다...")
                     # CPU 파라미터로 변경
                     params_cpu = params.copy()
                     params_cpu['device'] = 'cpu'
@@ -688,17 +718,30 @@ def objective(trial, fold_data_cache, features):
                     check_gpu_availability._gpu_available = False
                     check_gpu_availability._device = 'cpu'
                     # CPU로 재시도
-                    model = lgb.train(
-                        params_cpu,
-                        train_data,
-                        num_boost_round=params_cpu['n_estimators'],
-                        valid_sets=[val_data],
-                        valid_names=['val'],
-                        callbacks=[
-                            lgb.early_stopping(stopping_rounds=50, verbose=False),
-                            lgb.log_evaluation(period=0)
-                        ]
-                    )
+                    try:
+                        model = lgb.train(
+                            params_cpu,
+                            train_data,
+                            num_boost_round=params_cpu['n_estimators'],
+                            valid_sets=[val_data],
+                            valid_names=['val'],
+                            callbacks=[
+                                lgb.early_stopping(stopping_rounds=es_rounds, min_delta=1e-5, verbose=False),
+                                lgb.log_evaluation(period=0)
+                            ]
+                        )
+                    except TypeError:
+                        model = lgb.train(
+                            params_cpu,
+                            train_data,
+                            num_boost_round=params_cpu['n_estimators'],
+                            valid_sets=[val_data],
+                            valid_names=['val'],
+                            callbacks=[
+                                lgb.early_stopping(stopping_rounds=es_rounds, verbose=False),
+                                lgb.log_evaluation(period=0)
+                            ]
+                        )
                 else:
                     # GPU 관련이 아닌 다른 에러는 그대로 raise
                     raise
@@ -712,8 +755,23 @@ def objective(trial, fold_data_cache, features):
                 # log_warning(f"   ⚠️ Fold #{fold_idx+1}: 검증 데이터에 한 클래스만 존재합니다. 건너뜁니다.")
                 continue  # 이 폴드는 건너뜀
             
-            auc_score = roc_auc_score(y_val, y_pred)
+            # [Phase 2-3 / v2 B-3] 일자별 AUC + precision@15 혼합
+            if date_val is not None:
+                daily_auc = mean_daily_auc(date_val, y_val, y_pred)
+                prec_k = mean_daily_precision_at_k(date_val, y_val, y_pred, k=15)
+                auc_score = 0.5 * daily_auc + 0.5 * prec_k
+            else:
+                daily_auc = roc_auc_score(y_val, y_pred)
+                prec_k = float('nan')
+                auc_score = daily_auc
             fold_scores.append(auc_score)
+            # [진단] 폴드별 조기종료 시점 기록 (Task 1-2 설계 근거)
+            fold_best_iters.append(int(model.best_iteration or 0))
+            log_info(
+                f"   🔎 Fold #{fold_idx+1} best_iteration={model.best_iteration}, "
+                f"dailyAUC={daily_auc:.4f}, prec@15={prec_k:.4f}, mixed={auc_score:.4f}, "
+                f"lr={params['learning_rate']:.5f}"
+            )
             
             # 메모리 정리 (스케일링된 데이터 등)
             del X_train_scaled, X_val_scaled, train_data, val_data, model
@@ -733,14 +791,19 @@ def objective(trial, fold_data_cache, features):
         log_info(f"   🏆 Trial #{trial.number} 완료: 평균 AUC = {mean_score:.4f} (폴드별: {[f'{s:.4f}' for s in fold_scores]})")
     else:
         log_info(f"   🏆 Trial #{trial.number} 완료: AUC = {mean_score:.4f}")
+
+    # [Task 1-2] 최종 모델이 사용할 고정 iteration 수 산출용
+    if fold_best_iters:
+        trial.set_user_attr('fold_best_iters', fold_best_iters)
     
     return mean_score
 
 # --- 최종 모델 학습 함수 ---
 
-def train_final_model(fold_ranges, file_paths, features, best_params, best_score=None, n_trials=None, trials_completed=None):
+def train_final_model(fold_ranges, file_paths, features, best_params, best_score=None, n_trials=None, trials_completed=None, final_num_rounds=None, train_start_date=None, train_end_date=None):
     """
     최적 파라미터로 최종 모델을 학습합니다.
+    final_num_rounds가 있으면 조기종료 없이 고정 라운드로 train+val 전체 학습.
     """
     # Lazy import to avoid OpenMP conflicts
     import lightgbm as lgb
@@ -772,6 +835,14 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
         )
         if train_df is not None and not train_df.empty:
             all_train_data.append(train_df)
+
+        # [개선] 최종 모델은 검증 구간까지 포함해 학습한다.
+        # 기존에는 마지막 폴드 Train만 써서 최근 1년이 학습에서 빠졌고,
+        # RF(train_gpu_main.py)가 train+val을 합쳐 쓰는 것과도 불일치했다.
+        # 조기종료는 쓰지 않고 CV에서 구한 고정 라운드(final_num_rounds)를 사용한다.
+        if final_num_rounds is not None and val_data_df is not None and not val_data_df.empty:
+            all_train_data.append(val_data_df)
+            log_info(f"   ➕ 검증 구간({val_start}~{val_end})도 학습에 포함 (고정 {final_num_rounds} rounds)")
     
     if not all_train_data:
         log_error("학습 데이터를 로드할 수 없습니다.")
@@ -782,6 +853,13 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
     
     # 피처와 타겟 분리 (존재하는 피처만 선택)
     available_features = [f for f in features if f in combined_train_df.columns]
+    missing_cs = [f for f in features if f.endswith('_cs') and f not in combined_train_df.columns]
+    if missing_cs:
+        raise ValueError(
+            f"횡단면 피처(_cs) 누락 {len(missing_cs)}개 (예: {missing_cs[:3]}). "
+            "data_processor로 processed_feather를 재생성한 뒤 학습하세요. "
+            "(docs/PLAN_model_improvement.md Phase 2-1)"
+        )
     if len(available_features) != len(features):
         missing_features = [f for f in features if f not in combined_train_df.columns]
         log_warning(f"   ⚠️ 누락된 피처: {missing_features}")
@@ -789,64 +867,33 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
     
     X_all = combined_train_df[available_features].copy()
     y_all = combined_train_df['target'].values
-    
-    # --- 클래스 불균형 확인 및 언더샘플링 (RF와 동일하게 1:1) ---
-    sampling_start = datetime.now()
-    log_info("   📊 [DATA] 클래스 분포 확인 및 언더샘플링 준비...")
-    
-    # NumPy 배열을 DataFrame으로 변환하여 value_counts() 사용
-    y_all_series = pd.Series(y_all)
-    value_counts = y_all_series.value_counts()
-    
-    if len(value_counts) >= 2:
-        minority_class_label = value_counts.idxmin()
-        majority_class_label = value_counts.idxmax()
-        n_minority = value_counts[minority_class_label]
-        n_majority = value_counts[majority_class_label]
-        
-        log_info(f"      - 소수 클래스 ({minority_class_label}): {n_minority:,}개")
-        log_info(f"      - 다수 클래스 ({majority_class_label}): {n_majority:,}개")
-        
-        # 언더샘플링: 다수 클래스를 소수 클래스 크기만큼 랜덤 선택 (1:1 비율)
-        if n_majority > n_minority:
-            all_indices = np.arange(len(y_all))
-            
-            minority_indices = all_indices[y_all == minority_class_label]
-            majority_indices = all_indices[y_all == majority_class_label]
-            
-            log_info(f"      🔀 다수 클래스 랜덤 셔플 및 샘플링 중 (1:1 비율)...")
-            
-            # 다수 클래스 셔플
-            rng = np.random.RandomState(42)
-            majority_indices_shuffled = majority_indices.copy()
-            rng.shuffle(majority_indices_shuffled)
-            
-            # 1:1 비율로 샘플링
-            selected_majority_indices = majority_indices_shuffled[:n_minority]
-            
-            # 인덱스 결합
-            balanced_indices = np.concatenate([minority_indices, selected_majority_indices])
-            balanced_indices.sort()  # 시간 순서 유지
-            
-            # 언더샘플링된 데이터 생성
-            X_all = X_all.iloc[balanced_indices].reset_index(drop=True)
-            y_all = y_all[balanced_indices]
-            
-            log_info(f"   ✅ 언더샘플링 완료: 총 {len(X_all):,}행 ({(datetime.now() - sampling_start).total_seconds():.1f}초)")
-        else:
-            log_info("   ℹ️ 클래스 불균형이 심하지 않아 샘플링을 건너뜁니다.")
-    else:
-        log_warning("   ⚠️ 클래스가 1개만 존재합니다.")
+    w_all = combined_train_df['sample_weight'].values if 'sample_weight' in combined_train_df.columns else None
+    type_all = combined_train_df['sample_type'].values if 'sample_type' in combined_train_df.columns else None
 
-    # 결측치 및 무한대 값 처리
-    for col in X_all.columns:
-        if X_all[col].isna().any() or np.isinf(X_all[col]).any():
-            median_val = X_all[col].replace([np.inf, -np.inf], np.nan).median()
-            X_all[col] = X_all[col].replace([np.inf, -np.inf], np.nan).fillna(median_val)
-    
-    # 스케일링
-    scaler = StandardScaler()
-    X_all_scaled = scaler.fit_transform(X_all)
+    # --- 횡보 층화 샘플링 (무작위 1:1 폐기) ---
+    sampling_start = datetime.now()
+    log_info("   📊 [DATA] 횡보 층화 샘플링 준비...")
+    require_sample_meta(type_all, w_all, need_weight=True, context="LGBM 최종학습")
+    before_n = len(y_all)
+    X_all, y_all, w_all, type_all = apply_stratified_flat_undersample(
+        X_all, y_all, type_all, w_all, random_state=42
+    )
+    log_info(
+        f"   ✅ 층화 완료: {before_n:,} → {len(y_all):,}행 "
+        f"({(datetime.now() - sampling_start).total_seconds():.1f}초), "
+        f"클래스={pd.Series(y_all).value_counts().to_dict()}"
+    )
+
+    if w_all is None:
+        w_all = np.ones(len(y_all), dtype=np.float64)
+
+    # [개선] Inf만 NaN으로. 결측치는 LightGBM 네이티브 처리에 맡긴다.
+    X_all = X_all.replace([np.inf, -np.inf], np.nan)
+
+    # [개선] StandardScaler 미사용 (트리 모델은 스케일 불변)
+    # scaler=None 을 메타데이터에 저장 → 추론 경로가 스케일링을 건너뛴다
+    scaler = None
+    X_all_scaled = X_all
     
     # GPU 사용 가능 여부 확인
     gpu_available, device = check_gpu_availability()
@@ -863,29 +910,28 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
         'seed': 42,
         'deterministic': True,
         'max_bin': 255,
-        'n_estimators': 10000,
+        'n_estimators': int(final_num_rounds) if final_num_rounds else 10000,
+        'scale_pos_weight': 1.0,
     })
     
     # LightGBM Dataset 생성
-    train_data = lgb.Dataset(X_all_scaled, label=y_all)
+    train_data = lgb.Dataset(X_all_scaled, label=y_all, weight=w_all)
     
-    # 검증 데이터셋 준비 (마지막 폴드의 검증 데이터 사용)
+    # 검증 데이터셋 준비 (고정 라운드 모드에서는 ES용 홀드아웃이 없으므로 생략)
     val_data = None
-    if val_data_df is not None and not val_data_df.empty:
+    X_val_scaled = None
+    y_val = None
+    if final_num_rounds is None and val_data_df is not None and not val_data_df.empty:
         # 검증 데이터 전처리
         available_features_val = [f for f in available_features if f in val_data_df.columns]
         X_val = val_data_df[available_features_val].copy()
         y_val = val_data_df['target'].values
         
-        # 결측치 및 무한대 값 처리 (학습 데이터의 중앙값 사용)
-        for col in X_val.columns:
-            if X_val[col].isna().any() or np.isinf(X_val[col]).any():
-                # 학습 데이터의 중앙값 사용
-                median_val = X_all[col].replace([np.inf, -np.inf], np.nan).median()
-                X_val[col] = X_val[col].replace([np.inf, -np.inf], np.nan).fillna(median_val)
-        
-        # 스케일링 (학습 데이터의 scaler 사용)
-        X_val_scaled = scaler.transform(X_val)
+        # [개선] Inf만 NaN으로 (학습과 동일 전처리)
+        X_val = X_val.replace([np.inf, -np.inf], np.nan)
+
+        # [개선] 스케일링 미사용
+        X_val_scaled = X_val
         val_data = lgb.Dataset(X_val_scaled, label=y_val, reference=train_data)
         log_info(f"   ✅ 검증 데이터셋 준비 완료: {len(X_val_scaled):,}행")
     
@@ -895,7 +941,17 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
     
     # GPU 실패 시 자동으로 CPU로 전환
     try:
-        if val_data is not None:
+        # [개선] final_num_rounds 가 있으면 조기종료 없이 고정 라운드로 학습
+        # (검증 구간이 이미 학습에 포함되었으므로 조기종료용 홀드아웃이 없다)
+        if final_num_rounds is not None:
+            log_info(f"   📌 고정 {final_num_rounds} rounds 학습 (조기종료 미사용)")
+            final_model = lgb.train(
+                final_params,
+                train_data,
+                num_boost_round=int(final_num_rounds),
+                callbacks=[lgb.log_evaluation(period=100)]
+            )
+        elif val_data is not None:
             # 검증 데이터셋이 있으면 Early Stopping 사용
             final_model = lgb.train(
                 final_params,
@@ -932,7 +988,15 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
             check_gpu_availability._gpu_available = False
             check_gpu_availability._device = 'cpu'
             # CPU로 재시도
-            if val_data is not None:
+            if final_num_rounds is not None:
+                log_info(f"   📌 고정 {final_num_rounds} rounds 학습 (조기종료 미사용, CPU)")
+                final_model = lgb.train(
+                    final_params_cpu,
+                    train_data,
+                    num_boost_round=int(final_num_rounds),
+                    callbacks=[lgb.log_evaluation(period=100)]
+                )
+            elif val_data is not None:
                 # 검증 데이터셋이 있으면 Early Stopping 사용
                 final_model = lgb.train(
                     final_params_cpu,
@@ -959,8 +1023,11 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
             # GPU 관련이 아닌 다른 에러는 그대로 raise
             raise
     
-    # best_iteration은 Early Stopping이 사용된 경우에만 존재
-    if hasattr(final_model, 'best_iteration') and final_model.best_iteration is not None:
+    # [개선] 고정 라운드 학습 시에는 전체 라운드가 곧 best_iteration
+    if final_num_rounds is not None:
+        best_iteration = int(final_num_rounds)
+        log_info(f"   ✅ 최종 모델 학습 완료 (고정 {best_iteration} rounds)")
+    elif hasattr(final_model, 'best_iteration') and final_model.best_iteration is not None:
         log_info(f"   ✅ 최종 모델 학습 완료 (best_iteration: {final_model.best_iteration})")
         best_iteration = final_model.best_iteration
     else:
@@ -1033,14 +1100,18 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
         perm_start = datetime.now()
         
         # 평가용 데이터 준비
-        if val_data is not None:
+        if val_data is not None and X_val_scaled is not None:
             X_eval = X_val_scaled
             y_eval = y_val
         else:
             # 학습 데이터 일부 샘플링
             sample_size = min(5000, len(X_all_scaled))
             indices = np.random.choice(len(X_all_scaled), sample_size, replace=False)
-            X_eval = X_all_scaled[indices]
+            # [개선] DataFrame이면 iloc 사용 (scaler 제거 후 X_all_scaled가 DataFrame)
+            if isinstance(X_all_scaled, np.ndarray):
+                X_eval = X_all_scaled[indices]
+            else:
+                X_eval = X_all_scaled.iloc[indices]
             y_eval = y_all[indices]
             
         # LightGBM 모델 래퍼 (sklearn 호환성 위함)
@@ -1093,11 +1164,14 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
         'features': available_features,  # 실제 사용된 피처만 저장
         'best_params': best_params,
         'best_iteration': best_iteration,
-        'best_score': best_score,  # Optuna 최적 점수 저장
+        'best_score': best_score,  # Optuna 최적 점수 저장 (mixed metric)
+        'eval_metric': '0.5*mean_daily_auc + 0.5*precision@15',  # Phase v2 B-3
         # 모델 분석 페이지 표기용 (탐색 범위)
         'n_trials': n_trials,
         'trials_completed': trials_completed,
         'scaler': scaler,
+        'train_start_date': train_start_date,
+        'train_end_date': train_end_date,
     }
     
     metadata_path = path_manager.data_dir / 'lgbm_model_metadata.joblib'
@@ -1113,15 +1187,15 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
 def main():
     """메인 실행 함수"""
     parser = argparse.ArgumentParser(description="LightGBM GPU 가속 모델 훈련 스크립트")
-    parser.add_argument('--n_iter', type=int, default=50, help='Optuna 탐색 횟수')
+    parser.add_argument('--n_iter', type=int, default=20, help='Optuna 탐색 횟수')
     args = parser.parse_args()
     
     # 사용자 입력 (Trial 횟수)
     try:
-        trials_input = input("\n   [LGBM] Optuna Trial 횟수를 입력하세요 (기본값: 50, Enter): ").strip()
+        trials_input = input("\n   [LGBM] Optuna Trial 횟수를 입력하세요 (기본값: 20, Enter): ").strip()
         n_trials = int(trials_input) if trials_input else args.n_iter
     except ValueError:
-        log_warning("   ⚠️ 올바른 숫자를 입력해주세요. 기본값 50을 사용합니다.")
+        log_warning("   ⚠️ 올바른 숫자를 입력해주세요. 기본값 20을 사용합니다.")
         n_trials = args.n_iter
     
     # RF / LGBM / CatBoost 공용 학습 데이터 캐시
@@ -1169,6 +1243,9 @@ def main():
         if not prepare_data_and_save(data_path, start_date, end_date):
             log_critical("데이터 준비에 실패하여 프로그램을 종료합니다.")
             sys.exit(1)
+    else:
+        start_date = None
+        end_date = None
 
     # --- 2. 학습 설정 단계 ---
     log_info("\n--- ⚙️ 학습 설정 시작 ---")
@@ -1182,33 +1259,42 @@ def main():
 
     # RF와 동일한 피처 목록 (실제 계산되는 피처만 포함)
     features = [
-        'log_mktcap',
+        'log_mktcap_cs',
         '52주_신고가_비율',
-        'ADX_14',
-        'disparity_120',
-        'disparity_240',
-        'disparity_20',
-        'KOSPI_disparity_20',
+        'ADX_14_cs',
+        'disparity_120_cs',
+        'disparity_240_cs',
+        'disparity_20_cs',
+        # 'KOSPI_disparity_20',  # Phase 2-2: 당일 전종목 동일값 → 랭킹 무기여, 제거
         'Trend_Pullback_Score',
         'Position_Range_60',
-        'MA20_Slope',
-        'MA120_Slope',
-        'MA240_Slope',
-        'KOSPI_MA20_Slope',
-        'RVOL',
-        '시총 회전율(1W)',
-        '시총 회전율(3M)',
+        'MA20_Slope_cs',
+        'MA120_Slope_cs',
+        'MA240_Slope_cs',
+        # 'KOSPI_MA20_Slope',  # Phase 2-2: 당일 전종목 동일값 → 랭킹 무기여, 제거
+        'RVOL_cs',
+        '시총 회전율(1W)_cs',
+        '시총 회전율(3M)_cs',
         'RSI_Signal_Oscillator',
-        'ATRr_5',
-        'ATRr_20',
-        'ATRr_60',
-        'HV_Volatility_5',
-        'HV_Volatility_20',
-        'HV_Volatility_60',
-        'VWAP_Disparity_5',
-        'Max_Drawdown_20',
-        '등락율(5D)',  # 5거래일 전 종가 대비 누적 등락율 (%)
+        'ATRr_5_cs',
+        'ATRr_20_cs',
+        'ATRr_60_cs',
+        'HV_Volatility_5_cs',
+        'HV_Volatility_20_cs',
+        'HV_Volatility_60_cs',
+        'VWAP_Disparity_5_cs',
+        'Max_Drawdown_20_cs',
+        '등락율(5D)_cs',  # 5거래일 전 종가 대비 누적 등락율 (%) 횡단면
         'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
+        # Phase C (PLAN_model_improvement_v2): asymmetric features
+        'Downside_Vol_20_cs',
+        'Upside_Downside_Vol_Ratio_20_cs',
+        'Return_Skew_60_cs',
+        'Down_Day_Ratio_20_cs',
+        'Down_Volume_Ratio_20_cs',
+        'Gap_Mean_20_cs',
+        'Intraday_Strength_20_cs',
+        'Amihud_Illiq_20_cs',
     ]
 
     # --- 3. Fold 분할 (날짜 기반) ---
@@ -1256,27 +1342,40 @@ def main():
             
             # 피처와 타겟 분리
             available_features = [f for f in features if f in X_train_df.columns]
+            missing_cs = [f for f in features if f.endswith('_cs') and f not in X_train_df.columns]
+            if missing_cs:
+                raise ValueError(
+                    f"횡단면 피처(_cs) 누락 {len(missing_cs)}개 (예: {missing_cs[:3]}). "
+                    "data_processor로 processed_feather를 재생성한 뒤 학습하세요. "
+                    "(docs/PLAN_model_improvement.md Phase 2-1)"
+                )
             
             X_train = X_train_df[available_features].copy()
             y_train = X_train_df['target'].values
+            w_train = X_train_df['sample_weight'].values if 'sample_weight' in X_train_df.columns else None
+            type_train = X_train_df['sample_type'].values if 'sample_type' in X_train_df.columns else None
             X_val = X_val_df[available_features].copy()
             y_val = X_val_df['target'].values
+            date_val = X_val_df['date'].values if 'date' in X_val_df.columns else None
             
-            # 결측치/무한대 미리 처리 (Objective에서 반복하지 않도록)
-            for col in X_train.columns:
-                if X_train[col].isna().any() or np.isinf(X_train[col]).any():
-                    median_val = X_train[col].replace([np.inf, -np.inf], np.nan).median()
-                    X_train[col] = X_train[col].replace([np.inf, -np.inf], np.nan).fillna(median_val)
-                    X_val[col] = X_val[col].replace([np.inf, -np.inf], np.nan).fillna(median_val)
+            # [개선] Inf만 NaN으로 변환하고 결측치는 그대로 둔다
+            # (LightGBM은 NaN을 네이티브 처리 — 추론 경로와 동일한 전처리 유지)
+            X_train = X_train.replace([np.inf, -np.inf], np.nan)
+            X_val = X_val.replace([np.inf, -np.inf], np.nan)
             
-            # 메모리에 저장
-            fold_data_cache[fold_idx] = (X_train, y_train, X_val, y_val)
+            # 메모리에 저장 (weight/type/date 포함) — date는 일자별 AUC용
+            fold_data_cache[fold_idx] = (X_train, y_train, w_train, type_train, X_val, y_val, date_val)
             
             # 원본 DataFrame 삭제
             del X_train_df, X_val_df
             gc.collect()
             
-            log_info(f"   ✅ Fold #{fold_idx+1} 캐싱 완료 (Train: {len(X_train):,}행, Val: {len(X_val):,}행)")
+            n_flat = int((np.asarray(type_train) == 'flat').sum()) if type_train is not None else -1
+            log_info(
+                f"   ✅ Fold #{fold_idx+1} 캐싱 완료 (Train: {len(X_train):,}행, Val: {len(X_val):,}행"
+                + (f", flat={n_flat:,}" if n_flat >= 0 else ", sample_type없음")
+                + ")"
+            )
             
         except Exception as e:
             log_error(f"   ❌ Fold #{fold_idx+1} 데이터 캐싱 중 오류: {e}")
@@ -1328,11 +1427,45 @@ def main():
     except Exception:
         trials_completed = None
 
+    # [개선] CV 폴드들의 best_iteration 중앙값으로 최종 학습 라운드 결정
+    final_num_rounds = None
+    try:
+        fold_iters = study.best_trial.user_attrs.get('fold_best_iters') or []
+        if fold_iters:
+            median_iter = int(np.median(fold_iters))
+            # 최종 학습은 데이터가 더 많으므로 10% 여유를 준다
+            final_num_rounds = max(50, int(median_iter * 1.1))
+            log_info(f"   📐 CV best_iteration={fold_iters} → 중앙값 {median_iter} → 최종 {final_num_rounds} rounds")
+            if median_iter < 50:
+                log_warning(
+                    f"   ⚠️ CV best_iteration 중앙값이 {median_iter}로 매우 작습니다. "
+                    "조기종료가 여전히 조기 발동하고 있을 수 있습니다 "
+                    "(docs/PLAN_model_improvement.md §1.1 참고). 하한 50을 적용합니다."
+                )
+        else:
+            log_warning("   ⚠️ fold_best_iters 없음 → 기존 조기종료 방식으로 최종 학습")
+    except Exception as e:
+        log_warning(f"   ⚠️ 최종 라운드 산출 실패: {e} → 기존 조기종료 방식 사용")
+
+    # A-2: OOS 컷 = 마지막 폴드 val_end (270일 홀드아웃 반영). 수집 end_date와 혼동 금지.
+    meta_train_start = start_date
+    meta_train_end = end_date
+    if fold_ranges:
+        try:
+            meta_train_start = fold_ranges[0]['train_start'].strftime('%Y-%m-%d')
+            meta_train_end = fold_ranges[-1]['val_end'].strftime('%Y-%m-%d')
+        except Exception:
+            pass
+    log_info(f"   📅 metadata train_period: {meta_train_start} ~ {meta_train_end}")
+
     final_model, final_features = train_final_model(
         fold_ranges_str, file_paths, features,
         best_params, best_score,
         n_trials=n_trials,
-        trials_completed=trials_completed
+        trials_completed=trials_completed,
+        final_num_rounds=final_num_rounds,
+        train_start_date=meta_train_start,
+        train_end_date=meta_train_end,
     )
     
     if final_model is None:

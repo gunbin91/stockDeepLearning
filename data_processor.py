@@ -7,7 +7,7 @@
 
 주요 기능:
 - 종목 목록 수집 (KOSPI, KOSDAQ)
-- 시가총액 데이터 수집 및 일별 분배
+- 일별 시가총액 패널 수집 (FDR listing CSV 가능 구간 + marcap parquet)
 - 재무 데이터 수집 (월초 데이터를 일별로 분배)
 - 거시경제 데이터 수집
 - 기술적 지표 계산
@@ -54,6 +54,7 @@ if platform.system() == 'Windows':
 from scoring import calculate_factor_scores
 from path_manager import path_manager
 from logger import log_info, log_critical, log_error, log_warning, log_progress
+from cross_sectional import CROSS_SECTIONAL_FEATURE_COLS, add_cross_sectional_ranks
 
 # =================================================================
 # 재무데이터(pykrx) 수집 사용 여부
@@ -169,116 +170,27 @@ def clear_global_feature_data():
 def fetch_stock_list(min_marcap=10_000_000_000):
     """
     주식 목록 수집 함수
-    
-    KOSPI와 KOSDAQ에 상장된 모든 종목의 목록을 수집합니다.
-    스팩, 리츠 등은 제외하고 일반 주식만 수집합니다.
-    
-    Args:
-        min_marcap: 최소 시가총액 (기본값: 100억원 = 10,000,000,000원)
-    
-    Returns:
-        pandas.DataFrame: 종목코드, 종목명, 시장구분이 포함된 데이터프레임
+
+    data_fetcher 시총 수집(FDR + GitHub CSV 전일 폴백)을 사용합니다.
     """
-    max_retries = 3
-    retry_delay = 2  # 초
-    
-    for attempt in range(max_retries):
-        try:
-            # KRX-MARCAP에서 주식 목록 가져오기 (더 안정적)
-            # 1차 시도: KRX-MARCAP
-            try:
-                if attempt > 0:
-                    log_info(f"주식 목록 수집 재시도 중... ({attempt + 1}/{max_retries})")
-                    time.sleep(retry_delay)
-                
-                log_info("종목목록/시가총액 수집 소스: KRX (StockListing KRX-MARCAP, FDR에 NAVER bulk 경로 없음)")
-                log_info("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보 수집 (KRX-MARCAP)...")
-                df_marcap = fdr.StockListing('KRX-MARCAP')
-                
-                if df_marcap is not None and not df_marcap.empty:
-                    # 스팩, 리츠 제외
-                    df_marcap = df_marcap[~df_marcap['Name'].str.contains('스팩|리츠', na=False)].copy()
-                    
-                    # KONEX 제외 (KOSPI, KOSDAQ만 포함)
-                    if 'Market' in df_marcap.columns:
-                        df_marcap = df_marcap[df_marcap['Market'].isin(['KOSPI', 'KOSDAQ'])].copy()
-                        log_info(f"KONEX 제외 후 종목 수: {len(df_marcap)}개")
-                    
-                    # 상장주식수가 있는 경우만 필터링
-                    if 'Stocks' in df_marcap.columns:
-                        df_marcap = df_marcap[df_marcap['Stocks'] > 0]
-                    
-                    # 시가총액 필터링 (전 구간 공통 유니버스 컷)
-                    if 'Marcap' in df_marcap.columns:
-                        min_marcap_billion = min_marcap / 1_000_000_000  # 억원 단위로 변환
-                        before_count = len(df_marcap)
-                        df_marcap = df_marcap[df_marcap['Marcap'] >= min_marcap].copy()
-                        excluded_count = before_count - len(df_marcap)
-                        if excluded_count > 0:
-                            log_info(f"시가총액 {min_marcap_billion:.0f}억 미만 종목 {excluded_count}개 제외")
-                    
-                    # 컬럼명 정리 및 종목코드 6자리 패딩
-                    stock_list = df_marcap[['Code', 'Name']].copy()
-                    stock_list.rename(columns={'Code': '종목코드', 'Name': '종목명'}, inplace=True)
-                    stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.zfill(6)
-                    
-                    # 시장구분 추가 (Market 컬럼이 있으면 사용, 없으면 추정)
-                    if 'Market' in df_marcap.columns:
-                        stock_list['시장구분'] = df_marcap['Market']
-                    else:
-                        # 종목코드로 시장구분 추정 (KOSPI: 000000-099999, KOSDAQ: 그 외)
-                        stock_list['시장구분'] = stock_list['종목코드'].apply(
-                            lambda x: 'KOSPI' if x.startswith('0') and len(x) >= 2 and int(x[:2]) < 10 else 'KOSDAQ'
-                        )
-                    
-                    log_info(f"주식 목록 수집 완료: {len(stock_list)}개 종목")
-                    return stock_list
-                else:
-                    log_warning("KRX-MARCAP에서 빈 데이터를 받았습니다. KRX로 재시도합니다.")
-            except Exception as e1:
-                log_warning(f"KRX-MARCAP 수집 실패, KRX로 재시도: {e1}")
-            
-            # 2차 시도: KRX (기존 방식)
-            try:
-                stock_list = fdr.StockListing('KRX')
-                if stock_list is not None and not stock_list.empty:
-                    # 필요한 컬럼만 선택
-                    stock_list = stock_list[['Code', 'Name', 'Market']].copy()
-                    stock_list.columns = ['종목코드', '종목명', '시장구분']
-                    
-                    # KOSPI, KOSDAQ만 필터링
-                    stock_list = stock_list[stock_list['시장구분'].isin(['KOSPI', 'KOSDAQ'])]
-                    
-                    # 종목코드 6자리 패딩
-                    stock_list['종목코드'] = stock_list['종목코드'].astype(str).str.zfill(6)
-                    
-                    log_info(f"주식 목록 수집 완료: {len(stock_list)}개 종목")
-                    return stock_list
-                else:
-                    log_warning("KRX에서 빈 데이터를 받았습니다.")
-            except Exception as e2:
-                log_warning(f"KRX 수집도 실패: {e2}")
-            
-            # 마지막 시도가 아니면 재시도
-            if attempt < max_retries - 1:
-                continue
-            else:
-                # 모든 시도 실패
-                log_error("주식 목록을 가져올 수 없습니다 (모든 재시도 실패)")
-                return pd.DataFrame()
-                
-        except Exception as e:
-            if attempt < max_retries - 1:
-                log_warning(f"주식 목록 수집 중 오류 발생 (재시도 예정): {e}")
-                time.sleep(retry_delay)
-                continue
-            else:
-                log_error(f"주식 목록 수집 실패 (모든 재시도 실패): {e}")
-                return pd.DataFrame()
-    
-    # 여기 도달하면 안 되지만 안전장치
-    log_error("주식 목록을 가져올 수 없습니다")
-    return pd.DataFrame()
+    try:
+        stock_list = data_fetcher.fetch_stock_list(min_marcap=min_marcap)
+        if stock_list is None or stock_list.empty:
+            log_error("주식 목록을 가져올 수 없습니다")
+            return pd.DataFrame()
+
+        out = stock_list.copy()
+        if '시장구분' not in out.columns:
+            out['시장구분'] = out['종목코드'].astype(str).str.zfill(6).apply(
+                lambda x: 'KOSPI' if x.startswith('0') and len(x) >= 2 and int(x[:2]) < 10 else 'KOSDAQ'
+            )
+
+        cols = [c for c in ['종목코드', '종목명', '시장구분'] if c in out.columns]
+        log_info(f"주식 목록 수집 완료: {len(out)}개 종목")
+        return out[cols] if cols else out
+    except Exception as e:
+        log_error(f"주식 목록 수집 실패: {e}")
+        return pd.DataFrame()
 
 def _fetch_financial_data(start_date, end_date):
     """월초 재무데이터 수집 및 일별 분배 (삼성전자 거래일 기준)"""
@@ -540,6 +452,56 @@ def fetch_ticker_price_data(stock_info, start_date, end_date):
 
 
 
+def _init_feature_worker(marcap_data, financial_data, apply_daily_exclusion):
+    """ProcessPool(spawn/fork) 워커에 시총·Exclude 설정을 전달."""
+    set_global_feature_data(marcap_data, financial_data, apply_daily_exclusion=apply_daily_exclusion)
+
+
+def compute_exclude_rank_series(close: pd.Series, market_cap: Optional[pd.Series] = None, apply_daily_exclusion: bool = True) -> pd.Series:
+    """Exclude_Rank(cond1/2/3)를 시계열로 계산. close/market_cap은 날짜순이어야 함."""
+    close = pd.to_numeric(close, errors='coerce')
+    ma20_lvl = close.rolling(window=20).mean()
+    ma60_lvl = close.rolling(window=60).mean()
+    ma120_lvl = close.rolling(window=120).mean()
+    ma240_lvl = close.rolling(window=240).mean()
+
+    ma20_diff = ma20_lvl.diff()
+    ma20_down = (ma20_diff < 0).astype(int)
+    ma20_down_14_days = ma20_down.rolling(window=14).sum() == 14
+
+    cond1 = (ma20_lvl < ma120_lvl) & (ma20_lvl < ma240_lvl) & (close < ma60_lvl)
+    cond2 = ma20_down_14_days & (close < ma20_lvl)
+
+    if apply_daily_exclusion and market_cap is not None:
+        mcap = pd.to_numeric(market_cap, errors='coerce')
+        cond3 = mcap < 100_000_000_000
+    else:
+        cond3 = False
+
+    out = (cond1 | cond2 | cond3).fillna(False).astype(bool)
+    return out
+
+
+def recompute_exclude_rank_panel(df: pd.DataFrame, apply_daily_exclusion: bool = True) -> pd.DataFrame:
+    """패널 전체에 Exclude_Rank를 종목별로 재계산 (ProcessPool 누락 보정)."""
+    if df is None or df.empty or '종목코드' not in df.columns or '종가' not in df.columns:
+        return df
+    out = df.copy()
+    if 'date' in out.columns:
+        out = out.sort_values(['종목코드', 'date'])
+    parts = []
+    for _, g in out.groupby('종목코드', sort=False):
+        g = g.copy()
+        mcap = g['시가총액'] if '시가총액' in g.columns else None
+        g['Exclude_Rank'] = compute_exclude_rank_series(
+            g['종가'], market_cap=mcap, apply_daily_exclusion=apply_daily_exclusion
+        ).values
+        parts.append(g)
+    if not parts:
+        return out
+    return pd.concat(parts, ignore_index=True)
+
+
 def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exclusion=None):
     """
     단일 종목 피처 계산 함수 (CPU 작업)
@@ -565,7 +527,6 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exc
     global _global_marcap_data, _global_financial_data
     
     try:
-        import gc
         df = df_price.copy()
         
         # 전역 변수 검증
@@ -573,7 +534,7 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exc
             log_error(f"종목 {ticker} 피처 계산 중 오류: 전역 시가총액 데이터가 설정되지 않았습니다.")
             return None
         
-        # 시가총액 데이터 병합 (전역 변수 사용)
+        # 시가총액 데이터 병합 (전역 변수 사용) + 결측 시 Stocks×종가 보완
         df_marcap_ticker = _global_marcap_data[_global_marcap_data['Code'] == ticker].copy()
         if df_marcap_ticker.empty: 
             log_warning(f"⚠️ {ticker} 종목의 시가총액 데이터가 없습니다.")
@@ -584,14 +545,35 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exc
         df_marcap_ticker['date'] = pd.to_datetime(df_marcap_ticker['date']).astype('datetime64[ns]')
         if isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index).astype('datetime64[ns]')
+
+        right_cols = ['date', 'Marcap']
+        if 'Stocks' in df_marcap_ticker.columns:
+            right_cols.append('Stocks')
         try:
-            df = pd.merge_asof(left=df, right=df_marcap_ticker[['date', 'Marcap']], left_index=True, right_on='date', direction='backward')
+            df = pd.merge_asof(
+                left=df,
+                right=df_marcap_ticker[right_cols],
+                left_index=True,
+                right_on='date',
+                direction='backward',
+            )
         except Exception as e:
             # merge_asof 실패 시 일반 merge로 대체
             log_warning(f"⚠️ {ticker} 시가총액 merge_asof 실패, 일반 merge로 시도: {e}")
             df = df.reset_index()
-            df = pd.merge(df, df_marcap_ticker[['date', 'Marcap']], on='date', how='left')
+            df = pd.merge(df, df_marcap_ticker[right_cols], on='date', how='left')
             df = df.set_index('date')
+
+        # 소스 공백 등으로 Marcap이 비면 Stocks×종가로 보완
+        if 'Stocks' in df.columns:
+            close = pd.to_numeric(df['종가'], errors='coerce')
+            shares = pd.to_numeric(df['Stocks'], errors='coerce')
+            marcap = pd.to_numeric(df['Marcap'], errors='coerce')
+            need_fill = marcap.isna() & shares.notna() & close.notna() & (shares > 0)
+            if need_fill.any():
+                df.loc[need_fill, 'Marcap'] = close.loc[need_fill] * shares.loc[need_fill]
+            df.drop(columns=['Stocks'], inplace=True, errors='ignore')
+
         df.rename(columns={'Marcap': '시가총액'}, inplace=True)
         
         # 시가총액 데이터 메모리 해제
@@ -714,6 +696,44 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exc
             df['시총 회전율(1W)'] = np.nan
             df['시총 회전율(3M)'] = np.nan
         
+
+        # Phase C (PLAN_model_improvement_v2): asymmetric / directional features
+        # Source: OHLCV + 거래대금 only (no new API). Keep NaN (no fillna(0)).
+        try:
+            ret = df['종가'].pct_change()
+            vol = df['거래대금']
+            down = ret.where(ret < 0)
+            up = ret.where(ret > 0)
+            df['Downside_Vol_20'] = down.rolling(20, min_periods=10).std()
+            up_vol = up.rolling(20, min_periods=10).std()
+            df['Upside_Downside_Vol_Ratio_20'] = up_vol / (df['Downside_Vol_20'] + 1e-8)
+            df['Return_Skew_60'] = ret.rolling(60, min_periods=30).skew()
+            df['Down_Day_Ratio_20'] = (ret < 0).rolling(20, min_periods=10).mean()
+            down_vol_sum = vol.where(ret < 0, 0.0).rolling(20, min_periods=10).sum()
+            all_vol_sum = vol.rolling(20, min_periods=10).sum()
+            df['Down_Volume_Ratio_20'] = down_vol_sum / (all_vol_sum + 1e-8)
+            gap = df['시가'] / df['종가'].shift(1) - 1.0
+            df['Gap_Mean_20'] = gap.rolling(20, min_periods=10).mean()
+            intraday = (df['종가'] - df['시가']) / (df['고가'] - df['저가'] + 1e-8)
+            df['Intraday_Strength_20'] = intraday.rolling(20, min_periods=10).mean()
+            amihud = (ret.abs() / (vol + 1e-8)).rolling(20, min_periods=10).mean()
+            df['Amihud_Illiq_20'] = np.log1p(amihud)
+            for _c in (
+                'Downside_Vol_20', 'Upside_Downside_Vol_Ratio_20', 'Return_Skew_60',
+                'Down_Day_Ratio_20', 'Down_Volume_Ratio_20', 'Gap_Mean_20',
+                'Intraday_Strength_20', 'Amihud_Illiq_20',
+            ):
+                df[_c] = df[_c].replace([np.inf, -np.inf], np.nan)
+        except Exception as e:
+            log_warning(f"Phase C asymmetric feature calc failed ({ticker}): {e}")
+            for _c in (
+                'Downside_Vol_20', 'Upside_Downside_Vol_Ratio_20', 'Return_Skew_60',
+                'Down_Day_Ratio_20', 'Down_Volume_Ratio_20', 'Gap_Mean_20',
+                'Intraday_Strength_20', 'Amihud_Illiq_20',
+            ):
+                df[_c] = np.nan
+
+
         # Z_Score_20 계산 (내부용) 및 Trend_Pullback_Score 생성
         try:
             mean_20 = df['종가'].rolling(20).mean()
@@ -874,36 +894,12 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exc
         # - MA20이 MA120, MA240 둘 다 아래에 있고 종가가 MA60 아래에 있으면 제외
         # - 또는, MA20이 14거래일 연속 하락(전일 대비 변화량 < 0)하고 종가가 MA20 아래에 있으면 제외
         # - 또는, 당일 시가총액이 1000억 미만이면 제외 (시점별 유니버스 강화용)
-        #
-        # 조건:
-        #   ( (MA20 < MA120) & (MA20 < MA240) & (종가 < MA60) ) |
-        #   ( (MA20이 14거래일 연속 하락) & (종가 < MA20) ) |
-        #   ( 시가총액 < 1000억 )
         # =================================================================
         try:
-            ma20_lvl = df['종가'].rolling(window=20).mean()
-            ma60_lvl = df['종가'].rolling(window=60).mean()
-            ma120_lvl = df['종가'].rolling(window=120).mean()
-            ma240_lvl = df['종가'].rolling(window=240).mean()
-
-            # 14거래일 연속 MA20 하락 확인
-            ma20_diff = ma20_lvl.diff()
-            ma20_down = (ma20_diff < 0).astype(int)
-            ma20_down_14_days = ma20_down.rolling(window=14).sum() == 14
-
-            cond1 = (ma20_lvl < ma120_lvl) & (ma20_lvl < ma240_lvl) & (df['종가'] < ma60_lvl)
-            cond2 = ma20_down_14_days & (df['종가'] < ma20_lvl)
-
-            # 시가총액 1000억 미만 종목 제외 (당일 조건, 학습 모드에서는 제외)
-            if apply_daily_exclusion and '시가총액' in df.columns:
-                try:
-                    cond3 = df['시가총액'] < 100_000_000_000
-                except Exception:
-                    cond3 = False
-            else:
-                cond3 = False
-
-            df['Exclude_Rank'] = cond1 | cond2 | cond3
+            mcap = df['시가총액'] if '시가총액' in df.columns else None
+            df['Exclude_Rank'] = compute_exclude_rank_series(
+                df['종가'], market_cap=mcap, apply_daily_exclusion=apply_daily_exclusion
+            )
         except Exception:
             # 계산 실패 시에도 기존 파이프라인은 유지
             df['Exclude_Rank'] = False
@@ -917,11 +913,38 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exc
         # => 1, 아니면 0
         min_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).min()
         max_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).max()
+        min_ret = min_price_10d / df['종가'] - 1.0
+        max_ret = max_price_10d / df['종가'] - 1.0
         # 조건: 최소값 >= 현재가격 * 0.95 AND 최대값 >= 현재가격 * 1.08
-        df['target'] = ((min_price_10d / df['종가'] >= 0.95) & (max_price_10d / df['종가'] >= 1.08)).astype(int)
-        
+        # 미래 10거래일 부족(rolling/shift NaN) 행은 target=NaN → 학습 제외
+        # (sample_weight/sample_type과 정합 — docs/PLAN_sample_weight_stratified.md §3.1)
+        valid_fwd = min_ret.notna() & max_ret.notna()
+        df['target'] = ((min_ret >= -0.05) & (max_ret >= 0.08)).astype(float)
+        df.loc[~valid_fwd, 'target'] = np.nan
+
+        # sample_type / sample_weight (학습용; 피처로 사용하지 않음)
+        # pos=1.0, weak=1.2, crash=1.7, flat=0.7  — docs/PLAN_sample_weight_stratified.md
+        # ※ np.where(str, nan)은 NumPy DTypePromotionError → pandas 벡터 할당 사용
+        is_crash = valid_fwd & (min_ret < -0.05)
+        is_pos = valid_fwd & (min_ret >= -0.05) & (max_ret >= 0.08)
+        is_weak = valid_fwd & (min_ret >= -0.05) & (max_ret >= 0.02) & (max_ret < 0.08)
+        is_flat = valid_fwd & ~(is_crash | is_pos | is_weak)
+
+        sample_type = pd.Series(pd.NA, index=df.index, dtype="string")
+        sample_weight = pd.Series(np.nan, index=df.index, dtype="float32")
+        sample_type.loc[is_flat] = "flat"
+        sample_weight.loc[is_flat] = 0.7
+        sample_type.loc[is_crash] = "crash"
+        sample_weight.loc[is_crash] = 1.7
+        sample_type.loc[is_weak] = "weak"
+        sample_weight.loc[is_weak] = 1.2
+        sample_type.loc[is_pos] = "pos"
+        sample_weight.loc[is_pos] = 1.0
+        df["sample_type"] = sample_type
+        df["sample_weight"] = sample_weight
+
         # 중간 변수 삭제 (메모리 최적화)
-        del min_price_10d, max_price_10d
+        del min_price_10d, max_price_10d, min_ret, max_ret, valid_fwd
 
         # =================================================================
         # 학습 타겟 제외 규칙 (요청사항 복구)
@@ -934,6 +957,8 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exc
                 exclude_mask = df['Exclude_Rank'].fillna(False)
                 if exclude_mask.any():
                     df.loc[exclude_mask, 'target'] = np.nan
+                    df.loc[exclude_mask, 'sample_weight'] = np.nan
+                    df.loc[exclude_mask, 'sample_type'] = pd.NA
         except Exception:
             # 제외 규칙 적용 실패 시에도 기존 target은 유지
             pass
@@ -994,98 +1019,12 @@ def _fetch_and_prepare_data(
         raise ValueError("종목 리스트를 가져올 수 없습니다.")
     
     try:
-        # 월초 거래일만 수집하여 효율성 극대화
-        start_date_obj = pd.to_datetime(start_date)
-        end_date_obj = pd.to_datetime(end_date)
-        
-        # 월별 첫 거래일만 수집
-        monthly_first_dates = []
-        current_date = start_date_obj
-        
-        while current_date <= end_date_obj:
-            # 해당 월의 첫 거래일 찾기
-            month_start = current_date.replace(day=1)
-            month_dates = pd.date_range(start=month_start, end=month_start + pd.DateOffset(months=1) - pd.DateOffset(days=1), freq='D')
-            trading_dates = month_dates[month_dates.weekday < 5]
-            
-            if not trading_dates.empty:
-                monthly_first_dates.append(trading_dates[0])
-            
-            # 다음 달로 이동
-            current_date = month_start + pd.DateOffset(months=1)
-        
-        # 문자열로 변환
-        marcap_dates = [date.strftime('%Y%m%d') for date in monthly_first_dates]
-        
-        if not marcap_dates:
-            raise Exception("수집할 시가총액 데이터 날짜가 없습니다.")
-        
-        marcap_dfs = []
-        completed_count = 0
-        total_dates = len(marcap_dates)
-        
-        log_info("월초 시가총액 수집 소스: KRX (StockListing KRX-MARCAP, FDR에 NAVER bulk 경로 없음)")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            future_to_date = {executor.submit(fdr.StockListing, 'KRX-MARCAP', date): date for date in marcap_dates}
-            for future in concurrent.futures.as_completed(future_to_date):
-                try:
-                    date_str = future_to_date[future]
-                    result_df = future.result()
-                    if not result_df.empty: 
-                        result_df['date'] = pd.to_datetime(date_str)
-                        marcap_dfs.append(result_df)
-                except Exception: 
-                    continue
-                
-                # API 부하 방지를 위한 지연 추가
-                time.sleep(0.2)
-                
-                completed_count += 1
-                # PROGRESS 접두사로 진행률 로그 출력 - 매번 출력하되 같은 줄에서 덮어쓰기
-                log_progress("시가총액 데이터 수집", completed_count, total_dates)
-        
-        if not marcap_dfs: 
+        # 일별 시총: FDR listing CSV 가능 구간 + 그 외 marcap parquet (월초 복사 폐기)
+        log_info("일별 시가총액 패널 수집 (FDR 가능 구간 우선, 이외 marcap 캐시)")
+        df_marcap_long = data_fetcher.build_daily_marcap_panel(start_date, end_date)
+        if df_marcap_long is None or df_marcap_long.empty:
             raise Exception("수집된 시가총액 데이터가 없습니다.")
-            
-        df_marcap_long = pd.concat(marcap_dfs, ignore_index=True)
-        df_marcap_long.sort_values(by=['Code', 'date'], inplace=True)
-        
-        # 원본 시가총액 데이터 메모리 해제
-        del marcap_dfs
-        import gc
-        gc.collect()
-        
-        # 월초 데이터를 일별로 분배
-        start_date_obj = pd.to_datetime(start_date)
-        end_date_obj = pd.to_datetime(end_date)
-        
-        all_dates = pd.date_range(start=start_date_obj, end=end_date_obj, freq='D')
-        trading_dates = all_dates[all_dates.weekday < 5]
-        
-        distributed_data = []
-        
-        for date in trading_dates:
-            # 해당 월의 첫 거래일 찾기
-            month_start = date.replace(day=1)
-            month_dates = pd.date_range(start=month_start, end=month_start + pd.DateOffset(months=1) - pd.DateOffset(days=1), freq='D')
-            month_trading_dates = month_dates[month_dates.weekday < 5]
-            
-            if not month_trading_dates.empty:
-                month_first_trading_day = month_trading_dates[0]
-                
-                # 해당 월의 첫 거래일 데이터를 현재 날짜에 복사
-                monthly_data_for_date = df_marcap_long[df_marcap_long['date'] == month_first_trading_day].copy()
-                if not monthly_data_for_date.empty:
-                    monthly_data_for_date['date'] = date
-                    distributed_data.append(monthly_data_for_date)
-        
-        if not distributed_data:
-            log_warning("분배할 월초 데이터가 없습니다.")
-        else:
-            df_marcap_long = pd.concat(distributed_data, ignore_index=True)
-            df_marcap_long.sort_values(by=['Code', 'date'], inplace=True)
-        
-        log_info(f"✅ 시가총액 데이터 수집 및 일별 분배 완료: {len(df_marcap_long)}개 레코드")
+        log_info(f"✅ 시가총액 데이터 수집 완료: {len(df_marcap_long):,}개 레코드")
         
     except Exception as e:
         raise ConnectionError(f"시가총액 데이터 수집 실패: {e}")
@@ -1199,55 +1138,63 @@ def _fetch_and_prepare_data(
         # 논리 프로세서 수의 2/3 사용 (최소 2개)
         cpu_workers = max(2, int((os.cpu_count() or 8) * 2 / 3))
         
-        # ProcessPoolExecutor 사용 (CPU 작업 병렬 처리)
-        # WSL2 환경에서는 fork 방식으로 효율적으로 동작
-        # 전역 변수를 사용하므로 큰 데이터를 인자로 전달하지 않아도 됨
-        with concurrent.futures.ProcessPoolExecutor(max_workers=cpu_workers) as executor:
+        # ProcessPoolExecutor: Windows spawn에서도 전역 시총/Exclude 설정이 전달되도록 initializer 사용
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=cpu_workers,
+            initializer=_init_feature_worker,
+            initargs=(df_marcap_long, df_financial_long, effective_apply_daily_exclusion),
+        ) as executor:
             # 전역 변수를 사용하므로 df_marcap_long, df_financial_long 인자 제거
             # 종목명 정보도 함께 전달
             stock_name_map = {row['종목코드']: row.get('종목명', None) for row in stock_records}
-            future_to_ticker = {executor.submit(calculate_ticker_features, ticker, df_price, stock_name_map.get(ticker)): ticker 
-                               for ticker, df_price in downloaded_data.items()}
-        completed_count = 0
-        total_calc_count = len(downloaded_data)
-        
-        for future in concurrent.futures.as_completed(future_to_ticker):
-            try:
-                result_df = future.result(timeout=300)  # 5분 타임아웃
-                if result_df is not None and isinstance(result_df, pd.DataFrame):
-                    # 데이터 무결성 검증
-                    if not result_df.empty and '종목코드' in result_df.columns:
-                        all_data.append(result_df)
+            future_to_ticker = {
+                executor.submit(
+                    calculate_ticker_features,
+                    ticker,
+                    df_price,
+                    stock_name_map.get(ticker),
+                    effective_apply_daily_exclusion,
+                ): ticker
+                for ticker, df_price in downloaded_data.items()
+            }
+            completed_count = 0
+            total_calc_count = len(downloaded_data)
+            
+            for future in concurrent.futures.as_completed(future_to_ticker):
+                try:
+                    result_df = future.result(timeout=300)  # 5분 타임아웃
+                    if result_df is not None and isinstance(result_df, pd.DataFrame):
+                        # 데이터 무결성 검증
+                        if not result_df.empty and '종목코드' in result_df.columns:
+                            all_data.append(result_df)
+                        else:
+                            failed_count += 1
+                            ticker = future_to_ticker.get(future, 'Unknown')
+                            log_warning(f"⚠️ 종목 {ticker} 데이터 무결성 검증 실패: 빈 데이터프레임 또는 필수 컬럼 누락")
                     else:
                         failed_count += 1
                         ticker = future_to_ticker.get(future, 'Unknown')
-                        log_warning(f"⚠️ 종목 {ticker} 데이터 무결성 검증 실패: 빈 데이터프레임 또는 필수 컬럼 누락")
-                else:
+                except concurrent.futures.TimeoutError:
                     failed_count += 1
                     ticker = future_to_ticker.get(future, 'Unknown')
-            except concurrent.futures.TimeoutError:
-                failed_count += 1
-                ticker = future_to_ticker.get(future, 'Unknown')
-                log_error(f"⏱️ 종목 {ticker} 피처 계산 타임아웃 (5분 초과)")
-            except Exception as e:
-                failed_count += 1
-                ticker = future_to_ticker.get(future, 'Unknown')
-                log_error(f"❌ 종목 {ticker} 피처 계산 중 오류: {e}")
-            
-            completed_count += 1
-            # 진행률 로그 메시지 (PROGRESS 접두사 자동 추가됨) - 매번 출력하되 같은 줄에서 덮어쓰기
-            log_progress("피처 계산", completed_count, total_calc_count)
-            # 주기적 메모리 정리 (10개마다)
-            if completed_count % 10 == 0:
-                import gc
-                gc.collect()
+                    log_error(f"⏱️ 종목 {ticker} 피처 계산 타임아웃 (5분 초과)")
+                except Exception as e:
+                    failed_count += 1
+                    ticker = future_to_ticker.get(future, 'Unknown')
+                    log_error(f"❌ 종목 {ticker} 피처 계산 중 오류: {e}")
+                
+                completed_count += 1
+                # 진행률 로그 메시지 (PROGRESS 접두사 자동 추가됨) - 매번 출력하되 같은 줄에서 덮어쓰기
+                log_progress("피처 계산", completed_count, total_calc_count)
+                # 주기적 메모리 정리 (10개마다)
+                if completed_count % 10 == 0:
+                    gc.collect()
     finally:
         # 전역 변수 초기화 (메모리 해제)
         clear_global_feature_data()
         
         # 다운로드된 데이터 메모리 해제
         del downloaded_data
-        import gc
         gc.collect()
 
     if not all_data: 
@@ -1278,10 +1225,18 @@ def _fetch_and_prepare_data(
     raw_feature_df.dropna(subset=['date', '종목코드'], inplace=True)
     raw_feature_df['date'] = pd.to_datetime(raw_feature_df['date'])
     raw_feature_df.drop_duplicates(subset=['date', '종목코드'], keep='first', inplace=True)
+
+    # Exclude_Rank 보정: ProcessPool에서 전부 False로 남는 경우 대비 재계산
+    if effective_apply_daily_exclusion:
+        before_ex = int(raw_feature_df['Exclude_Rank'].fillna(False).sum()) if 'Exclude_Rank' in raw_feature_df.columns else 0
+        raw_feature_df = recompute_exclude_rank_panel(
+            raw_feature_df, apply_daily_exclusion=True
+        )
+        after_ex = int(raw_feature_df['Exclude_Rank'].fillna(False).sum())
+        log_info(f"   ✅ Exclude_Rank 재계산: {before_ex:,} → {after_ex:,}건 제외 플래그")
     
     # 개별 데이터 리스트 메모리 해제
     del all_data
-    import gc
     gc.collect()
     
     # 거시경제 데이터 추가
@@ -1292,6 +1247,15 @@ def _fetch_and_prepare_data(
     # Relative_Strength_20 피처는 제거됨
     
     raw_feature_df.sort_values(by=['date', '종목코드'], inplace=True)
+
+    # [Phase 2-1] 일자별 횡단면 백분위 랭크 (_cs) 추가 — 원본 컬럼 유지
+    before_cols = set(raw_feature_df.columns)
+    add_cross_sectional_ranks(raw_feature_df, CROSS_SECTIONAL_FEATURE_COLS)
+    added_cs = sorted(set(raw_feature_df.columns) - before_cols)
+    if added_cs:
+        log_info(f"   ✅ 횡단면 정규화(_cs) 추가: {len(added_cs)}개 컬럼")
+    else:
+        log_warning("   ⚠️ 횡단면 정규화(_cs) 대상 컬럼이 없어 건너뜀")
 
     # 팩터 점수 계산 (백테스팅/분석용, 학습용 데이터 생성 시에는 불필요)
     if skip_factor_scores:
@@ -1320,7 +1284,6 @@ def _fetch_and_prepare_data(
     
     # 원본 데이터 메모리 해제
     del raw_feature_df
-    import gc
     gc.collect()
     
     return final_df

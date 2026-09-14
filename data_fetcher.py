@@ -22,7 +22,9 @@ import pandas_ta as ta
 import concurrent.futures
 from tqdm import tqdm
 import os
+import threading
 from datetime import datetime, timedelta
+from pathlib import Path
 import time
 import gc
 import locale
@@ -43,6 +45,7 @@ from logger import (log_info, log_warning, log_error, log_critical, log_progress
 from exceptions import DataFetchError, DataValidationError
 
 from path_manager import path_manager
+from cross_sectional import CROSS_SECTIONAL_FEATURE_COLS, add_cross_sectional_ranks
 import requests
 
 # =================================================================
@@ -412,10 +415,16 @@ def _fetch_realtime_financial_data(stock_list, selected_analysis_date):
 
 
 # FDR 0.9.110+ 가 KRX-MARCAP에 쓰는 GitHub 일자별 CSV (오늘 파일이 아직 없으면 404)
+# listing 캐시는 최근 구간만 존재 → 과거 월별 시총은 marcap 연도 parquet 폴백 필요
 _FDR_KRX_MARCAP_CACHE_BASE = (
     "https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache/"
     "refs/heads/master/data/listing/krx"
 )
+_MARCAP_YEAR_PARQUET_BASE = (
+    "https://raw.githubusercontent.com/FinanceData/marcap/master/data"
+)
+_marcap_year_df_cache = {}
+_marcap_year_lock = threading.Lock()
 
 
 def _get_krx_max_work_date():
@@ -437,23 +446,28 @@ def _get_krx_max_work_date():
         return None
 
 
-def _load_fdr_krx_marcap_cache_csv(preferred_date=None, lookback_days=15):
-    """FDR GitHub KRX-MARCAP CSV를 preferred_date부터 거슬러가며 로드.
-
-    Returns:
-        (DataFrame, 사용된 날짜 datetime) 또는 실패 시 (None, None)
-    """
+def _normalize_preferred_datetime(preferred_date=None):
     start = preferred_date
     if start is None:
         start = _get_krx_max_work_date()
     if start is None:
         start = datetime.now()
-    start = pd.to_datetime(start).to_pydatetime().replace(hour=0, minute=0, second=0, microsecond=0)
+    return pd.to_datetime(start).to_pydatetime().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+
+def _load_fdr_krx_marcap_cache_csv(preferred_date=None, lookback_days=15, log_failures=True):
+    """FDR GitHub KRX-MARCAP CSV를 preferred_date부터 거슬러가며 로드.
+
+    Returns:
+        (DataFrame, 사용된 날짜 datetime) 또는 실패 시 (None, None)
+    """
+    start = _normalize_preferred_datetime(preferred_date)
 
     last_error = None
     for i in range(lookback_days + 1):
         day = start - timedelta(days=i)
-        # 주말 CSV는 보통 없음 → 스킵해도 되지만 HEAD 비용이 작아 그대로 시도
         url = f"{_FDR_KRX_MARCAP_CACHE_BASE}/{day.strftime('%Y-%m-%d')}.csv"
         try:
             df = pd.read_csv(
@@ -468,11 +482,411 @@ def _load_fdr_krx_marcap_cache_csv(preferred_date=None, lookback_days=15):
             last_error = e
             continue
 
+    if log_failures:
+        log_warning(
+            f"FDR GitHub KRX-MARCAP CSV 폴백 실패 "
+            f"(시작일={start.strftime('%Y-%m-%d')}, lookback={lookback_days}): {last_error}"
+        )
+    return None, None
+
+
+def _prepare_marcap_year_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    out = df
+    if "Date" in out.columns:
+        out = out.copy()
+        out["Date"] = pd.to_datetime(out["Date"])
+    if "Code" in out.columns:
+        out = out.copy()
+        out["Code"] = out["Code"].astype(str).str.zfill(6)
+    return out
+
+
+def _get_marcap_year_dataframe(year: int):
+    """FinanceData/marcap 연도 parquet (로컬 캐시 + 메모리 캐시, 락+원자적 저장)."""
+    year = int(year)
+    with _marcap_year_lock:
+        cached = _marcap_year_df_cache.get(year)
+        if cached is not None:
+            return cached
+
+        cache_dir = Path(path_manager.data_dir) / "marcap_year_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"marcap-{year}.parquet"
+        tmp_path = cache_dir / f"marcap-{year}.parquet.tmp"
+
+        df = None
+        if cache_path.exists():
+            try:
+                df = pd.read_parquet(cache_path)
+            except Exception as e:
+                log_warning(f"깨진 marcap 연도 캐시 삭제({year}): {e}")
+                try:
+                    cache_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        if df is None or getattr(df, "empty", True):
+            url = f"{_MARCAP_YEAR_PARQUET_BASE}/marcap-{year}.parquet"
+            log_info(f"FinanceData/marcap 연도 파일 다운로드: {year}")
+            df = pd.read_parquet(url)
+            if df is None or df.empty:
+                raise RuntimeError(f"marcap-{year}.parquet 이 비어 있습니다.")
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+                df.to_parquet(tmp_path, index=False)
+                pd.read_parquet(tmp_path)
+                tmp_path.replace(cache_path)
+            except Exception as e:
+                log_warning(f"marcap 연도 로컬 캐시 저장 실패({year}): {e}")
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except Exception:
+                    pass
+
+        df = _prepare_marcap_year_dataframe(df)
+        _marcap_year_df_cache[year] = df
+        return df
+
+
+def _load_marcap_dataset_snapshot(preferred_date=None, lookback_days=15):
+    """FinanceData/marcap 연도 데이터에서 일자 스냅샷 로드."""
+    start = _normalize_preferred_datetime(preferred_date)
+    last_error = None
+
+    for i in range(lookback_days + 1):
+        day = start - timedelta(days=i)
+        if day.weekday() >= 5:
+            continue
+        try:
+            year_df = _get_marcap_year_dataframe(day.year)
+            day_ts = pd.Timestamp(day.date())
+            day_df = year_df[year_df["Date"] == day_ts]
+            if day_df is None or day_df.empty:
+                continue
+            out = day_df.drop(columns=["Date"], errors="ignore").reset_index(drop=True)
+            if "Code" in out.columns and "Marcap" in out.columns:
+                return out, day
+        except Exception as e:
+            last_error = e
+            continue
+
     log_warning(
-        f"FDR GitHub KRX-MARCAP CSV 폴백 실패 "
+        f"FinanceData/marcap 연도 parquet 폴백 실패 "
         f"(시작일={start.strftime('%Y-%m-%d')}, lookback={lookback_days}): {last_error}"
     )
     return None, None
+
+
+def preload_marcap_year_files(years):
+    """월별 시총 수집 전, 필요 연도 parquet를 순차로 미리 로드."""
+    uniq = sorted({int(y) for y in years})
+    for year in uniq:
+        _get_marcap_year_dataframe(year)
+        log_info(f"marcap 연도 캐시 준비 완료: {year}")
+
+
+def _fdr_listing_csv_exists(day) -> bool:
+    """FDR GitHub listing CSV 존재 여부."""
+    day = pd.to_datetime(day).to_pydatetime().replace(hour=0, minute=0, second=0, microsecond=0)
+    url = f"{_FDR_KRX_MARCAP_CACHE_BASE}/{day.strftime('%Y-%m-%d')}.csv"
+    try:
+        r = requests.head(url, timeout=15, allow_redirects=True)
+        if r.status_code == 200:
+            return True
+        r = requests.get(url, timeout=15, stream=True)
+        ok = r.status_code == 200
+        r.close()
+        return ok
+    except Exception:
+        return False
+
+
+def _load_fdr_listing_csv_exact(day):
+    """특정 일자의 FDR listing CSV만 로드 (날짜 lookback 없음)."""
+    day = pd.to_datetime(day).to_pydatetime().replace(hour=0, minute=0, second=0, microsecond=0)
+    url = f"{_FDR_KRX_MARCAP_CACHE_BASE}/{day.strftime('%Y-%m-%d')}.csv"
+    df = pd.read_csv(
+        url,
+        index_col=0,
+        dtype={"Code": str, "Dept": str, "ChangeCode": str, "MarketId": str},
+    )
+    df = df.reset_index(drop=True)
+    if df is None or df.empty or "Code" not in df.columns or "Marcap" not in df.columns:
+        raise RuntimeError(f"FDR listing CSV 무효: {day.strftime('%Y-%m-%d')}")
+    df = df.copy()
+    df["Code"] = df["Code"].astype(str).str.zfill(6)
+    return df
+
+
+def probe_fdr_listing_csv_range(end_date=None, max_lookback_days=800):
+    """FDR listing CSV로 수집 가능한 (oldest, latest) 평일 범위를 프로브.
+
+    Returns:
+        (oldest_datetime, latest_datetime) 또는 실패 시 (None, None)
+    """
+    end = _normalize_preferred_datetime(end_date)
+
+    latest = None
+    for i in range(0, 30):
+        d = end - timedelta(days=i)
+        if d.weekday() >= 5:
+            continue
+        if _fdr_listing_csv_exists(d):
+            latest = d
+            break
+    if latest is None:
+        log_warning("FDR listing CSV: 최근 구간에서 파일을 찾지 못했습니다.")
+        return None, None
+
+    oldest_known = latest
+    probe = latest
+    stepped_out = False
+    for _ in range(max_lookback_days // 30 + 1):
+        probe = probe - timedelta(days=30)
+        while probe.weekday() >= 5:
+            probe -= timedelta(days=1)
+        if probe < latest - timedelta(days=max_lookback_days):
+            break
+        if _fdr_listing_csv_exists(probe):
+            oldest_known = probe
+            continue
+
+        lo, hi = probe, oldest_known
+        while (hi - lo).days > 1:
+            mid = lo + timedelta(days=(hi - lo).days // 2)
+            while mid.weekday() >= 5:
+                mid += timedelta(days=1)
+            if mid >= hi:
+                mid = hi - timedelta(days=1)
+                while mid.weekday() >= 5:
+                    mid -= timedelta(days=1)
+            if mid <= lo:
+                break
+            if _fdr_listing_csv_exists(mid):
+                hi = mid
+                oldest_known = mid
+            else:
+                lo = mid
+        stepped_out = True
+        break
+
+    d = oldest_known
+    while True:
+        prev = d - timedelta(days=1)
+        while prev.weekday() >= 5:
+            prev -= timedelta(days=1)
+        if (latest - prev).days > max_lookback_days:
+            break
+        if _fdr_listing_csv_exists(prev):
+            d = prev
+        else:
+            break
+
+    log_info(
+        f"FDR listing CSV 가능 구간: {d.strftime('%Y-%m-%d')} ~ {latest.strftime('%Y-%m-%d')}"
+        + (" (프로브 경계 확정)" if stepped_out else "")
+    )
+    return d, latest
+
+
+def _normalize_marcap_snapshot(df: pd.DataFrame) -> pd.DataFrame:
+    """시총 스냅샷을 Code/Marcap/Stocks 최소 스키마로 정규화."""
+    out = df.copy()
+    if "Code" not in out.columns:
+        raise ValueError("시총 스냅샷에 Code 컬럼이 없습니다.")
+    if "Marcap" not in out.columns:
+        raise ValueError("시총 스냅샷에 Marcap 컬럼이 없습니다.")
+    out["Code"] = out["Code"].astype(str).str.zfill(6)
+    cols = ["Code", "Marcap"]
+    if "Stocks" in out.columns:
+        cols.append("Stocks")
+    return out[cols]
+
+
+def _load_marcap_parquet_range(start_date, end_date) -> pd.DataFrame:
+    """FinanceData/marcap 연도 parquet에서 [start, end] 구간 일별 패널 로드."""
+    start = pd.to_datetime(start_date).normalize()
+    end = pd.to_datetime(end_date).normalize()
+    if end < start:
+        return pd.DataFrame(columns=["Code", "date", "Marcap", "Stocks"])
+
+    frames = []
+    for year in range(start.year, end.year + 1):
+        try:
+            year_df = _get_marcap_year_dataframe(year)
+        except Exception as e:
+            log_warning(f"marcap 연도 로드 실패({year}): {e}")
+            continue
+        part = year_df[(year_df["Date"] >= start) & (year_df["Date"] <= end)].copy()
+        if part.empty:
+            continue
+        part["Code"] = part["Code"].astype(str).str.zfill(6)
+        keep = ["Code", "Date", "Marcap"]
+        if "Stocks" in part.columns:
+            keep.append("Stocks")
+        part = part[keep].rename(columns={"Date": "date"})
+        frames.append(part)
+
+    if not frames:
+        return pd.DataFrame(columns=["Code", "date", "Marcap", "Stocks"])
+    out = pd.concat(frames, ignore_index=True)
+    out["date"] = pd.to_datetime(out["date"]).astype("datetime64[ns]")
+    return out
+
+
+def build_daily_marcap_panel(start_date, end_date) -> pd.DataFrame:
+    """학습/백테스트용 일별 시총 패널.
+
+    - FDR listing CSV 가능 구간: FDR 일자 CSV (캐시 parquet 미사용)
+    - 그 이전(및 FDR 밖): FinanceData/marcap 연도 parquet
+    - 두 소스 공백은 로그로 남기고, 피처 단계에서 merge_asof / Stocks×종가로 보완
+    """
+    start = pd.to_datetime(start_date).normalize()
+    end = pd.to_datetime(end_date).normalize()
+    if end < start:
+        raise ValueError(f"시총 기간이 올바르지 않습니다: {start_date} ~ {end_date}")
+
+    log_info(f"일별 시가총액 패널 구축 시작: {start.date()} ~ {end.date()}")
+
+    fdr_oldest, fdr_latest = probe_fdr_listing_csv_range(end_date=end)
+    years_needed = list(range(start.year, end.year + 1))
+    preload_marcap_year_files(years_needed)
+
+    frames = []
+    fdr_days_ok = 0
+    fdr_days_fail = 0
+
+    # 1) FDR 가능 구간: 일자 CSV 직접 로드
+    if fdr_oldest is not None and fdr_latest is not None:
+        fdr_start = max(start, pd.Timestamp(fdr_oldest).normalize())
+        fdr_end = min(end, pd.Timestamp(fdr_latest).normalize())
+        if fdr_start <= fdr_end:
+            fdr_days = pd.bdate_range(fdr_start, fdr_end)
+            log_info(
+                f"FDR listing CSV 구간 수집: {fdr_start.date()} ~ {fdr_end.date()} "
+                f"({len(fdr_days)} 평일)"
+            )
+
+            def _one_fdr_day(day_ts):
+                day = pd.Timestamp(day_ts).to_pydatetime()
+                snap = _normalize_marcap_snapshot(_load_fdr_listing_csv_exact(day))
+                snap = snap.copy()
+                snap["date"] = pd.Timestamp(day_ts).normalize()
+                return snap
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+                futures = {ex.submit(_one_fdr_day, d): d for d in fdr_days}
+                done = 0
+                for fut in concurrent.futures.as_completed(futures):
+                    done += 1
+                    try:
+                        frames.append(fut.result())
+                        fdr_days_ok += 1
+                    except Exception as e:
+                        fdr_days_fail += 1
+                        day = futures[fut]
+                        log_warning(f"FDR listing CSV 로드 실패({pd.Timestamp(day).date()}): {e}")
+                    if done % 20 == 0 or done == len(futures):
+                        log_progress("FDR 일별 시총", done, len(futures))
+        else:
+            fdr_start = fdr_end = None
+    else:
+        fdr_start = fdr_end = None
+        log_warning("FDR listing CSV 구간 없음 → 전 구간 marcap parquet 사용")
+
+    # 2) FDR 밖: marcap parquet
+    marcap_ranges = []
+    if fdr_start is None:
+        marcap_ranges.append((start, end))
+    else:
+        if start < fdr_start:
+            marcap_ranges.append((start, fdr_start - pd.Timedelta(days=1)))
+        if fdr_end is not None and fdr_end < end:
+            marcap_ranges.append((fdr_end + pd.Timedelta(days=1), end))
+
+    marcap_rows = 0
+    for m_start, m_end in marcap_ranges:
+        if m_end < m_start:
+            continue
+        log_info(f"marcap parquet 구간 로드: {m_start.date()} ~ {m_end.date()}")
+        part = _load_marcap_parquet_range(m_start, m_end)
+        if part is not None and not part.empty:
+            frames.append(part)
+            marcap_rows += len(part)
+            # 공백 탐지(평일 기준)
+            have = set(pd.to_datetime(part["date"]).dt.normalize().unique())
+            need = set(pd.bdate_range(m_start, m_end))
+            missing = sorted(need - have)
+            if missing:
+                log_warning(
+                    f"marcap 구간 내 결측 평일 {len(missing)}개 "
+                    f"(예: {pd.Timestamp(missing[0]).date()} ~ {pd.Timestamp(missing[-1]).date()})"
+                )
+
+    if not frames:
+        raise RuntimeError(
+            f"일별 시가총액 패널이 비었습니다 ({start.date()} ~ {end.date()})"
+        )
+
+    df = pd.concat(frames, ignore_index=True)
+    df["date"] = pd.to_datetime(df["date"]).astype("datetime64[ns]")
+    df["Code"] = df["Code"].astype(str).str.zfill(6)
+    if "Stocks" not in df.columns:
+        df["Stocks"] = np.nan
+    df = df.drop_duplicates(subset=["Code", "date"], keep="last")
+    df.sort_values(by=["Code", "date"], inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
+    log_info(
+        f"✅ 일별 시가총액 패널 완료: {len(df):,}행 "
+        f"(FDR일 {fdr_days_ok}성공/{fdr_days_fail}실패, marcap행 {marcap_rows:,})"
+    )
+    return df
+
+
+def fetch_krx_marcap_snapshot(date_yyyymmdd: str, lookback_days: int = 15):
+    """
+    특정 일자 KRX-MARCAP 스냅샷 수집.
+    1) FDR listing CSV(해당일)  2) lookback CSV  3) FinanceData/marcap parquet
+    ※ StockListing 날짜 인자는 FDR 0.9.x에서 무시되므로 사용하지 않음.
+    """
+    date_yyyymmdd = str(date_yyyymmdd).strip()
+    preferred = datetime.strptime(date_yyyymmdd, '%Y%m%d')
+
+    try:
+        df = _load_fdr_listing_csv_exact(preferred)
+        return df
+    except Exception:
+        pass
+
+    df, used_day = _load_fdr_krx_marcap_cache_csv(
+        preferred_date=preferred, lookback_days=lookback_days, log_failures=False
+    )
+    source = "GitHub listing CSV"
+
+    if df is None or getattr(df, "empty", True):
+        df, used_day = _load_marcap_dataset_snapshot(
+            preferred_date=preferred, lookback_days=lookback_days
+        )
+        source = "FinanceData/marcap parquet"
+
+    if df is None or getattr(df, "empty", True):
+        raise RuntimeError(f"KRX-MARCAP 스냅샷을 찾지 못함: {date_yyyymmdd}")
+
+    if used_day is not None and used_day.strftime('%Y%m%d') != date_yyyymmdd:
+        log_info(
+            f"KRX-MARCAP 폴백({source}): 요청={date_yyyymmdd} → 사용={used_day.strftime('%Y-%m-%d')}"
+        )
+    return df
+
+
+def _count_valid_marcap_rows(df):
+    """Marcap 컬럼의 유효(non-null, 숫자) 행 수."""
+    if df is None or getattr(df, "empty", True) or "Marcap" not in df.columns:
+        return 0
+    return int(pd.to_numeric(df["Marcap"], errors="coerce").notna().sum())
 
 
 def _get_stock_list_from_marcap(analysis_date=None, min_marcap=10_000_000_000):
@@ -503,16 +917,54 @@ def _get_stock_list_from_marcap(analysis_date=None, min_marcap=10_000_000_000):
             primary_error = e
             log_warning(f"FDR StockListing(KRX-MARCAP) 실패, GitHub 일자 CSV 폴백 시도: {e}")
 
-        if df_marcap is None or (hasattr(df_marcap, "empty") and df_marcap.empty):
+        # 빈 DF뿐 아니라 "행은 있으나 Marcap이 전부 비어 있는" soft-fail도 폴백
+        listing_rows = 0 if df_marcap is None else len(df_marcap)
+        valid_marcap = _count_valid_marcap_rows(df_marcap)
+        need_fallback = (
+            df_marcap is None
+            or (hasattr(df_marcap, "empty") and df_marcap.empty)
+            or valid_marcap == 0
+        )
+        if need_fallback:
+            if listing_rows > 0 and valid_marcap == 0:
+                log_warning(
+                    f"StockListing Marcap 유효행 0/{listing_rows} "
+                    f"(시세 공백 soft-fail) → GitHub CSV/parquet 폴백"
+                )
             preferred = analysis_date if analysis_date is not None else None
-            df_marcap, cache_fallback_date = _load_fdr_krx_marcap_cache_csv(preferred_date=preferred)
-            if df_marcap is None or df_marcap.empty:
-                raise primary_error or RuntimeError("KRX-MARCAP 캐시 CSV를 찾을 수 없습니다.")
-            log_info(
-                f"종목목록/시총 스냅샷 폴백 사용: FDR GitHub CSV "
-                f"({cache_fallback_date.strftime('%Y-%m-%d')}, 오늘자 없음/StockListing 실패)"
-            )
-        
+            df_fb, cache_fallback_date = _load_fdr_krx_marcap_cache_csv(preferred_date=preferred)
+            if _count_valid_marcap_rows(df_fb) > 0:
+                df_marcap = df_fb
+                log_info(
+                    f"종목목록/시총 스냅샷 폴백 사용: FDR GitHub CSV "
+                    f"({cache_fallback_date.strftime('%Y-%m-%d')}, "
+                    f"오늘자 없음/StockListing 실패·시총공백)"
+                )
+            else:
+                # CSV도 시총이 없으면 기존 스냅샷 체인(CSV lookback → marcap parquet)
+                snap_day = preferred
+                if snap_day is None:
+                    snap_day = _get_krx_max_work_date() or datetime.now()
+                snap_day = pd.to_datetime(snap_day)
+                df_snap = fetch_krx_marcap_snapshot(snap_day.strftime('%Y%m%d'))
+                if _count_valid_marcap_rows(df_snap) == 0:
+                    raise primary_error or RuntimeError(
+                        "KRX-MARCAP 폴백 후에도 Marcap 유효행이 없습니다."
+                    )
+                df_marcap = df_snap
+                log_info(
+                    f"종목목록/시총 스냅샷 폴백 사용: fetch_krx_marcap_snapshot "
+                    f"(요청={snap_day.strftime('%Y-%m-%d')})"
+                )
+
+        if 'Name' not in df_marcap.columns:
+            df_marcap = df_marcap.copy()
+            df_marcap['Name'] = ''
+        if 'Stocks' not in df_marcap.columns:
+            df_marcap = df_marcap.copy()
+            df_marcap['Stocks'] = 0
+        df_marcap['Marcap'] = pd.to_numeric(df_marcap['Marcap'], errors='coerce')
+
         # 스팩, 리츠 제외
         df_marcap = df_marcap[~df_marcap['Name'].str.contains('스팩|리츠', na=False)].copy()
         
@@ -523,7 +975,7 @@ def _get_stock_list_from_marcap(analysis_date=None, min_marcap=10_000_000_000):
         
         # 상장주식수가 있는 경우만 필터링
         if 'Stocks' in df_marcap.columns:
-            df_marcap = df_marcap[df_marcap['Stocks'] > 0]
+            df_marcap = df_marcap[pd.to_numeric(df_marcap['Stocks'], errors='coerce').fillna(0) > 0]
         
         # 시가총액 필터링 (전 구간 공통 유니버스 컷)
         if 'Marcap' in df_marcap.columns:
@@ -718,10 +1170,9 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             latest_data['시총 회전율(3M)'] = np.nan
         
         latest_data['log_mktcap'] = np.log(reference_date_price * shares) if (reference_date_price * shares) > 0 else np.nan
-        # Exclude_Rank(cond3: 시총 1000억 미만) 계산에 사용되므로
-        # 시가총액(억) 값은 제외 규칙 평가 전에 먼저 세팅합니다.
+        # 시가총액은 원 단위로 통일 (백테스트 data_processor와 동일). Exclude cond3도 원 기준.
         try:
-            latest_data['시가총액'] = (reference_date_price * shares) / 1_0000_0000
+            latest_data['시가총액'] = float(reference_date_price) * float(shares)
         except Exception:
             latest_data['시가총액'] = np.nan
         
@@ -857,16 +1308,14 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
                 else:
                     cond2 = False
                 
-                # 시가총액 1000억 미만 종목 제외 (당일 조건, 억 단위 값 사용)
-                # latest_data['시가총액']은 억 단위로 저장됨
+                # 시가총액 1000억 미만 종목 제외 (원 단위, 백테스트와 동일)
                 try:
-                    market_cap_billion = latest_data.get('시가총액', None)
-                    if pd.isna(market_cap_billion):
+                    market_cap = latest_data.get('시가총액', None)
+                    if pd.isna(market_cap):
                         cond3 = False
                     else:
-                        # 값이 문자열 등으로 들어오는 경우를 대비해 숫자로 강제 변환
-                        market_cap_billion = float(market_cap_billion)
-                        cond3 = bool(market_cap_billion < 1000)
+                        market_cap = float(market_cap)
+                        cond3 = bool(market_cap < 100_000_000_000)
                 except Exception:
                     cond3 = False
 
@@ -904,6 +1353,60 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             latest_data['HV_Volatility_20'] = np.nan
             latest_data['HV_Volatility_60'] = np.nan
             
+
+        # Phase C (PLAN_model_improvement_v2): asymmetric / directional features (scalar last row)
+        try:
+            ret = df_for_indicators['종가'].pct_change()
+            if '거래대금' not in df_for_indicators.columns:
+                df_for_indicators['거래대금'] = df_for_indicators['종가'] * df_for_indicators['거래량']
+            vol = df_for_indicators['거래대금']
+            down = ret.where(ret < 0)
+            up = ret.where(ret > 0)
+            downside = down.rolling(20, min_periods=10).std()
+            up_vol = up.rolling(20, min_periods=10).std()
+            latest_data['Downside_Vol_20'] = downside.iloc[-1] if len(downside) else np.nan
+            ratio = up_vol / (downside + 1e-8)
+            latest_data['Upside_Downside_Vol_Ratio_20'] = ratio.iloc[-1] if len(ratio) else np.nan
+            skew = ret.rolling(60, min_periods=30).skew()
+            latest_data['Return_Skew_60'] = skew.iloc[-1] if len(skew) else np.nan
+            ddr = (ret < 0).rolling(20, min_periods=10).mean()
+            latest_data['Down_Day_Ratio_20'] = ddr.iloc[-1] if len(ddr) else np.nan
+            down_vol_sum = vol.where(ret < 0, 0.0).rolling(20, min_periods=10).sum()
+            all_vol_sum = vol.rolling(20, min_periods=10).sum()
+            dvr = down_vol_sum / (all_vol_sum + 1e-8)
+            latest_data['Down_Volume_Ratio_20'] = dvr.iloc[-1] if len(dvr) else np.nan
+            gap = df_for_indicators['시가'] / df_for_indicators['종가'].shift(1) - 1.0
+            gap_m = gap.rolling(20, min_periods=10).mean()
+            latest_data['Gap_Mean_20'] = gap_m.iloc[-1] if len(gap_m) else np.nan
+            intraday = (df_for_indicators['종가'] - df_for_indicators['시가']) / (
+                df_for_indicators['고가'] - df_for_indicators['저가'] + 1e-8
+            )
+            is20 = intraday.rolling(20, min_periods=10).mean()
+            latest_data['Intraday_Strength_20'] = is20.iloc[-1] if len(is20) else np.nan
+            amihud = (ret.abs() / (vol + 1e-8)).rolling(20, min_periods=10).mean()
+            ami = np.log1p(amihud)
+            latest_data['Amihud_Illiq_20'] = ami.iloc[-1] if len(ami) else np.nan
+            for _c in (
+                'Downside_Vol_20', 'Upside_Downside_Vol_Ratio_20', 'Return_Skew_60',
+                'Down_Day_Ratio_20', 'Down_Volume_Ratio_20', 'Gap_Mean_20',
+                'Intraday_Strength_20', 'Amihud_Illiq_20',
+            ):
+                v = latest_data.get(_c, np.nan)
+                try:
+                    if v is not None and np.isinf(float(v)):
+                        latest_data[_c] = np.nan
+                except Exception:
+                    pass
+        except Exception as e:
+            log_warning(f"Phase C asymmetric feature calc failed ({ticker}): {e}")
+            for _c in (
+                'Downside_Vol_20', 'Upside_Downside_Vol_Ratio_20', 'Return_Skew_60',
+                'Down_Day_Ratio_20', 'Down_Volume_Ratio_20', 'Gap_Mean_20',
+                'Intraday_Strength_20', 'Amihud_Illiq_20',
+            ):
+                latest_data[_c] = np.nan
+
+
         # disparity_20 추가
         try:
             ma20 = df_for_indicators['종가'].rolling(window=20).mean()
@@ -1167,6 +1670,15 @@ def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
     log_info("   🧹 무한대 값 및 결측값 정제 중...")
     final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     final_df.dropna(subset=['종목코드', '종목명', '현재가'], inplace=True)
+
+    # [Phase 2-1] 일자별 횡단면 백분위 랭크 (_cs) — 학습 경로와 동일 변환
+    before_cols = set(final_df.columns)
+    add_cross_sectional_ranks(final_df, CROSS_SECTIONAL_FEATURE_COLS)
+    added_cs = sorted(set(final_df.columns) - before_cols)
+    if added_cs:
+        log_info(f"   ✅ 횡단면 정규화(_cs) 추가: {len(added_cs)}개 컬럼")
+    else:
+        log_warning("   ⚠️ 횡단면 정규화(_cs) 대상 컬럼이 없어 건너뜀")
     
     if final_df.empty:
         log_error("피처 생성 후 유효한 데이터가 없습니다.")

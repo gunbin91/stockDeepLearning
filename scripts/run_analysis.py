@@ -114,8 +114,8 @@ def run_analysis(analysis_date_str):
         # 1단계: 종목 목록 수집
         log_info("전체 종목 목록 수신 중...")
         try:
-            # 1000억 미만 종목 사전 제외 및 시가총액 오름차순 정렬
-            stock_list_df = data_fetcher.fetch_stock_list(min_marcap=100_000_000_000)
+            # 백테스트와 동일: 100억 이상 수집 후 Exclude_Rank(1000억/MA)로 순위 제외
+            stock_list_df = data_fetcher.fetch_stock_list(min_marcap=10_000_000_000)
             if stock_list_df.empty:
                 error_msg = "종목 목록을 가져오는 데 실패했습니다."
                 log_error(error_msg)

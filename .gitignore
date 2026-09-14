@@ -13,6 +13,7 @@ cache/
 
 # Data files
 data/financial_data_pykrx_pit.parquet
+data/marcap_year_cache/
 
 # Joblib temp directory
 .joblib_temp/

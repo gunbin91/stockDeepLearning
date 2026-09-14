@@ -416,21 +416,17 @@ def predict_with_lgbm_model(df):
         numeric_cols = X_pred.select_dtypes(include=[np.number]).columns
         X_pred[numeric_cols] = X_pred[numeric_cols].replace([np.inf, -np.inf], np.nan)
         
-        # 스케일링 적용 (학습 시 사용한 스케일러 필수)
-        if scaler:
-            try:
-                # NaN이 있으면 스케일러가 에러를 낼 수 있으므로, 
-                # 학습 데이터의 중앙값 등으로 채워야 하지만, 
-                # 여기서는 일단 0으로 채우거나 그대로 진행 (StandardScaler는 NaN 허용 안 함)
-                # -> LightGBM은 NaN을 허용하지만 Scaler는 아님.
-                # -> Scaler 사용 전 NaN 처리 필요.
-                X_pred = X_pred.fillna(0) # 임시로 0으로 채움 (더 정교한 방법 필요할 수 있음)
-                X_pred_scaled = scaler.transform(X_pred)
-            except Exception as e:
-                log_warning(f"   ⚠️ [LGBM] 스케일링 실패: {e}, 원본 데이터 사용")
-                X_pred_scaled = X_pred
-        else:
-            X_pred_scaled = X_pred
+        # [개선] 스케일링/결측치 대체 제거
+        # 이전 코드는 NaN을 0으로 채운 뒤 StandardScaler를 적용했는데,
+        # 학습 시에는 중앙값으로 채웠기 때문에 심각한 train/serve skew가 발생했다.
+        # (예: KOSPI_disparity_20 은 0을 넣으면 -42σ)
+        # LightGBM은 NaN을 네이티브 처리하므로 그대로 넘긴다.
+        if scaler is not None:
+            log_warning(
+                "   ⚠️ [LGBM] 구버전 모델(scaler 포함)입니다. "
+                "재학습이 필요합니다. 스케일링을 건너뜁니다."
+            )
+        X_pred_scaled = X_pred[available_features]
         
         # 예측
         y_pred = model.predict(X_pred_scaled)
@@ -512,21 +508,16 @@ def predict_with_catboost_model(df):
         numeric_cols = X_pred.select_dtypes(include=[np.number]).columns
         X_pred[numeric_cols] = X_pred[numeric_cols].replace([np.inf, -np.inf], np.nan)
         
-        # 스케일링 적용 (학습 시 사용한 스케일러 필수)
-        if scaler:
-            try:
-                # NaN이 있으면 스케일러가 에러를 낼 수 있으므로, 
-                # 학습 데이터의 중앙값 등으로 채워야 하지만, 
-                # 여기서는 일단 0으로 채우거나 그대로 진행 (StandardScaler는 NaN 허용 안 함)
-                # -> CatBoost는 NaN을 허용하지만 Scaler는 아님.
-                # -> Scaler 사용 전 NaN 처리 필요.
-                X_pred = X_pred.fillna(0) # 임시로 0으로 채움 (더 정교한 방법 필요할 수 있음)
-                X_pred_scaled = scaler.transform(X_pred)
-            except Exception as e:
-                log_warning(f"   ⚠️ [CatBoost] 스케일링 실패: {e}, 원본 데이터 사용")
-                X_pred_scaled = X_pred
-        else:
-            X_pred_scaled = X_pred
+        # [개선] 스케일링/결측치 대체 제거
+        # 이전 코드는 NaN을 0으로 채운 뒤 StandardScaler를 적용했는데,
+        # 학습 시에는 중앙값으로 채웠기 때문에 심각한 train/serve skew가 발생했다.
+        # CatBoost는 NaN을 네이티브 처리하므로 그대로 넘긴다.
+        if scaler is not None:
+            log_warning(
+                "   ⚠️ [CatBoost] 구버전 모델(scaler 포함)입니다. "
+                "재학습이 필요합니다. 스케일링을 건너뜁니다."
+            )
+        X_pred_scaled = X_pred[available_features]
         
         # 예측
         y_pred_proba = model.predict_proba(X_pred_scaled)[:, 1]  # 클래스 1의 확률

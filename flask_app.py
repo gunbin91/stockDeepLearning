@@ -941,7 +941,8 @@ def model_analysis():
                     'trials_completed': lgbm_data.get('trials_completed', None),
                 }
                 
-                # 기본 중요도: 모델에서 직접 가져오기
+                # 기본 중요도: 모델에서 직접 가져오기 (Windows 등 lightgbm 미설치 시 CSV 폴백)
+                lgbm_model_info['default_importances'] = None
                 try:
                     import lightgbm as lgb
                     lgbm_model_file = path_manager.data_dir / 'lgbm_model.txt'
@@ -950,44 +951,49 @@ def model_analysis():
                         feature_importance = model.feature_importance(importance_type='gain')
                         features = lgbm_model_info['features']
                         if len(features) == len(feature_importance):
-                            # 튜플 리스트로 변환 [(feature, importance), ...]
-                            importance_list = list(zip(features, feature_importance.tolist()))
-                            # 중요도 높은 순서대로 정렬 (내림차순)
+                            importance_list = list(zip(features, [float(x) for x in feature_importance.tolist()]))
                             importance_list.sort(key=lambda x: x[1], reverse=True)
                             lgbm_model_info['default_importances'] = importance_list
-                        else:
-                            lgbm_model_info['default_importances'] = None
-                    else:
-                        lgbm_model_info['default_importances'] = None
                 except Exception as e:
-                    log_warning(f"LGBM 기본 중요도 로드 실패: {e}")
-                    lgbm_model_info['default_importances'] = None
+                    log_warning(f"LGBM 기본 중요도(모델) 로드 실패 → CSV 폴백 시도: {e}")
                 
-                # SHAP 및 Permutation 중요도: CSV 파일에서 로드
+                # SHAP / Permutation / (필요 시 Gain) CSV 로드
                 fi_path = path_manager.data_dir / 'lgbm_feature_importance.csv'
                 if fi_path.exists():
                     try:
                         fi_df = pd.read_csv(fi_path)
+
+                        if lgbm_model_info.get('default_importances') is None and 'gain_importance' in fi_df.columns:
+                            gain_df = fi_df[['feature', 'gain_importance']].sort_values(by='gain_importance', ascending=False)
+                            lgbm_model_info['default_importances'] = [
+                                (str(r.feature), float(r.gain_importance)) for r in gain_df.itertuples(index=False)
+                            ]
                         
-                        # SHAP 중요도
                         if 'shap_importance' in fi_df.columns:
                             shap_df = fi_df[['feature', 'shap_importance']].sort_values(by='shap_importance', ascending=False)
-                            lgbm_model_info['shap_importances'] = list(shap_df.itertuples(index=False, name=None))
+                            lgbm_model_info['shap_importances'] = [
+                                (str(r.feature), float(r.shap_importance)) for r in shap_df.itertuples(index=False)
+                            ]
                         else:
                             lgbm_model_info['shap_importances'] = None
                             
-                        # 순열 중요도 (추후 템플릿에 추가 가능)
                         if 'permutation_importance' in fi_df.columns:
                             perm_df = fi_df[['feature', 'permutation_importance']].sort_values(by='permutation_importance', ascending=False)
-                            lgbm_model_info['permutation_importances'] = list(perm_df.itertuples(index=False, name=None))
+                            lgbm_model_info['permutation_importances'] = [
+                                (str(r.feature), float(r.permutation_importance)) for r in perm_df.itertuples(index=False)
+                            ]
                         else:
                             lgbm_model_info['permutation_importances'] = None
                             
                     except Exception as e:
                         log_warning(f"LGBM 중요도 CSV 파일 처리 중 오류: {e}")
+                        if lgbm_model_info.get('default_importances') is None:
+                            lgbm_model_info['default_importances'] = None
                         lgbm_model_info['shap_importances'] = None
                         lgbm_model_info['permutation_importances'] = None
                 else:
+                    if lgbm_model_info.get('default_importances') is None:
+                        lgbm_model_info['default_importances'] = None
                     lgbm_model_info['shap_importances'] = None
                     lgbm_model_info['permutation_importances'] = None
                 
@@ -1017,7 +1023,8 @@ def model_analysis():
                     'trials_completed': catboost_data.get('trials_completed', None),
                 }
                 
-                # 기본 중요도: 모델에서 직접 가져오기
+                # 기본 중요도: 모델에서 직접 (catboost 미설치 시 CSV 폴백)
+                catboost_model_info['default_importances'] = None
                 try:
                     from catboost import CatBoostClassifier
                     catboost_model_file = path_manager.data_dir / 'catboost_model.cbm'
@@ -1027,44 +1034,49 @@ def model_analysis():
                         feature_importance = model.get_feature_importance()
                         features = catboost_model_info['features']
                         if len(features) == len(feature_importance):
-                            # 튜플 리스트로 변환 [(feature, importance), ...]
-                            importance_list = list(zip(features, feature_importance.tolist()))
-                            # 중요도 높은 순서대로 정렬 (내림차순)
+                            importance_list = list(zip(features, [float(x) for x in feature_importance.tolist()]))
                             importance_list.sort(key=lambda x: x[1], reverse=True)
                             catboost_model_info['default_importances'] = importance_list
-                        else:
-                            catboost_model_info['default_importances'] = None
-                    else:
-                        catboost_model_info['default_importances'] = None
                 except Exception as e:
-                    log_warning(f"CatBoost 기본 중요도 로드 실패: {e}")
-                    catboost_model_info['default_importances'] = None
+                    log_warning(f"CatBoost 기본 중요도(모델) 로드 실패 → CSV 폴백 시도: {e}")
                 
-                # SHAP 및 Permutation 중요도: CSV 파일에서 로드
+                # SHAP / Permutation / (필요 시 Gain) CSV 로드
                 fi_path = path_manager.data_dir / 'catboost_feature_importance.csv'
                 if fi_path.exists():
                     try:
                         fi_df = pd.read_csv(fi_path)
+
+                        if catboost_model_info.get('default_importances') is None and 'gain_importance' in fi_df.columns:
+                            gain_df = fi_df[['feature', 'gain_importance']].sort_values(by='gain_importance', ascending=False)
+                            catboost_model_info['default_importances'] = [
+                                (str(r.feature), float(r.gain_importance)) for r in gain_df.itertuples(index=False)
+                            ]
                         
-                        # SHAP 중요도
                         if 'shap_importance' in fi_df.columns:
                             shap_df = fi_df[['feature', 'shap_importance']].sort_values(by='shap_importance', ascending=False)
-                            catboost_model_info['shap_importances'] = list(shap_df.itertuples(index=False, name=None))
+                            catboost_model_info['shap_importances'] = [
+                                (str(r.feature), float(r.shap_importance)) for r in shap_df.itertuples(index=False)
+                            ]
                         else:
                             catboost_model_info['shap_importances'] = None
                             
-                        # 순열 중요도
                         if 'permutation_importance' in fi_df.columns:
                             perm_df = fi_df[['feature', 'permutation_importance']].sort_values(by='permutation_importance', ascending=False)
-                            catboost_model_info['permutation_importances'] = list(perm_df.itertuples(index=False, name=None))
+                            catboost_model_info['permutation_importances'] = [
+                                (str(r.feature), float(r.permutation_importance)) for r in perm_df.itertuples(index=False)
+                            ]
                         else:
                             catboost_model_info['permutation_importances'] = None
                             
                     except Exception as e:
                         log_warning(f"CatBoost 중요도 CSV 파일 처리 중 오류: {e}")
+                        if catboost_model_info.get('default_importances') is None:
+                            catboost_model_info['default_importances'] = None
                         catboost_model_info['shap_importances'] = None
                         catboost_model_info['permutation_importances'] = None
                 else:
+                    if catboost_model_info.get('default_importances') is None:
+                        catboost_model_info['default_importances'] = None
                     catboost_model_info['shap_importances'] = None
                     catboost_model_info['permutation_importances'] = None
                 

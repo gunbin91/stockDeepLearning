@@ -467,14 +467,10 @@ def _predict_with_loaded_lgbm_model(df, model_info):
     numeric_cols = X_pred.select_dtypes(include=[np.number]).columns
     X_pred[numeric_cols] = X_pred[numeric_cols].replace([np.inf, -np.inf], np.nan)
     
-    if scaler:
-        try:
-            X_pred = X_pred.fillna(0)
-            X_pred_scaled = scaler.transform(X_pred)
-        except Exception:
-            X_pred_scaled = X_pred
-    else:
-        X_pred_scaled = X_pred
+    # [개선] 스케일링/NaN→0 제거 (ml_model.py와 동일 정책)
+    if scaler is not None:
+        log_warning("⚠️ [LGBM] 구버전 모델(scaler 포함) — 재학습 필요. 스케일링 건너뜀.")
+    X_pred_scaled = X_pred[available_features]
     
     try:
         y_pred = model.predict(X_pred_scaled)
@@ -505,14 +501,10 @@ def _predict_with_loaded_catboost_model(df, model_info):
     numeric_cols = X_pred.select_dtypes(include=[np.number]).columns
     X_pred[numeric_cols] = X_pred[numeric_cols].replace([np.inf, -np.inf], np.nan)
     
-    if scaler:
-        try:
-            X_pred = X_pred.fillna(0)
-            X_pred_scaled = scaler.transform(X_pred)
-        except Exception:
-            X_pred_scaled = X_pred
-    else:
-        X_pred_scaled = X_pred
+    # [개선] 스케일링/NaN→0 제거 (ml_model.py와 동일 정책)
+    if scaler is not None:
+        log_warning("⚠️ [CatBoost] 구버전 모델(scaler 포함) — 재학습 필요. 스케일링 건너뜀.")
+    X_pred_scaled = X_pred[available_features]
     
     try:
         y_pred_proba = model.predict_proba(X_pred_scaled)[:, 1]
@@ -538,6 +530,23 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             "max_hold_period": max_hold_period,
             "data_rows": len(data)
         })
+
+        # Exclude_Rank 보정 (캐시에 전부 False로 저장된 경우 대비)
+        try:
+            from data_processor import recompute_exclude_rank_panel
+            idx_names = list(data.index.names) if isinstance(data.index, pd.MultiIndex) else None
+            tmp = data.reset_index()
+            before_ex = int(tmp['Exclude_Rank'].fillna(False).sum()) if 'Exclude_Rank' in tmp.columns else 0
+            tmp = recompute_exclude_rank_panel(tmp, apply_daily_exclusion=True)
+            after_ex = int(tmp['Exclude_Rank'].fillna(False).sum()) if 'Exclude_Rank' in tmp.columns else 0
+            if idx_names and all(n is not None for n in idx_names):
+                data = tmp.set_index([n for n in idx_names if n in tmp.columns])
+            else:
+                data = tmp
+            if after_ex != before_ex:
+                log_info(f"Exclude_Rank 재계산 적용: {before_ex:,} → {after_ex:,}")
+        except Exception as e:
+            log_warning(f"Exclude_Rank 재계산 건너뜀: {e}")
         
         # 캐시 저장 시에는 가중치와 상관없이 모든 모델의 상승확률을 계산
         force_all_predictions = save_cache
@@ -866,36 +875,15 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             investment_per_stock = cash / top_n if top_n > 0 else 0
             if date in data.index.get_level_values('date'):
                 daily_data = data.loc[date]
-                daily_data_tradable = daily_data[daily_data['거래량'] > 0]
+                # 점수 있는 종목 = 실시간 분석과 동일한 순위 모집단
+                # (Exclude_Rank는 일별 점수 계산 단계에서 이미 반영됨)
+                scored = daily_data.dropna(subset=['final_score']) if 'final_score' in daily_data.columns else daily_data
 
-                # ============================================================
-                # 상한가(급등) 필터: 당일 등락율 +29% 이상 종목은 매수 금지
-                # - 등락율이 NaN이면(전일 데이터 없음 등) 필터 미적용
-                # ============================================================
-                if 'daily_return_pct' in daily_data_tradable.columns:
-                    try:
-                        daily_data_tradable = daily_data_tradable[
-                            (daily_data_tradable['daily_return_pct'].isna()) |
-                            (daily_data_tradable['daily_return_pct'] < 29.0)
-                        ]
-                    except Exception:
-                        # 필터 실패 시 기존 로직 유지
-                        pass
-                
-                # 로그: 9월 17일 이후 데이터 확인
-                if pd.notna(date) and date >= pd.to_datetime('2025-09-17'):
-                    try:
-                        print(f"🔍 {date.strftime('%Y-%m-%d')} 데이터: 전체 {len(daily_data)}개, 거래가능 {len(daily_data_tradable)}개")
-                    except (AttributeError, ValueError):
-                        print(f"🔍 {date} 데이터: 전체 {len(daily_data)}개, 거래가능 {len(daily_data_tradable)}개")
-                
-                # 1. 전체 거래 가능 종목 중에서 '최종 점수' 기준으로 상위 buy_universe_rank에 드는 종목들만 매수 고려 대상이 됩니다.
-                overall_top_universe = daily_data_tradable.nlargest(buy_universe_rank, 'final_score')
-                
-                # UI의 일별 팝업에 표시할 상위 20개 종목 순위 저장
-                top_20_universe = overall_top_universe.head(20)
+                # 1) 순위 목록: 실시간과 같이 점수순 (상한가/거래량 필터 금지)
+                rank_n = max(int(buy_universe_rank), 20)
+                ranked_for_ui = scored.nlargest(rank_n, 'final_score')
                 top_rankings_list = []
-                for rank, (idx, row_data) in enumerate(top_20_universe.iterrows()):
+                for rank, (idx, row_data) in enumerate(ranked_for_ui.head(20).iterrows()):
                     ticker_val = idx if not isinstance(idx, tuple) else idx[1]
                     top_rankings_list.append({
                         'rank': rank + 1,
@@ -906,11 +894,33 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                     })
                 date_str = date.strftime('%Y-%m-%d') if hasattr(date, 'strftime') else str(date)
                 daily_rankings[date_str] = top_rankings_list
-                
-                # 2. 이렇게 1차로 걸러진 종목들 중에서 현재 보유하고 있는 종목들을 제외합니다.
-                # 3. 남은 종목들 중에서 '최종 점수'가 높은 순서대로 top_n (매수 종목 수)개만큼 매수합니다.
-                #    만약 남은 종목 수가 top_n보다 적다면, 그만큼만 매수하고 나머지는 현금으로 보유합니다.
-                buy_candidates = overall_top_universe[~overall_top_universe.index.get_level_values('종목코드').isin(portfolio.keys())].nlargest(top_n, 'final_score')
+
+                # 2) 가상 매수 풀: 점수 상위 buy_universe_rank → 거래량/상한가 조건만 여기서 패스
+                overall_top_universe = scored.nlargest(buy_universe_rank, 'final_score')
+                if '거래량' in overall_top_universe.columns:
+                    overall_top_universe = overall_top_universe[overall_top_universe['거래량'] > 0]
+                if 'daily_return_pct' in overall_top_universe.columns:
+                    try:
+                        overall_top_universe = overall_top_universe[
+                            (overall_top_universe['daily_return_pct'].isna()) |
+                            (overall_top_universe['daily_return_pct'] < 29.0)
+                        ]
+                    except Exception:
+                        pass
+
+                if pd.notna(date) and date >= pd.to_datetime('2025-09-17'):
+                    try:
+                        print(
+                            f"🔍 {date.strftime('%Y-%m-%d')} 데이터: "
+                            f"점수종목 {len(scored)}개, 매수후보풀 {len(overall_top_universe)}개"
+                        )
+                    except (AttributeError, ValueError):
+                        print(f"🔍 {date} 데이터: 점수종목 {len(scored)}개, 매수후보풀 {len(overall_top_universe)}개")
+
+                # 3) 보유 제외 후 top_n 매수
+                buy_candidates = overall_top_universe[
+                    ~overall_top_universe.index.get_level_values('종목코드').isin(portfolio.keys())
+                ].nlargest(top_n, 'final_score')
 
                 for ticker, row in buy_candidates.iterrows():
                     if cash >= investment_per_stock and investment_per_stock > 0:
@@ -1167,7 +1177,98 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             "initial_capital": initial_capital, "final_asset": final_asset, "daily_rankings": daily_rankings}
 
 
-def create_json_report(results, output_path=None):
+def _resolve_oos_start_date(oos_start_date=None):
+    """OOS 시작일 결정. 인자 우선, 없으면 모델 metadata train_end_date 폴백.
+
+    docs/PLAN_model_improvement_v2.md Task A-1 (R2)
+    """
+    if oos_start_date:
+        try:
+            return pd.Timestamp(oos_start_date).strftime('%Y-%m-%d')
+        except Exception:
+            log_warning(f"oos_start_date 파싱 실패: {oos_start_date}")
+            return None
+
+    meta_candidates = [
+        path_manager.data_dir / 'lgbm_model_metadata.joblib',
+        path_manager.data_dir / 'catboost_model_metadata.joblib',
+        path_manager.data_dir / 'cuml_ensemble_model_metadata.joblib',
+    ]
+    for meta_path in meta_candidates:
+        try:
+            if not meta_path.exists():
+                continue
+            meta = joblib.load(str(meta_path))
+            if not isinstance(meta, dict):
+                continue
+            ted = meta.get('train_end_date')
+            if ted:
+                return pd.Timestamp(ted).strftime('%Y-%m-%d')
+        except Exception:
+            continue
+    return None
+
+
+def _bucket_trade_metrics(sell_df):
+    """매도 체결 DataFrame → n_trades/win_rate/mean_return/total_profit."""
+    if sell_df is None or sell_df.empty:
+        return {
+            'n_trades': 0,
+            'win_rate': None,
+            'mean_return': None,
+            'total_profit': 0.0,
+        }
+    rets = pd.to_numeric(sell_df['return'], errors='coerce').dropna() if 'return' in sell_df.columns else pd.Series(dtype=float)
+    profits = pd.to_numeric(sell_df['profit'], errors='coerce') if 'profit' in sell_df.columns else pd.Series(dtype=float)
+    return {
+        'n_trades': int(len(sell_df)),
+        'win_rate': float((rets > 0).mean()) if len(rets) else None,
+        'mean_return': float(rets.mean()) if len(rets) else None,
+        'total_profit': float(profits.fillna(0).sum()) if len(profits) else 0.0,
+    }
+
+
+def compute_performance_metrics_split(trade_log, oos_start_date):
+    """매수일(buy_date) 기준 In-Sample / OOS 분리 지표.
+
+    trade_log: DataFrame 또는 list[dict]. return은 비율(0.1=+10%).
+    """
+    if not oos_start_date:
+        return None
+
+    if trade_log is None:
+        return None
+    if isinstance(trade_log, pd.DataFrame):
+        tl = trade_log.copy()
+    else:
+        tl = pd.DataFrame(list(trade_log))
+    if tl.empty or 'type' not in tl.columns:
+        return {
+            'oos_start_date': str(oos_start_date),
+            'in_sample': _bucket_trade_metrics(pd.DataFrame()),
+            'out_sample': _bucket_trade_metrics(pd.DataFrame()),
+        }
+
+    sells = tl[tl['type'] == 'sell'].copy()
+    if sells.empty or 'buy_date' not in sells.columns:
+        return {
+            'oos_start_date': str(oos_start_date),
+            'in_sample': _bucket_trade_metrics(pd.DataFrame()),
+            'out_sample': _bucket_trade_metrics(pd.DataFrame()),
+        }
+
+    cut = pd.Timestamp(oos_start_date)
+    sells['buy_date'] = pd.to_datetime(sells['buy_date'], errors='coerce')
+    in_s = sells[sells['buy_date'] < cut]
+    out_s = sells[sells['buy_date'] >= cut]
+    return {
+        'oos_start_date': cut.strftime('%Y-%m-%d'),
+        'in_sample': _bucket_trade_metrics(in_s),
+        'out_sample': _bucket_trade_metrics(out_s),
+    }
+
+
+def create_json_report(results, output_path=None, oos_start_date=None):
     """JSON 리포트 생성 함수"""
     if output_path is None:
         output_path = str(path_manager.data_dir / 'backtest_report.json')
@@ -1329,6 +1430,24 @@ def create_json_report(results, output_path=None):
         },
         'trade_log': trade_log_records
     }
+
+    # In-Sample / OOS 분리 (기존 performance_metrics는 유지)
+    resolved_oos = _resolve_oos_start_date(
+        oos_start_date if oos_start_date is not None else results.get('oos_start_date')
+    )
+    split_metrics = compute_performance_metrics_split(trade_log_records, resolved_oos)
+    if split_metrics is not None:
+        report_data['performance_metrics_split'] = split_metrics
+        log_info(
+            "IS/OOS 분리 지표 추가",
+            context={
+                "oos_start_date": split_metrics.get('oos_start_date'),
+                "in_sample_n": split_metrics['in_sample']['n_trades'],
+                "out_sample_n": split_metrics['out_sample']['n_trades'],
+                "in_sample_win": split_metrics['in_sample']['win_rate'],
+                "out_sample_win": split_metrics['out_sample']['win_rate'],
+            },
+        )
     
     # JSON 안전 변환 (NaN/Infinity 제거)
     def _sanitize_json_value(value):
@@ -1354,7 +1473,7 @@ def create_json_report(results, output_path=None):
     return report_data
 
 
-def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate, start_date=None, end_date=None, use_cache=False, shutdown_logger_after=True):
+def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate, start_date=None, end_date=None, use_cache=False, shutdown_logger_after=True, oos_start_date=None):
     """최종 백테스팅 실행 - 강화된 에러 처리
     
     Args:
@@ -1369,6 +1488,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         end_date: 테스트 종료일 (YYYY-MM-DD 형식, None이면 기본값 사용)
         use_cache: 캐시 사용 여부 (True면 캐시 파일 사용/생성, False면 실시간 분석)
         shutdown_logger_after: 백테스팅 완료 후 logger 종료 여부 (기본값: True, 최적화 시 False로 설정)
+        oos_start_date: OOS 시작일 (None이면 metadata train_end_date 폴백)
     """
     start_time = time.time()
     
@@ -1699,6 +1819,7 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             backtest_results['top_n'] = top_n
             backtest_results['buy_universe_rank'] = buy_universe_rank
             backtest_results['securities_transaction_tax_rate'] = SECURITIES_TRANSACTION_TAX_RATE
+            backtest_results['oos_start_date'] = oos_start_date
             # 캐시 정보 추가
             if cache_used and cache_meta:
                 backtest_results['cache_info'] = {
@@ -1734,7 +1855,11 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             json_report_path = str(path_manager.data_dir / 'backtest_report.json')
             log_info("JSON 리포트 생성 시작", context={"report_file": json_report_path})
             
-            create_json_report(backtest_results, output_path=json_report_path)
+            create_json_report(
+                backtest_results,
+                output_path=json_report_path,
+                oos_start_date=oos_start_date,
+            )
             
             log_info("JSON 리포트 생성 완료", context={"report_file": json_report_path})
             
@@ -1777,6 +1902,7 @@ if __name__ == '__main__':
     parser.add_argument('--start-date', type=str, default=None, help='Test start date (YYYY-MM-DD format, default: 1 year ago)')
     parser.add_argument('--end-date', type=str, default=None, help='Test end date (YYYY-MM-DD format, default: today)')
     parser.add_argument('--use-cache', action='store_true', help='Use cache for backtesting (load/save cache file)')
+    parser.add_argument('--oos-start', type=str, default=None, help='OOS start date YYYY-MM-DD (default: model metadata train_end_date)')
     args = parser.parse_args()
 
     if args.capital <= 0:
@@ -1792,6 +1918,7 @@ if __name__ == '__main__':
             transaction_fee_rate=args.fee,
             start_date=args.start_date,
             end_date=args.end_date,
-            use_cache=args.use_cache
+            use_cache=args.use_cache,
+            oos_start_date=args.oos_start,
         )
 

@@ -13,6 +13,7 @@ import sys
 import argparse
 import shutil
 import glob
+import re
 import subprocess
 from datetime import datetime, timedelta
 import gc
@@ -108,7 +109,10 @@ import data_processor
 
 from path_manager import path_manager
 
-# 언더샘플링은 직접 구현하므로 외부 라이브러리 불필요
+_scripts_dir = os.path.dirname(os.path.abspath(__file__))
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
+from sample_weight_utils import apply_stratified_flat_undersample, require_sample_meta
 
 
 
@@ -553,42 +557,51 @@ def prepare_data_and_save(data_path, start_date, end_date):
     # 추가된 피처: Relative_Strength_20 (KOSPI 수익률 상대강도), 시총_회전율(1W) (5일 거래대금 기준)
     # 제거된 피처: 변동성(1W), 변동성(3M) (2024년 12월)
     features = [
-        'log_mktcap',
+        'log_mktcap_cs',
         '52주_신고가_비율',
-        'ADX_14',
-        'disparity_120',  # 120일 이격도
-        'disparity_240',  # 240일 이격도
-        'disparity_20',   # 20일 이격도
-        'KOSPI_disparity_20',  # KOSPI 20일 이격도
+        'ADX_14_cs',
+        'disparity_120_cs',  # 120일 이격도 횡단면
+        'disparity_240_cs',  # 240일 이격도 횡단면
+        'disparity_20_cs',   # 20일 이격도 횡단면
+        # 'KOSPI_disparity_20',  # Phase 2-2: 당일 전종목 동일값 → 랭킹 무기여, 제거
         # 추가된 피처
         'Trend_Pullback_Score',  # 추세+눌림 점수
         'Position_Range_60',
         # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
         # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
-        'MA20_Slope',  # 20일 이동평균선 기울기
-        'MA120_Slope',  # 120일 이동평균선 기울기
-        'MA240_Slope',  # 240일 이동평균선 기울기
-        'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
+        'MA20_Slope_cs',  # 20일 이동평균선 기울기 횡단면
+        'MA120_Slope_cs',  # 120일 이동평균선 기울기 횡단면
+        'MA240_Slope_cs',  # 240일 이동평균선 기울기 횡단면
+        # 'KOSPI_MA20_Slope',  # Phase 2-2: 당일 전종목 동일값 → 랭킹 무기여, 제거
         # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
         # 새로 추가된 피처
-        'RVOL',  # 상대 거래량 (Relative Volume)
-        '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
-        '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
+        'RVOL_cs',  # 상대 거래량 횡단면
+        '시총 회전율(1W)_cs',
+        '시총 회전율(3M)_cs',
         'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
-        'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
-        'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
-        'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
+        'ATRr_5_cs',  # ATR 비율 5일 횡단면
+        'ATRr_20_cs',  # ATR 비율 20일 횡단면
+        'ATRr_60_cs',  # ATR 비율 60일 횡단면
         
         # HV / VWAP / 낙폭 / CLV
-        'HV_Volatility_20',  # HV 변동성 1개월 (일별 로그 수익률의 20일 표준편차)
-        'HV_Volatility_60',  # HV 변동성 3개월 (일별 로그 수익률의 60일 표준편차)
-        'HV_Volatility_5',   # HV 변동성 1주 (일별 로그 수익률의 5일 표준편차)
-        'VWAP_Disparity_5',  # VWAP 괴리율 1주 (5일 기준)
+        'HV_Volatility_20_cs',
+        'HV_Volatility_60_cs',
+        'HV_Volatility_5_cs',
+        'VWAP_Disparity_5_cs',
         # Gap 피처 제거
         # 신규 추가
-        'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
-        '등락율(5D)',  # 5거래일 전 종가 대비 누적 등락율 (%)
+        'Max_Drawdown_20_cs',
+        '등락율(5D)_cs',
         'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
+        # Phase C (PLAN_model_improvement_v2): asymmetric features
+        'Downside_Vol_20_cs',
+        'Upside_Downside_Vol_Ratio_20_cs',
+        'Return_Skew_60_cs',
+        'Down_Day_Ratio_20_cs',
+        'Down_Volume_Ratio_20_cs',
+        'Gap_Mean_20_cs',
+        'Intraday_Strength_20_cs',
+        'Amihud_Illiq_20_cs',
     ]
 
     try:
@@ -646,10 +659,11 @@ def prepare_data_and_save(data_path, start_date, end_date):
                     continue
 
                 # 전처리: 모든 피처 저장 (학습 시 features 리스트로 필터링)
-                # 숫자형 피처만 선택 (target 제외)
+                # 숫자형 피처만 선택 (sample_weight는 학습 weight용, 피처 제외)
                 numeric_cols = ticker_df.select_dtypes(include=[np.number]).columns.tolist()
-                if 'target' in numeric_cols:
-                    numeric_cols.remove('target')
+                for drop_col in ('target', 'sample_weight'):
+                    if drop_col in numeric_cols:
+                        numeric_cols.remove(drop_col)
                 
                 if not numeric_cols:
                     log_warning(f"   ⚠️ 종목 {ticker}에 숫자형 피처가 없습니다. 건너뜁니다.")
@@ -682,6 +696,10 @@ def prepare_data_and_save(data_path, start_date, end_date):
                 preprocessed_df = X_all.copy()
                 preprocessed_df['target'] = y
                 preprocessed_df['date'] = pd.to_datetime(ticker_df['date'])
+                if 'sample_weight' in ticker_df.columns:
+                    preprocessed_df['sample_weight'] = ticker_df['sample_weight'].astype(np.float32).values
+                if 'sample_type' in ticker_df.columns:
+                    preprocessed_df['sample_type'] = ticker_df['sample_type'].astype(str).values
                 # 백테스팅에 필요한 메타데이터 추가
                 if '종목코드' in ticker_df.columns:
                     preprocessed_df['종목코드'] = ticker_df['종목코드'].values
@@ -877,7 +895,7 @@ def get_purged_train_end_exclusive(trading_dates: pd.DatetimeIndex, val_start, p
     # Train은 < boundary (exclusive). boundary일부터 val_start 전까지 purge 구간이 됨.
     return pd.Timestamp(trading_dates[idx - purge_trading_days])
 
-def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days=365, n_folds=3, purge_trading_days=10):
+def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days=365, n_folds=3, purge_trading_days=10, oos_holdout_days=270):
     """
     Expanding Window 방식으로 Fold 범위를 계산합니다.
     
@@ -886,6 +904,7 @@ def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days
         warmup_days: 웜업 기간 (일)
         val_period_days: 검증 기간 (일)
         n_folds: Fold 개수
+        oos_holdout_days: 데이터 끝에서 제외할 OOS 홀드아웃(달력일). CV·최종학습에 미포함.
     
     Returns:
         fold_ranges 리스트: 각 요소는 {'fold': int, 'train_start': Timestamp, 'train_end': Timestamp, 
@@ -901,8 +920,14 @@ def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days
     actual_start_date = min_date + timedelta(days=warmup_days)
     # [중요] 날짜 필터링은 [start, end) 형태(< end)로 사용하므로 end는 exclusive 경계로 둡니다.
     # max_date(마지막 거래일)을 포함하려면 +1일을 더한 값을 end 경계로 사용해야 합니다.
-    actual_end_date = max_date + timedelta(days=1)
+    # OOS 홀드아웃: 최근 oos_holdout_days는 CV/최종학습에서 제외 → metadata train_end_date = OOS 시작.
+    data_end_exclusive = max_date + timedelta(days=1)
+    holdout = max(0, int(oos_holdout_days or 0))
+    actual_end_date = data_end_exclusive - timedelta(days=holdout)
     
+    log_info(f"   📅 전체 데이터 기간: {min_date.strftime('%Y-%m-%d')} ~ {max_date.strftime('%Y-%m-%d')}")
+    if holdout > 0:
+        log_info(f"   📅 OOS 홀드아웃: {actual_end_date.strftime('%Y-%m-%d')} ~ {data_end_exclusive.strftime('%Y-%m-%d')} ({holdout}일, 학습 미포함)")
     log_info(f"   📅 실제 학습 기간: {actual_start_date.strftime('%Y-%m-%d')} ~ {actual_end_date.strftime('%Y-%m-%d')}")
     
     # Expanding Window 방식으로 Fold 범위 계산
@@ -954,13 +979,17 @@ def calculate_expanding_fold_ranges(file_paths, warmup_days=250, val_period_days
 def _process_single_file(file_path, features, start_date, end_date, include_crash_pattern=False):
     """
     단일 파일을 처리하는 헬퍼 함수 (워커 스레드에서 실행)
+
+    Note:
+        include_crash_pattern 인자는 레거시 호환용이며 무시됩니다.
+        급락 우선 1:1 샘플링은 폐기되었고, sample_type 기반 횡보 층화만 사용합니다.
     
     Args:
         file_path: feather 파일 경로
         features: 사용할 피처 리스트
         start_date: 시작 날짜 (pd.Timestamp)
         end_date: 종료 날짜 (pd.Timestamp)
-        include_crash_pattern: True이면 급락 패턴 정보도 계산 (샘플링용)
+        include_crash_pattern: (미사용/레거시) 무시됨
     
     Returns:
         pandas.DataFrame 또는 None (처리 실패 시)
@@ -985,21 +1014,8 @@ def _process_single_file(file_path, features, start_date, end_date, include_cras
         if 'target' not in df.columns:
             return None
         
-        # 급락 패턴 계산 (샘플링용)
-        # 원본 데이터를 다시 읽어서 종가 정보로 계산
-        if include_crash_pattern:
-            try:
-                # 종목코드 추출
-                ticker = os.path.basename(file_path).replace('.feather', '')
-                
-                # 원본 데이터에서 종가 정보 읽기 (data_processor를 통해)
-                # 간단하게: 원본 feather 파일에는 종가가 없으므로
-                # data_processor.get_preprocessed_data를 다시 호출하는 것은 비효율적
-                # 대신 샘플링 시점에 별도로 처리
-                # 여기서는 일단 계산하지 않음
-                pass
-            except Exception:
-                pass
+        # include_crash_pattern: 레거시 무시 (층화는 sample_type 사용)
+        _ = include_crash_pattern
         
         # Forward Fill (CPU에서 처리)
         # features 컬럼만 ffill 적용
@@ -1016,6 +1032,9 @@ def _process_single_file(file_path, features, start_date, end_date, include_cras
         # 필요한 컬럼만 반환 (메모리 절약)
         # 백테스팅에 필요한 메타데이터도 포함
         required_cols = ['date', 'target'] + [f for f in features if f in df.columns]
+        for aux_col in ('sample_weight', 'sample_type'):
+            if aux_col in df.columns and aux_col not in required_cols:
+                required_cols.append(aux_col)
         # 백테스팅에 필요한 메타데이터 추가 (있는 경우만)
         for meta_col in ['종목코드', '시가총액', '종목명']:
             if meta_col in df.columns and meta_col not in required_cols:
@@ -1030,55 +1049,13 @@ def _process_single_file(file_path, features, start_date, end_date, include_cras
 
 def _load_crash_pattern_data(file_paths, start_date, end_date, max_workers=4):
     """
-    급락 패턴 식별을 위해 원본 데이터에서 종가 정보를 로드하는 함수
-    
-    Args:
-        file_paths: feather 파일 경로 리스트
-        start_date: 시작 날짜
-        end_date: 종료 날짜
-        max_workers: 병렬 워커 수
-    
-    Returns:
-        dict: {인덱스: bool} - 급락 패턴 여부 (10일 내 -20% 이하로 떨어진 경우 True)
+    [레거시/미사용] 급락 패턴 맵 로더.
+
+    예전 1:1·급락 우선 샘플링용. 현재는 sample_type 횡보 층화만 사용하므로
+    학습 경로에서 호출하지 않습니다. 시그니처 호환을 위해 남겨 둡니다.
     """
-    crash_pattern_map = {}
-    
-    def _load_single_crash_pattern(file_path):
-        """단일 파일에서 급락 패턴 계산"""
-        try:
-            df = pd.read_feather(file_path)
-            if 'date' not in df.columns:
-                return {}
-            
-            df['date'] = pd.to_datetime(df['date'])
-            mask = (df['date'] >= start_date) & (df['date'] < end_date)
-            df = df.loc[mask]
-            
-            if df.empty:
-                return {}
-            
-            # 종가 정보가 있는지 확인 (feather 파일에는 없을 수 있음)
-            # 원본 데이터를 다시 읽어야 함
-            # 일단 target만 사용하고, 나중에 개선
-            return {}
-        except Exception:
-            return {}
-    
-    # 병렬 처리로 급락 패턴 계산
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_file = {
-            executor.submit(_load_single_crash_pattern, file_path): file_path
-            for file_path in file_paths
-        }
-        
-        for future in as_completed(future_to_file):
-            try:
-                result = future.result()
-                crash_pattern_map.update(result)
-            except Exception:
-                continue
-    
-    return crash_pattern_map
+    _ = (file_paths, start_date, end_date, max_workers)
+    return {}
 
 def _process_batch(batch_files, features, start_date, end_date, max_workers=4):
     """
@@ -1117,6 +1094,30 @@ def _process_batch(batch_files, features, start_date, end_date, max_workers=4):
     
     return batch_dfs
 
+
+def _rf_stratified_flat_undersample(X, y, sample_type, random_state=42):
+    """cuML RF: stratified flat undersampling only (no sample_weight)."""
+    if sample_type is None:
+        return X, y, None
+
+    type_arr = np.asarray(sample_type)
+    y_arr = y.to_pandas().values if hasattr(y, 'to_pandas') else np.asarray(y)
+    X_pd = X.to_pandas() if hasattr(X, 'to_pandas') else X
+
+    X_res, y_res, _, type_res = apply_stratified_flat_undersample(
+        X_pd, y_arr, type_arr, sample_weight=None, random_state=random_state
+    )
+
+    if hasattr(X, 'to_pandas'):
+        X_out = cudf.from_pandas(X_res)
+        y_out = cudf.Series(y_res)
+    else:
+        X_out = X_res
+        y_out = y_res
+
+    return X_out, y_out, type_res
+
+
 def load_data_period(file_paths, features, start_date, end_date, imputation_map=None, batch_size=50, max_workers=4):
     """
     날짜 기반 데이터 로드 및 결측치 처리 (하이브리드 병렬 처리)
@@ -1133,10 +1134,10 @@ def load_data_period(file_paths, features, start_date, end_date, imputation_map=
         max_workers: 병렬 워커 수 (기본값: 4)
     
     Returns:
-        (X, y, imputation_map, meta_data) 튜플
-        - Train 모드: (X_train, y_train, calculated_map, meta_data)
-        - Val 모드: (X_val, y_val, None, meta_data)
-        - meta_data: pandas DataFrame with 'date' and '종목코드' columns (None if not available)
+        (X, y, imputation_map, sample_type) 튜플
+        - Train 모드: (X_train, y_train, calculated_map, sample_type)
+        - Val 모드: (X_val, y_val, None, sample_type)
+        - sample_type: numpy array of str labels (None if column absent)
     """
     if not file_paths:
         return None, None, None, None
@@ -1256,6 +1257,11 @@ def load_data_period(file_paths, features, start_date, end_date, imputation_map=
         
         X = final_df[features]
         y = final_df['target']
+
+        if 'sample_type' in final_df.columns:
+            sample_type = final_df['sample_type'].to_pandas().astype(str).values
+        else:
+            sample_type = None
         
         # Train-Only Imputation
         if imputation_map is None:
@@ -1272,7 +1278,7 @@ def load_data_period(file_paths, features, start_date, end_date, imputation_map=
             gc.collect()
             
             log_info(f"   ✅ Train 데이터 처리 완료: {len(X):,}행")
-            return X, y, calculated_map
+            return X, y, calculated_map, sample_type
         else:
             # [Val 모드] 외부에서 받은 맵 적용
             log_info("   📊 Val 모드: 결측치 대체값 적용 중...")
@@ -1283,7 +1289,7 @@ def load_data_period(file_paths, features, start_date, end_date, imputation_map=
             gc.collect()
             
             log_info(f"   ✅ Val 데이터 처리 완료: {len(X):,}행")
-            return X, y, None
+            return X, y, None, sample_type
     
     except Exception as e:
         log_error(f"데이터 로딩 중 오류 발생: {e}")
@@ -1296,7 +1302,7 @@ def load_data_period(file_paths, features, start_date, end_date, imputation_map=
             pass
         safe_gpu_memory_cleanup()
         gc.collect()
-        return None, None, None
+        return None, None, None, None
 
 def objective(trial, fold_data_cache, features, max_depth_list, rng):
     """
@@ -1346,8 +1352,8 @@ def objective(trial, fold_data_cache, features, max_depth_list, rng):
             log_warning(f"   ⚠️ Fold #{fold+1} 데이터가 없습니다. 건너뜁니다.")
             continue
 
-        # Trial 전에 이미 언더샘플링이 적용되었으므로, 여기서는 샘플링을 건너뜁니다.
-        # (중복 샘플링 방지: Trial 전 언더샘플링으로 이미 클래스 균형이 맞춰져 있음)
+        # Trial 전에 횡보 층화 언더샘플링이 적용되었으므로, 여기서는 샘플링을 건너뜁니다.
+        # (cuML RF는 sample_weight 미지원 — 층화만 적용)
         X_train_resampled = X_train_all
         y_train_resampled = y_train_all
         
@@ -1571,7 +1577,16 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
             raise ValueError("data_path가 제공되지 않았습니다. fold_cache 파일을 로드할 수 없습니다.")
         
         fold_cache_dir = os.path.join(os.path.dirname(os.path.expanduser(data_path)), "fold_cache")
-        fold_cache_path = os.path.join(fold_cache_dir, "fold_0_data.joblib")
+        # LGBM/CatBoost는 가장 최근 폴드(train+val)를 쓴다. RF만 fold_0이라 최근 데이터가 빠졌음.
+        _fold_candidates = sorted(
+            int(m.group(1))
+            for m in (re.match(r"fold_(\d+)_data\.joblib$", f) for f in os.listdir(fold_cache_dir))
+            if m
+        )
+        if not _fold_candidates:
+            raise FileNotFoundError(f"fold_cache 파일을 찾을 수 없습니다: {fold_cache_dir}")
+        fold_cache_path = os.path.join(fold_cache_dir, f"fold_{_fold_candidates[-1]}_data.joblib")
+        log_info(f"   [DATA] 최종 학습 fold 캐시: fold_{_fold_candidates[-1]}_data.joblib")
         
         if not os.path.exists(fold_cache_path):
             raise FileNotFoundError(f"fold_cache 파일을 찾을 수 없습니다: {fold_cache_path}")
@@ -1579,15 +1594,20 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
         # 원본 데이터 로드 (샘플링 전 데이터)
         fold_data = joblib.load(fold_cache_path)
         
-        # 저장할 때 6개를 저장했으므로 (imputation_map, meta_data 포함), 6개를 받아야 함
-        if len(fold_data) == 6:
+        train_sample_type_all = None
+        val_sample_type_all = None
+        train_meta_data_final = None
+        if len(fold_data) >= 7:
+            X_train_original, y_train_original, X_val_original, y_val_original, last_fold_imputer = fold_data[:5]
+            train_sample_type_all, val_sample_type_all = fold_data[5], fold_data[6]
+            if len(fold_data) >= 8:
+                train_meta_data_final = fold_data[7]
+        elif len(fold_data) == 6:
             X_train_original, y_train_original, X_val_original, y_val_original, last_fold_imputer, train_meta_data_final = fold_data
         elif len(fold_data) == 5:
-            # 이전 버전 호환성
             X_train_original, y_train_original, X_val_original, y_val_original, last_fold_imputer = fold_data
-            train_meta_data_final = None
         else:
-            raise ValueError(f"fold_cache 파일 형식이 맞지 않습니다. (요소 개수: {len(fold_data)}, 기대값: 5 또는 6)")
+            raise ValueError(f"fold_cache 파일 형식이 맞지 않습니다. (요소 개수: {len(fold_data)}, 기대값: 5~8)")
         
         # pandas DataFrame을 cuDF DataFrame으로 변환 (저장 시 pandas로 변환했으므로)
         if isinstance(X_train_original, pd.DataFrame):
@@ -1607,6 +1627,11 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
         # 원본 train + 원본 val 합치기 (전체 데이터 복원)
         X_all = cudf.concat([X_train_original, X_val_original], ignore_index=True)
         y_all = cudf.concat([y_train_original, y_val_original], ignore_index=True)
+
+        if train_sample_type_all is not None and val_sample_type_all is not None:
+            type_all = np.concatenate([np.asarray(train_sample_type_all), np.asarray(val_sample_type_all)])
+        else:
+            type_all = None
         
         # features 리스트에 있는 피처만 선택 (feather 파일에는 모든 피처가 저장되어 있음)
         missing_features = [f for f in features if f not in X_all.columns]
@@ -1652,81 +1677,26 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
         
         del y_all_pandas
 
-        # 2. 전체 데이터 언더샘플링 적용 (1:1 비율, Trial 전 언더샘플링과 동일한 로직)
-        log_info("   ⚖️ 최종 학습 전 언더샘플링 적용 (1:1 비율, 급락 패턴 우선 선택)...")
+        # 2. 횡보 층화 언더샘플링 (cuML RF: sample_weight 미지원, 층화만 적용)
+        log_info("   ⚖️ 최종 학습 전 횡보 층화 언더샘플링 적용 (RF: stratification only, no sample_weight)...")
         sampling_start = datetime.now()
-        
-        # 클래스 분포 확인
+
+        require_sample_meta(type_all, sample_weight=None, need_weight=False, context="RF 최종학습")
+        before_n = len(y_all)
+        n_flat_before = int((np.asarray(type_all) == 'flat').sum())
+        X_all, y_all, type_all = _rf_stratified_flat_undersample(
+            X_all, y_all, type_all, random_state=42
+        )
         y_all_pandas = y_all.to_pandas()
-        value_counts = y_all_pandas.value_counts()
-        
-        if len(value_counts) >= 2:
-            # 소수 클래스와 다수 클래스 식별
-            minority_class_label_check = value_counts.idxmin()
-            majority_class_label_check = value_counts.idxmax()
-            n_minority_check = value_counts[minority_class_label_check]
-            n_majority_check = value_counts[majority_class_label_check]
-            
-            # 언더샘플링: 다수 클래스를 소수 클래스 크기만큼 랜덤 선택 (1:1 비율)
-            # [중요] 소수 클래스는 전체 사용 (소실 방지)
-            if n_majority_check > n_minority_check:
-                # 위치 인덱스 생성 (0부터 시작)
-                all_indices = np.arange(len(y_all))
-                y_all_values = y_all_pandas.values
-                
-                # 소수 클래스 인덱스 (전체 사용)
-                minority_indices = all_indices[y_all_values == minority_class_label_check]
-                
-                # 다수 클래스 인덱스 (샘플링 대상)
-                majority_indices = all_indices[y_all_values == majority_class_label_check]
-                
-                log_info(f"      🔀 다수 클래스 랜덤 셔플 및 샘플링 중 (다양성 확보)...")
-                
-                # [다양성 확보] 다수 클래스 셔플
-                majority_indices_shuffled = majority_indices.copy()
-                rng.shuffle(majority_indices_shuffled)
-                
-                # 1:1 비율로 샘플링
-                target_majority_size = n_minority_check * 1
-                selected_majority_indices = majority_indices_shuffled[:target_majority_size]
-                
-                # 인덱스 결합
-                balanced_indices = np.concatenate([minority_indices, selected_majority_indices])
-                
-                # [시계열 정합성] 시간 순서 유지 (과거 -> 미래)
-                balanced_indices.sort()
-                
-                # 언더샘플링된 데이터 생성
-                X_all_resampled = X_all.iloc[balanced_indices].reset_index(drop=True)
-                y_all_resampled = y_all.iloc[balanced_indices].reset_index(drop=True)
-                
-                # 샘플링 결과 확인
-                y_all_resampled_pandas = y_all_resampled.to_pandas()
-                value_counts_resampled = y_all_resampled_pandas.value_counts()
-                n_minority_resampled = value_counts_resampled[minority_class_label]
-                n_majority_resampled = value_counts_resampled[majority_class_label]
-                del y_all_resampled_pandas
-                
-                # 원본 데이터 삭제
-                del X_all, y_all, balanced_indices
-                enhanced_gpu_memory_cleanup(force_defrag=True)
-                gc.collect()
-                
-                # 샘플링된 데이터로 교체
-                X_all = X_all_resampled
-                y_all = y_all_resampled
-                del X_all_resampled, y_all_resampled
-                
-                log_info(f"   [OK] 언더샘플링 완료 (1:1 비율):")
-                log_info(f"      - 소수 클래스 ({minority_class_label_check}): {n_minority_original:,}개 → {n_minority_resampled:,}개 (100% 사용)")
-                log_info(f"      - 다수 클래스 ({majority_class_label_check}): {n_majority_original:,}개 → {n_majority_resampled:,}개")
-                log_info(f"   [DATA] 샘플링 후 데이터: {len(X_all):,}행 ({(datetime.now() - sampling_start).total_seconds():.1f}초)")
-            else:
-                log_info(f"   ℹ️ 클래스 불균형이 없어 샘플링을 건너뜁니다.")
-                del y_all_pandas
-        else:
-            log_warning(f"   ⚠️ 클래스가 1개만 있어 샘플링을 건너뜁니다.")
-            del y_all_pandas
+        log_info(
+            f"   [OK] 층화 언더샘플링 완료: {before_n:,} → {len(y_all):,}행 "
+            f"(flat {n_flat_before:,}→{int((np.asarray(type_all) == 'flat').sum()):,}), "
+            f"클래스={y_all_pandas.value_counts().to_dict()} "
+            f"({(datetime.now() - sampling_start).total_seconds():.1f}초)"
+        )
+        del y_all_pandas
+        enhanced_gpu_memory_cleanup(force_defrag=True)
+        gc.collect()
         
         # 3. 전체 데이터 전처리
         step_start = datetime.now()
@@ -2071,7 +2041,9 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
                     'training_config': final_training_config,
                     'feature_importances': feature_importances,  # SHAP 값
                     'permutation_importances': permutation_importances,  # 순열 중요도
-                    'parameter_explanations': parameter_explanations
+                    'parameter_explanations': parameter_explanations,
+                    'train_start_date': (final_training_config or {}).get('train_start_date'),
+                    'train_end_date': (final_training_config or {}).get('train_end_date'),
                 }
                 
                 joblib.dump(metadata_to_save, str(metadata_path), compress=3)
@@ -2099,9 +2071,11 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
 def main():
     """메인 실행 함수"""
     parser = argparse.ArgumentParser(description="GPU 가속 모델 훈련 스크립트")
-    parser.add_argument('--n_iter', type=int, default=100, help='Optuna 탐색 횟수')
+    parser.add_argument('--n_iter', type=int, default=20, help='Optuna 탐색 횟수')
     parser.add_argument('--max_depth', type=int, nargs='+', default=[10, 15, 20, 25, 30], help='max_depth 후보 리스트 (과적합 방지를 위해 10-30 권장)')
     args = parser.parse_args()
+
+    log_info("cuML 25.10: sample_weight 미지원 → 층화만 적용")
     
     # RF / LGBM / CatBoost 공용 학습 데이터 캐시
     data_path = os.path.expanduser("~/stock_data/processed_feather")
@@ -2193,44 +2167,53 @@ def main():
     # 제거된 피처: disparity_120, disparity_240
     # 제거된 피처: 변동성(1W), 변동성(3M) (2024년 12월)
     features = [
-        'log_mktcap',
+        'log_mktcap_cs',
         '52주_신고가_비율',
-        'ADX_14',
-        'disparity_120',  # 120일 이격도
-        'disparity_240',  # 240일 이격도
-        'disparity_20',   # 20일 이격도
-        'KOSPI_disparity_20',  # KOSPI 20일 이격도
+        'ADX_14_cs',
+        'disparity_120_cs',  # 120일 이격도 횡단면
+        'disparity_240_cs',  # 240일 이격도 횡단면
+        'disparity_20_cs',   # 20일 이격도 횡단면
+        # 'KOSPI_disparity_20',  # Phase 2-2: 당일 전종목 동일값 → 랭킹 무기여, 제거
         # 추가된 피처
         'Trend_Pullback_Score',
         'Position_Range_60',
         # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
         # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
-        'MA20_Slope',  # 20일 이동평균선 기울기
-        'MA120_Slope',  # 120일 이동평균선 기울기
-        'MA240_Slope',  # 240일 이동평균선 기울기
-        'KOSPI_MA20_Slope',  # KOSPI 20일 이동평균선 기울기
+        'MA20_Slope_cs',  # 20일 이동평균선 기울기 횡단면
+        'MA120_Slope_cs',  # 120일 이동평균선 기울기 횡단면
+        'MA240_Slope_cs',  # 240일 이동평균선 기울기 횡단면
+        # 'KOSPI_MA20_Slope',  # Phase 2-2: 당일 전종목 동일값 → 랭킹 무기여, 제거
         # 'PBR_log',  # PBR 로그 변환 (2024년 12월 제거)
         # 새로 추가된 피처
-        'RVOL',  # 상대 거래량 (Relative Volume)
-        '시총 회전율(1W)',  # 시총 회전율 1주 (5일 평균 거래대금 / 시가총액 * 100)
-        '시총 회전율(3M)',  # 시총 회전율 3개월 (60일 평균 거래대금 / 시가총액 * 100)
+        'RVOL_cs',  # 상대 거래량 횡단면
+        '시총 회전율(1W)_cs',
+        '시총 회전율(3M)_cs',
         'RSI_Signal_Oscillator',  # RSI 신호 오실레이터 (RSI_14 - RSI_14.rolling(9).mean())
-        'ATRr_5',  # ATR 비율 5일 (기준 - 1W)
-        'ATRr_20',  # ATR 비율 20일 (기준 - 1M)
-        'ATRr_60',  # ATR 비율 60일 (기준 - 3M)
+        'ATRr_5_cs',  # ATR 비율 5일 횡단면
+        'ATRr_20_cs',  # ATR 비율 20일 횡단면
+        'ATRr_60_cs',  # ATR 비율 60일 횡단면
         # ATR_Ratio_Short, ATR_Ratio_Trend 제거됨 (2024년 12월)
         # 'Eff_Ratio_10'  # 효율성 비율 10일 (2024년 12월 제거)
         
         # 2024년 12월 신규 추가 피처 (3종)
-        'HV_Volatility_5',   # HV 변동성 1주 (일별 로그 수익률의 5일 표준편차)
-        'HV_Volatility_20',  # HV 변동성 1개월 (일별 로그 수익률의 20일 표준편차)
-        'HV_Volatility_60',  # HV 변동성 3개월 (일별 로그 수익률의 60일 표준편차)
-        'VWAP_Disparity_5',  # VWAP 괴리율 1주 (5일 기준)
+        'HV_Volatility_5_cs',
+        'HV_Volatility_20_cs',
+        'HV_Volatility_60_cs',
+        'VWAP_Disparity_5_cs',
         # Gap 피처 제거
         # 신규 추가
-        'Max_Drawdown_20',  # 최근 20일 최대 낙폭 (%)
-        '등락율(5D)',  # 5거래일 전 종가 대비 누적 등락율 (%)
+        'Max_Drawdown_20_cs',
+        '등락율(5D)_cs',
         'CLV',  # Close Location Value (종가 위치 지수, 캔들 내 매수/매도 힘의 우위)
+        # Phase C (PLAN_model_improvement_v2): asymmetric features
+        'Downside_Vol_20_cs',
+        'Upside_Downside_Vol_Ratio_20_cs',
+        'Return_Skew_60_cs',
+        'Down_Day_Ratio_20_cs',
+        'Down_Volume_Ratio_20_cs',
+        'Gap_Mean_20_cs',
+        'Intraday_Strength_20_cs',
+        'Amihud_Illiq_20_cs',
     ]
     
     # 전체 데이터 중앙값 계산 제거 (Fold별로 Train 데이터만으로 계산)
@@ -2282,15 +2265,21 @@ def main():
             load_start = datetime.now()
             try:
                 fold_data = joblib.load(fold_cache_path)
-                # 캐시 형식 확인 (날짜 기반이므로 imputation_map, meta_data도 포함될 수 있음)
+                # 캐시 형식 확인 (날짜 기반; sample_type 포함 버전 호환)
+                train_sample_type = None
+                val_sample_type = None
+                train_meta_data = None
                 if len(fold_data) == 4:
                     X_train, y_train, X_val, y_val = fold_data
-                    train_meta_data = None
                 elif len(fold_data) == 5:
                     X_train, y_train, X_val, y_val, _ = fold_data  # imputation_map 무시
-                    train_meta_data = None
                 elif len(fold_data) == 6:
-                    X_train, y_train, X_val, y_val, _, train_meta_data = fold_data  # imputation_map, meta_data
+                    X_train, y_train, X_val, y_val, _, train_meta_data = fold_data
+                elif len(fold_data) >= 7:
+                    X_train, y_train, X_val, y_val, _ = fold_data[:5]
+                    train_sample_type, val_sample_type = fold_data[5], fold_data[6]
+                    if len(fold_data) >= 8:
+                        train_meta_data = fold_data[7]
                 else:
                     raise ValueError("캐시 형식이 맞지 않습니다.")
                 
@@ -2320,8 +2309,13 @@ def main():
                 X_train = X_train[features]
                 X_val = X_val[features]
                 
-                fold_data_cache[fold_idx] = (X_train, y_train, X_val, y_val, train_meta_data)
-                log_info(f"   ✅ Fold #{fold_idx+1}/3 캐시 로드 완료: 훈련 {len(X_train):,}행, 검증 {len(X_val):,}행 ({load_time:.1f}초)")
+                fold_data_cache[fold_idx] = (X_train, y_train, X_val, y_val, train_sample_type)
+                n_flat = int((np.asarray(train_sample_type) == 'flat').sum()) if train_sample_type is not None else -1
+                log_info(
+                    f"   ✅ Fold #{fold_idx+1}/3 캐시 로드 완료: 훈련 {len(X_train):,}행, Val {len(X_val):,}행"
+                    + (f", flat={n_flat:,}" if n_flat >= 0 else ", sample_type없음")
+                    + f" ({load_time:.1f}초)"
+                )
             except Exception as e:
                 log_warning(f"   ⚠️ Fold #{fold_idx+1} 캐시 파일 로드 실패: {e}. 재로딩합니다.")
                 # 캐시 파일이 손상되었거나 피처가 불일치하는 경우 삭제 후 재로딩
@@ -2343,14 +2337,14 @@ def main():
             load_start = datetime.now()
             
             # Train 로드 (맵 생성)
-            X_train, y_train, train_imputation_map = load_data_period(
+            X_train, y_train, train_imputation_map, train_sample_type = load_data_period(
                 file_paths, features,
                 fold_info['train_start'], fold_info['train_end'],
                 imputation_map=None  # Train 모드
             )
             
             # Val 로드 (Train에서 만든 맵 적용)
-            X_val, y_val, _ = load_data_period(
+            X_val, y_val, _, val_sample_type = load_data_period(
                 file_paths, features,
                 fold_info['val_start'], fold_info['val_end'],
                 imputation_map=train_imputation_map  # Val 모드
@@ -2362,9 +2356,14 @@ def main():
             
             load_time = (datetime.now() - load_start).total_seconds()
             
-            fold_data_cache[fold_idx] = (X_train, y_train, X_val, y_val)
+            fold_data_cache[fold_idx] = (X_train, y_train, X_val, y_val, train_sample_type)
             
-            log_info(f"   ✅ Fold #{fold_idx+1}/3 로딩 완료: 훈련 {len(X_train):,}행, 검증 {len(X_val):,}행 ({load_time:.1f}초)")
+            n_flat = int((np.asarray(train_sample_type) == 'flat').sum()) if train_sample_type is not None else -1
+            log_info(
+                f"   ✅ Fold #{fold_idx+1}/3 로딩 완료: 훈련 {len(X_train):,}행, Val {len(X_val):,}행"
+                + (f", flat={n_flat:,}" if n_flat >= 0 else ", sample_type없음")
+                + f" ({load_time:.1f}초)"
+            )
             
             # fold 데이터 파일로 저장 (imputation_map도 함께 저장)
             log_info(f"   💾 Fold #{fold_idx+1}/3 데이터 파일 저장 중...")
@@ -2413,8 +2412,11 @@ def main():
                 fold_cache_dir = os.path.dirname(fold_cache_path)
                 os.makedirs(fold_cache_dir, exist_ok=True)
                 
-                # 변환된 데이터 저장
-                joblib.dump((X_train_pd, y_train_pd, X_val_pd, y_val_pd, train_imputation_map), fold_cache_path)
+                # 변환된 데이터 저장 (sample_type 포함 — 최종 모델 층화용)
+                joblib.dump(
+                    (X_train_pd, y_train_pd, X_val_pd, y_val_pd, train_imputation_map, train_sample_type, val_sample_type),
+                    fold_cache_path,
+                )
                 log_info(f"   ✅ Fold #{fold_idx+1}/3 데이터 파일 저장 완료.")
             except Exception as e:
                 log_warning(f"   ⚠️ Fold #{fold_idx+1} 데이터 파일 저장 실패: {e}. 학습은 계속 진행됩니다.")
@@ -2427,104 +2429,43 @@ def main():
         log_critical("Fold 데이터 로딩에 실패했습니다. 프로그램을 종료합니다.")
         sys.exit(1)
 
-    # --- Trial 전 언더샘플링 적용 (모든 fold의 train 데이터에 적용) ---
-    log_info(f"\n--- 🔄 Trial 전 언더샘플링 적용 중 (급락 패턴 우선 선택) ---")
+    # --- Trial 전 횡보 층화 언더샘플링 (RF: sample_weight 미지원) ---
+    log_info(f"\n--- 🔄 Trial 전 횡보 층화 언더샘플링 (RF: stratification only, no sample_weight) ---")
     step_start = datetime.now()
     
     for fold in range(len(fold_data_cache)):
         fold_data = fold_data_cache[fold]
-        if len(fold_data) == 4:
-            X_train, y_train, X_val, y_val = fold_data
-            train_meta_data = None
-        elif len(fold_data) == 5:
-            X_train, y_train, X_val, y_val, train_meta_data = fold_data
+        if len(fold_data) >= 5:
+            X_train, y_train, X_val, y_val, train_sample_type = fold_data[:5]
         else:
             X_train, y_train, X_val, y_val = fold_data[:4]
-            train_meta_data = None
-        
-        # 클래스 분포 확인
-        y_train_pandas = y_train.to_pandas()
-        value_counts = y_train_pandas.value_counts()
-        
-        if len(value_counts) < 2:
-            log_warning(f"   ⚠️ Fold #{fold+1}에 클래스가 1개만 있어 샘플링을 건너뜁니다.")
-            continue
-        
-        minority_class_label = value_counts.idxmin()
-        majority_class_label = value_counts.idxmax()
-        n_minority = value_counts[minority_class_label]
-        n_majority = value_counts[majority_class_label]
-        
-        # 클래스 레이블을 의미있는 문자열로 변환
-        # target = 1: 상승, target = 0: 급락
-        minority_class_name = "상승" if minority_class_label == 1 else "급락"
-        majority_class_name = "상승" if majority_class_label == 1 else "급락"
-        
-        log_info(f"   Fold #{fold+1}/3 클래스 분포:")
-        log_info(f"      - 소수 클래스 ({minority_class_label}, {minority_class_name}) 샘플 수: {n_minority:,}개")
-        log_info(f"      - 다수 클래스 ({majority_class_label}, {majority_class_name}) 샘플 수: {n_majority:,}개")
-        
-        # 언더샘플링: 다수 클래스를 소수 클래스 크기만큼 랜덤 선택 (1:1 비율)
-        # [중요] 소수 클래스는 전체 사용 (소실 방지)
-        if n_majority > n_minority:
-            # 위치 인덱스 생성 (0부터 시작)
-            all_indices = np.arange(len(y_train))
-            y_train_pandas = y_train.to_pandas().values
-            
-            # 소수 클래스 인덱스 (전체 사용)
-            minority_indices = all_indices[y_train_pandas == minority_class_label]
-            
-            # 다수 클래스 인덱스 (샘플링 대상)
-            majority_indices = all_indices[y_train_pandas == majority_class_label]
-            
-            # Fold별 다양성을 위한 시드 (Fold마다 다른 난수 사용)
-            rng = np.random.RandomState(42 + fold * 1000)
-            
-            log_info(f"      🔀 다수 클래스 랜덤 셔플 및 샘플링 중 (Fold별 다양성 확보)...")
-            
-            # [다양성 확보] 다수 클래스 셔플
-            majority_indices_shuffled = majority_indices.copy()
-            rng.shuffle(majority_indices_shuffled)
-            
-            # 1:1 비율로 샘플링
-            target_majority_size = n_minority * 1
-            selected_majority_indices = majority_indices_shuffled[:target_majority_size]
-            
-            # 인덱스 결합
-            balanced_indices = np.concatenate([minority_indices, selected_majority_indices])
-            
-            # [시계열 정합성] 시간 순서 유지 (과거 -> 미래)
-            balanced_indices.sort()
-            
-            # 언더샘플링된 데이터 생성
-            X_train_resampled = X_train.iloc[balanced_indices].reset_index(drop=True)
-            y_train_resampled = y_train.iloc[balanced_indices].reset_index(drop=True)
-            
-            # 결과 확인
-            y_train_resampled_pandas = y_train_resampled.to_pandas()
-            value_counts_resampled = y_train_resampled_pandas.value_counts()
-            n_minority_resampled = value_counts_resampled[minority_class_label]
-            n_majority_resampled = value_counts_resampled[majority_class_label]
-            del y_train_resampled_pandas
-            
-            # fold_data_cache 업데이트
-            fold_data_cache[fold] = (X_train_resampled, y_train_resampled, X_val, y_val)
-            
-            # 원본 데이터 삭제
-            del X_train, y_train, balanced_indices
-            enhanced_gpu_memory_cleanup(force_defrag=False)
-            gc.collect()
-            
-            log_info(f"      ✅ 언더샘플링 완료 (1:1 비율):")
-            log_info(f"         - 소수 클래스 ({minority_class_label}): {n_minority:,}개 → {n_minority_resampled:,}개 (100% 사용)")
-            log_info(f"         - 다수 클래스 ({majority_class_label}): {n_majority:,}개 → {n_majority_resampled:,}개")
-        else:
-            # 클래스 불균형이 없는 경우
-            log_info(f"      ℹ️ 클래스 불균형이 없어 언더샘플링을 건너뜁니다.")
-            # 원본 데이터 그대로 사용
-            fold_data_cache[fold] = (X_train, y_train, X_val, y_val)
+            train_sample_type = None
+
+        require_sample_meta(
+            train_sample_type, sample_weight=None, need_weight=False,
+            context=f"RF Trial Fold#{fold+1}",
+        )
+
+        before_n = len(y_train)
+        n_flat_before = int((np.asarray(train_sample_type) == 'flat').sum())
+        X_train_resampled, y_train_resampled, type_resampled = _rf_stratified_flat_undersample(
+            X_train, y_train, train_sample_type, random_state=42 + fold
+        )
+
+        y_res_pandas = y_train_resampled.to_pandas()
+        log_info(
+            f"   Fold #{fold+1}/3 층화: {before_n:,} → {len(y_train_resampled):,}행 "
+            f"(flat {n_flat_before:,}→{int((np.asarray(type_resampled) == 'flat').sum()):,}), "
+            f"클래스={y_res_pandas.value_counts().to_dict()}"
+        )
+        del y_res_pandas
+
+        fold_data_cache[fold] = (X_train_resampled, y_train_resampled, X_val, y_val)
+        del X_train, y_train
+        enhanced_gpu_memory_cleanup(force_defrag=False)
+        gc.collect()
     
-    log_info(f"   ✅ Trial 전 언더샘플링 완료: 총 {len(fold_data_cache)}개 Fold | 소요시간: {(datetime.now() - step_start).total_seconds():.1f}초")
+    log_info(f"   ✅ Trial 전 층화 언더샘플링 완료: 총 {len(fold_data_cache)}개 Fold | 소요시간: {(datetime.now() - step_start).total_seconds():.1f}초")
     
     # 주의: 샘플링된 데이터는 메모리에서만 사용하고, fold_cache 파일은 원본 데이터로 유지합니다.
     # 다음 실행 시 원본 데이터를 로드하여 일관성 있는 샘플링을 보장합니다.
@@ -2562,7 +2503,10 @@ def main():
         # 모델 목표 정보 (메타데이터)
         'target_days': 10,  # 거래일 기준
         'target_percentage': 8,  # 퍼센트
-        'target_description': '10거래일 내 5% 이하로 떨어지지 않고 8% 이상 상승'
+        'target_description': '10거래일 내 5% 이하로 떨어지지 않고 8% 이상 상승',
+        # A-2: OOS 컷용 (마지막 폴드 기준)
+        'train_start_date': fold_ranges[0]['train_start'].strftime('%Y-%m-%d') if fold_ranges else None,
+        'train_end_date': fold_ranges[-1]['val_end'].strftime('%Y-%m-%d') if fold_ranges else None,
     }
 
     # --- 4. 최종 모델 훈련 및 저장 (캐시 데이터 재사용) ---
@@ -2583,7 +2527,7 @@ def main():
                         X_train, y_train, X_val, y_val = fold_data[:4]
                         del X_train, y_train, X_val, y_val
                     if len(fold_data) >= 5:
-                        del fold_data[4]  # meta_data
+                        del fold_data[4]  # train_sample_type (이미 resample 후 제거됨)
                 except (ValueError, TypeError):
                     # 이미 삭제되었거나 None인 경우
                     pass

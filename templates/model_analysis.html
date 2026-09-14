@@ -1149,11 +1149,26 @@
 <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
 <script>
   $(document).ready(function() {
-      // --- Chart 생성 유틸리티 ---
+      let rfShapChart = null, rfPermChart = null;
+      let lgbmDefaultChart = null, lgbmShapChart = null, lgbmPermChart = null;
+      let catboostDefaultChart = null, catboostShapChart = null, catboostPermChart = null;
+
+      const DT_LANG_KO = '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json';
+
+      function ensureChartBox(canvas) {
+          if (!canvas || !canvas.parentElement) return;
+          const box = canvas.parentElement;
+          if (!box.style.minHeight) {
+              box.style.minHeight = '420px';
+              box.style.position = 'relative';
+          }
+      }
+
       function createChart(canvasId, data, label) {
           const canvas = document.getElementById(canvasId);
           if (!canvas) return null;
-          
+          ensureChartBox(canvas);
+
           if (!data || data.length === 0) {
               const ctx = canvas.getContext('2d');
               ctx.font = "14px Arial";
@@ -1161,10 +1176,7 @@
               return null;
           }
 
-          // 데이터가 이미 정렬되어 있는지 확인하고, 필요시 정렬
           const sortedData = [...data].sort((a, b) => b[1] - a[1]);
-          
-          // 상위 20개
           const topData = sortedData.slice(0, 20);
           const labels = topData.map(item => item[0]);
           const values = topData.map(item => item[1]);
@@ -1184,14 +1196,13 @@
               options: {
                   responsive: true,
                   maintainAspectRatio: false,
-                  indexAxis: 'y', // 가로 막대 차트로 변경 (중요도 높은 순서대로 위에서 아래로)
-                  plugins: { 
+                  indexAxis: 'y',
+                  plugins: {
                       legend: { display: false },
                       tooltip: {
                           callbacks: {
                               label: function(context) {
                                   const value = context.parsed.x || context.parsed.y;
-                                  // 큰 수치인 경우 천 단위 구분 기호 추가
                                   if (value >= 1000) {
                                       return label + ': ' + value.toLocaleString('ko-KR');
                                   }
@@ -1201,11 +1212,10 @@
                       }
                   },
                   scales: {
-                      x: { 
+                      x: {
                           beginAtZero: true,
                           ticks: {
                               callback: function(value) {
-                                  // 큰 수치인 경우 천 단위 구분 기호 추가
                                   if (value >= 1000) {
                                       return value.toLocaleString('ko-KR');
                                   }
@@ -1213,8 +1223,8 @@
                               }
                           }
                       },
-                      y: { 
-                          ticks: { 
+                      y: {
+                          ticks: {
                               maxRotation: 0,
                               minRotation: 0,
                               autoSkip: false
@@ -1225,33 +1235,47 @@
           });
       }
 
+      function initImportanceTable(selector, extraOpts) {
+          const $t = $(selector);
+          if (!$t.length || $.fn.DataTable.isDataTable(selector)) return null;
+          // 빈 placeholder(colspan)만 있으면 DataTables 초기화 생략
+          if ($t.find('tbody tr').length === 1 && $t.find('tbody td[colspan]').length) {
+              return null;
+          }
+          const opts = Object.assign({
+              pageLength: 10,
+              order: [[1, 'desc']],
+              language: { url: DT_LANG_KO }
+          }, extraOpts || {});
+          return $t.DataTable(opts);
+      }
+
+      function adjustTables(selectors) {
+          selectors.forEach(function(sel) {
+              if ($.fn.DataTable.isDataTable(sel)) {
+                  $(sel).DataTable().columns.adjust();
+              }
+          });
+      }
+
+      function resizeCharts(charts) {
+          charts.forEach(function(ch) {
+              if (ch) {
+                  try { ch.resize(); } catch (e) {}
+              }
+          });
+      }
+
       // --- RF 차트 ---
       {% if model_info %}
         const rfShapData = {{ model_info.feature_importances | tojson if model_info.feature_importances else '[]' }};
         const rfPermData = {{ model_info.permutation_importances | tojson if model_info.permutation_importances else '[]' }};
-        
-        let rfShapChart = createChart('rf_shap_chart', rfShapData, 'RF SHAP Importance');
-        let rfPermChart = createChart('rf_perm_chart', rfPermData, 'RF Permutation Importance');
-        
-        // RF DataTables 초기화
-        if (!$.fn.DataTable.isDataTable('#rf_shap_table')) {
-            $('#rf_shap_table').DataTable({
-                pageLength: 10,
-                order: [[1, 'desc']],
-                language: {
-                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
-                }
-            });
-        }
-        if (!$.fn.DataTable.isDataTable('#rf_perm_table')) {
-            $('#rf_perm_table').DataTable({
-                pageLength: 10,
-                order: [[1, 'desc']],
-                language: {
-                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
-              }
-          });
-      }
+
+        rfShapChart = createChart('rf_shap_chart', rfShapData, 'RF SHAP Importance');
+        rfPermChart = createChart('rf_perm_chart', rfPermData, 'RF Permutation Importance');
+
+        initImportanceTable('#rf_shap_table');
+        initImportanceTable('#rf_perm_table');
       {% endif %}
 
       // --- LGBM 차트 ---
@@ -1259,131 +1283,116 @@
         const lgbmDefaultData = {{ lgbm_model_info.default_importances | tojson if lgbm_model_info.default_importances else '[]' }};
         const lgbmShapData = {{ lgbm_model_info.shap_importances | tojson if lgbm_model_info.shap_importances else '[]' }};
         const lgbmPermData = {{ lgbm_model_info.permutation_importances | tojson if lgbm_model_info.permutation_importances else '[]' }};
-        
-        let lgbmDefaultChart = createChart('lgbm_default_chart', lgbmDefaultData, 'LGBM Default Importance');
-        let lgbmShapChart = createChart('lgbm_shap_chart', lgbmShapData, 'LGBM SHAP Importance');
-        let lgbmPermChart = createChart('lgbm_perm_chart', lgbmPermData, 'LGBM Permutation Importance');
-        
-        // CatBoost 차트 생성
-        {% if catboost_model_info %}
+
+        lgbmDefaultChart = createChart('lgbm_default_chart', lgbmDefaultData, 'LGBM Default Importance');
+        lgbmShapChart = createChart('lgbm_shap_chart', lgbmShapData, 'LGBM SHAP Importance');
+        lgbmPermChart = createChart('lgbm_perm_chart', lgbmPermData, 'LGBM Permutation Importance');
+
+        initImportanceTable('#lgbm_default_table', {
+            columnDefs: [{
+                targets: 1,
+                render: function(data, type, row) {
+                    if (type === 'display' || type === 'type') {
+                        const num = parseFloat(data);
+                        if (num >= 1000) {
+                            return num.toLocaleString('ko-KR', {maximumFractionDigits: 2});
+                        }
+                        return num.toFixed(6);
+                    }
+                    return data;
+                }
+            }]
+        });
+        initImportanceTable('#lgbm_shap_table');
+        initImportanceTable('#lgbm_perm_table');
+      {% endif %}
+
+      // --- CatBoost 차트 (LGBM과 독립) ---
+      {% if catboost_model_info %}
         const catboostDefaultData = {{ catboost_model_info.default_importances | tojson if catboost_model_info.default_importances else '[]' }};
         const catboostShapData = {{ catboost_model_info.shap_importances | tojson if catboost_model_info.shap_importances else '[]' }};
         const catboostPermData = {{ catboost_model_info.permutation_importances | tojson if catboost_model_info.permutation_importances else '[]' }};
-        
-        let catboostDefaultChart = createChart('catboost_default_chart', catboostDefaultData, 'CatBoost Default Importance');
-        let catboostShapChart = createChart('catboost_shap_chart', catboostShapData, 'CatBoost SHAP Importance');
-        let catboostPermChart = createChart('catboost_perm_chart', catboostPermData, 'CatBoost Permutation Importance');
-        
-        // CatBoost DataTables 초기화
-        if (!$.fn.DataTable.isDataTable('#catboost_default_table')) {
-            $('#catboost_default_table').DataTable({
-                pageLength: 10,
-                order: [[1, 'desc']],
-                language: {
-                    url: '//cdn.datatables.net/plug-ins/1.13.7/i18n/ko.json'
-                }
-            });
-        }
-        if (!$.fn.DataTable.isDataTable('#catboost_shap_table')) {
-            $('#catboost_shap_table').DataTable({
-                pageLength: 10,
-                order: [[1, 'desc']],
-                language: {
-                    url: '//cdn.datatables.net/plug-ins/1.13.7/i18n/ko.json'
-                }
-            });
-        }
-        if (!$.fn.DataTable.isDataTable('#catboost_perm_table')) {
-            $('#catboost_perm_table').DataTable({
-                pageLength: 10,
-                order: [[1, 'desc']],
-                language: {
-                    url: '//cdn.datatables.net/plug-ins/1.13.7/i18n/ko.json'
-                }
-            });
-        }
-        {% endif %}
-        
-        // LGBM DataTables 초기화
-        if (!$.fn.DataTable.isDataTable('#lgbm_default_table')) {
-            $('#lgbm_default_table').DataTable({
-                pageLength: 10,
-                order: [[1, 'desc']], // 중요도 높은 순서대로 정렬
-                language: {
-                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
-                },
-                columnDefs: [
-                    {
-                        targets: 1,
-                        render: function(data, type, row) {
-                            if (type === 'display' || type === 'type') {
-                                // 큰 수치인 경우 천 단위 구분 기호 추가
-                                const num = parseFloat(data);
-                                if (num >= 1000) {
-                                    return num.toLocaleString('ko-KR', {maximumFractionDigits: 2});
-                                }
-                                return num.toFixed(6);
-                            }
-                            return data;
-                        }
-                    }
-                ]
-            });
-        }
-        if (!$.fn.DataTable.isDataTable('#lgbm_shap_table')) {
-            $('#lgbm_shap_table').DataTable({
-                pageLength: 10,
-              order: [[1, 'desc']],
-              language: {
-                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
-                }
-          });
-        }
-        if (!$.fn.DataTable.isDataTable('#lgbm_perm_table')) {
-            $('#lgbm_perm_table').DataTable({
-                pageLength: 10,
-              order: [[1, 'desc']],
-              language: {
-                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/ko.json'
-                }
-          });
-        }
+
+        catboostDefaultChart = createChart('catboost_default_chart', catboostDefaultData, 'CatBoost Default Importance');
+        catboostShapChart = createChart('catboost_shap_chart', catboostShapData, 'CatBoost SHAP Importance');
+        catboostPermChart = createChart('catboost_perm_chart', catboostPermData, 'CatBoost Permutation Importance');
+
+        initImportanceTable('#catboost_default_table');
+        initImportanceTable('#catboost_shap_table');
+        initImportanceTable('#catboost_perm_table');
       {% endif %}
 
-      // --- 탭 전환 시 리사이즈 ---
+      // --- 탭/아코디언 표시 시 차트·테이블 보정 ---
+      function refreshModelPane(paneId) {
+          if (paneId === 'rf-pane' || paneId === 'rf-tab') {
+              resizeCharts([rfShapChart, rfPermChart]);
+              adjustTables(['#rf_shap_table', '#rf_perm_table']);
+          } else if (paneId === 'lgbm-pane' || paneId === 'lgbm-tab') {
+              resizeCharts([lgbmDefaultChart, lgbmShapChart, lgbmPermChart]);
+              adjustTables(['#lgbm_default_table', '#lgbm_shap_table', '#lgbm_perm_table']);
+          } else if (paneId === 'catboost-pane' || paneId === 'catboost-tab') {
+              resizeCharts([catboostDefaultChart, catboostShapChart, catboostPermChart]);
+              adjustTables(['#catboost_default_table', '#catboost_shap_table', '#catboost_perm_table']);
+          }
+      }
+
       $('button[data-bs-toggle="tab"]').on('shown.bs.tab', function (e) {
-          if (e.target.id === 'rf-shap-tab' && rfShapChart) rfShapChart.resize();
-          if (e.target.id === 'rf-perm-tab' && rfPermChart) rfPermChart.resize();
-          if (e.target.id === 'lgbm-default-tab' && lgbmDefaultChart) lgbmDefaultChart.resize();
-          if (e.target.id === 'lgbm-shap-tab' && lgbmShapChart) lgbmShapChart.resize();
-          if (e.target.id === 'lgbm-perm-tab' && lgbmPermChart) lgbmPermChart.resize();
-          {% if catboost_model_info %}
-          if (e.target.id === 'catboost-default-tab' && catboostDefaultChart) catboostDefaultChart.resize();
-          if (e.target.id === 'catboost-shap-tab' && catboostShapChart) catboostShapChart.resize();
-          if (e.target.id === 'catboost-perm-tab' && catboostPermChart) catboostPermChart.resize();
-          {% endif %}
+          const id = e.target.id;
+          // 메인 모델 탭
+          if (id === 'rf-tab' || id === 'lgbm-tab' || id === 'catboost-tab') {
+              refreshModelPane(id);
+          }
+          // 피처 중요도 서브탭
+          if (id === 'rf-shap-tab' && rfShapChart) rfShapChart.resize();
+          if (id === 'rf-perm-tab' && rfPermChart) rfPermChart.resize();
+          if (id === 'lgbm-default-tab' && lgbmDefaultChart) lgbmDefaultChart.resize();
+          if (id === 'lgbm-shap-tab' && lgbmShapChart) lgbmShapChart.resize();
+          if (id === 'lgbm-perm-tab' && lgbmPermChart) lgbmPermChart.resize();
+          if (id === 'catboost-default-tab' && catboostDefaultChart) catboostDefaultChart.resize();
+          if (id === 'catboost-shap-tab' && catboostShapChart) catboostShapChart.resize();
+          if (id === 'catboost-perm-tab' && catboostPermChart) catboostPermChart.resize();
+
+          // 서브탭 전환 시에도 해당 테이블 보정
+          const tableByTab = {
+              'rf-shap-tab': '#rf_shap_table',
+              'rf-perm-tab': '#rf_perm_table',
+              'lgbm-default-tab': '#lgbm_default_table',
+              'lgbm-shap-tab': '#lgbm_shap_table',
+              'lgbm-perm-tab': '#lgbm_perm_table',
+              'catboost-default-tab': '#catboost_default_table',
+              'catboost-shap-tab': '#catboost_shap_table',
+              'catboost-perm-tab': '#catboost_perm_table'
+          };
+          if (tableByTab[id]) adjustTables([tableByTab[id]]);
+      });
+
+      // 상세 데이터 아코디언 펼칠 때 DataTables 폭 재계산
+      $('.accordion').on('shown.bs.collapse', function () {
+          $(this).find('table').each(function() {
+              const id = this.id ? '#' + this.id : null;
+              if (id) adjustTables([id]);
+          });
       });
 
       // --- 상관관계 계산 버튼 ---
       $('#calculateCorrelationBtn').on('click', function() {
           const btn = $(this);
           const resultDiv = $('#correlationResult');
-          
+
           btn.prop('disabled', true).html('<i class="fas fa-spinner fa-spin me-2"></i>계산 중...');
           resultDiv.hide();
-          
+
           $.ajax({
               url: '/api/calculate_feature_correlation',
               method: 'POST',
               success: function(data) {
                   if (data.success && data.correlation_matrix) {
-                      // 상관관계 히트맵 생성
                       const correlationData = data.correlation_matrix;
                       const features = Object.keys(correlationData);
-                      const z = features.map(f1 => 
+                      const z = features.map(f1 =>
                           features.map(f2 => correlationData[f1][f2] || 0)
                       );
-                      
+
                       const trace = {
                           z: z,
                           x: features,
@@ -1391,11 +1400,9 @@
                           type: 'heatmap',
                           colorscale: 'RdBu',
                           zmid: 0,
-                          colorbar: {
-                              title: '상관계수'
-                          }
+                          colorbar: { title: '상관계수' }
                       };
-                      
+
                       const layout = {
                           title: '피처 상관관계 히트맵',
                           width: 800,
@@ -1403,7 +1410,7 @@
                           xaxis: { tickangle: -45 },
                           yaxis: { tickangle: 0 }
                       };
-                      
+
                       Plotly.newPlot('correlationChart', [trace], layout);
                       resultDiv.show();
                   } else {
