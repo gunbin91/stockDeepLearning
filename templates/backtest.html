@@ -82,7 +82,7 @@
                             <div class="mb-3">
                                 <label for="modal_max_hold" class="form-label">최대 보유 기간 (일)</label>
                                 <input type="number" class="form-control" id="modal_max_hold" 
-                                       min="1" value="7" step="1" required>
+                                       min="1" value="9" step="1" required>
                             </div>
                         </div>
                     </div>
@@ -92,31 +92,58 @@
                             <div class="mb-3">
                                 <label for="modal_take_profit" class="form-label">수익 실현율 (%)</label>
                                 <input type="number" class="form-control" id="modal_take_profit" 
-                                       min="0.1" value="8.0" step="0.1" required>
+                                       min="0.1" value="10.0" step="0.1" required>
                             </div>
                         </div>
                         <div class="col-md-6">
                             <div class="mb-3">
                                 <label for="modal_stop_loss" class="form-label">손절률 (%)</label>
                                 <input type="number" class="form-control" id="modal_stop_loss" 
-                                       min="0.1" value="8.0" step="0.1" required>
+                                       min="0.1" value="30.0" step="0.1" required>
                             </div>
                         </div>
                     </div>
                     
                     <div class="row">
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="modal_top_n" class="form-label">하루 매수 종목 수</label>
+                                <input type="number" class="form-control" id="modal_top_n" 
+                                       min="1" value="2" step="1" required>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="modal_rank_from" class="form-label">매수 시작 순위</label>
+                                <input type="number" class="form-control" id="modal_rank_from" 
+                                       min="1" value="1" step="1" required>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="modal_rank_to" class="form-label">매수 끝 순위</label>
+                                <input type="number" class="form-control" id="modal_rank_to" 
+                                       min="1" value="15" step="1" required>
+                                <div class="form-text">1~15면 기존 상위 15위와 같습니다. 범위 밖은 채우지 않습니다.</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="row">
                         <div class="col-md-6">
                             <div class="mb-3">
-                                <label for="modal_top_n" class="form-label">매수 종목 수 (상위 N개)</label>
-                                <input type="number" class="form-control" id="modal_top_n" 
-                                       min="1" value="4" step="1" required>
+                                <label for="modal_marcap_min" class="form-label">시가총액 최소 (억)</label>
+                                <input type="number" class="form-control" id="modal_marcap_min" 
+                                       min="0" value="1000" step="1" required>
+                                <div class="form-text">이 값 미만은 순위에서 제외합니다. 0이면 하한 없음.</div>
                             </div>
                         </div>
                         <div class="col-md-6">
                             <div class="mb-3">
-                                <label for="modal_buy_universe" class="form-label">매수 대상 범위 (상위 N위)</label>
-                                <input type="number" class="form-control" id="modal_buy_universe" 
-                                       min="1" value="15" step="1" required>
+                                <label for="modal_marcap_max" class="form-label">시가총액 최대 (억)</label>
+                                <input type="number" class="form-control" id="modal_marcap_max" 
+                                       min="0" step="1" placeholder="비우면 제한 없음">
+                                <div class="form-text">비우거나 0이면 상한 없음. 순위는 유지하고 매수만 패스합니다.</div>
                             </div>
                         </div>
                     </div>

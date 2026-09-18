@@ -41,6 +41,19 @@ if platform.system() == 'Windows':
 # 증권거래세율 (0.15%)
 SECURITIES_TRANSACTION_TAX_RATE = 0.15
 
+
+def _parse_marcap_eok(value):
+    """억 단위 입력. 빈값·0 이하는 None(하한/상한 없음)."""
+    if value is None or value == '':
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    return number
+
 # stdout/stderr를 UTF-8로 설정
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
@@ -515,7 +528,7 @@ def _predict_with_loaded_catboost_model(df, model_info):
     
     return result_df
 
-def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, buy_universe_rank, transaction_fee_rate, save_cache=False, cache_start_date=None, cache_end_date=None):
+def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, transaction_fee_rate, rank_from=1, rank_to=15, marcap_min_eok=1000, marcap_max_eok=None, save_cache=False, cache_start_date=None, cache_end_date=None):
     """상세 백테스팅 실행 - 강화된 에러 처리
     
     Args:
@@ -528,8 +541,17 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             "initial_capital": initial_capital,
             "top_n": top_n,
             "max_hold_period": max_hold_period,
+            "rank_from": rank_from,
+            "rank_to": rank_to,
             "data_rows": len(data)
         })
+
+        rank_from = max(int(rank_from), 1)
+        rank_to = max(int(rank_to), rank_from)
+        marcap_min_eok = _parse_marcap_eok(marcap_min_eok)
+        marcap_max_eok = _parse_marcap_eok(marcap_max_eok)
+        marcap_min_won = 0.0 if marcap_min_eok is None else marcap_min_eok * 100_000_000
+        marcap_max_won = None if marcap_max_eok is None else marcap_max_eok * 100_000_000
 
         # Exclude_Rank 보정 (캐시에 전부 False로 저장된 경우 대비)
         try:
@@ -537,7 +559,9 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             idx_names = list(data.index.names) if isinstance(data.index, pd.MultiIndex) else None
             tmp = data.reset_index()
             before_ex = int(tmp['Exclude_Rank'].fillna(False).sum()) if 'Exclude_Rank' in tmp.columns else 0
-            tmp = recompute_exclude_rank_panel(tmp, apply_daily_exclusion=True)
+            tmp = recompute_exclude_rank_panel(
+                tmp, apply_daily_exclusion=True, min_market_cap_won=marcap_min_won
+            )
             after_ex = int(tmp['Exclude_Rank'].fillna(False).sum()) if 'Exclude_Rank' in tmp.columns else 0
             if idx_names and all(n is not None for n in idx_names):
                 data = tmp.set_index([n for n in idx_names if n in tmp.columns])
@@ -880,7 +904,7 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                 scored = daily_data.dropna(subset=['final_score']) if 'final_score' in daily_data.columns else daily_data
 
                 # 1) 순위 목록: 실시간과 같이 점수순 (상한가/거래량 필터 금지)
-                rank_n = max(int(buy_universe_rank), 20)
+                rank_n = max(int(rank_to), 20)
                 ranked_for_ui = scored.nlargest(rank_n, 'final_score')
                 top_rankings_list = []
                 for rank, (idx, row_data) in enumerate(ranked_for_ui.head(20).iterrows()):
@@ -895,8 +919,10 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                 date_str = date.strftime('%Y-%m-%d') if hasattr(date, 'strftime') else str(date)
                 daily_rankings[date_str] = top_rankings_list
 
-                # 2) 가상 매수 풀: 점수 상위 buy_universe_rank → 거래량/상한가 조건만 여기서 패스
-                overall_top_universe = scored.nlargest(buy_universe_rank, 'final_score')
+                # 2) 가상 매수 풀: 점수 순위 rank_from~rank_to만. 범위 밖은 채우지 않음
+                overall_top_universe = scored.nlargest(int(rank_to), 'final_score')
+                if int(rank_from) > 1:
+                    overall_top_universe = overall_top_universe.iloc[int(rank_from) - 1:]
                 if '거래량' in overall_top_universe.columns:
                     overall_top_universe = overall_top_universe[overall_top_universe['거래량'] > 0]
                 if 'daily_return_pct' in overall_top_universe.columns:
@@ -907,6 +933,9 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                         ]
                     except Exception:
                         pass
+                if marcap_max_won is not None and '시가총액' in overall_top_universe.columns:
+                    mcap = pd.to_numeric(overall_top_universe['시가총액'], errors='coerce')
+                    overall_top_universe = overall_top_universe[mcap.isna() | (mcap <= marcap_max_won)]
 
                 if pd.notna(date) and date >= pd.to_datetime('2025-09-17'):
                     try:
@@ -1418,7 +1447,11 @@ def create_json_report(results, output_path=None, oos_start_date=None):
             'take_profit_pct': float(results.get('take_profit_pct', 0)),
             'stop_loss_pct': float(results.get('stop_loss_pct', 0)),
             'top_n': int(results.get('top_n', 0)),
-            'buy_universe_rank': int(results.get('buy_universe_rank', 0))
+            'rank_from': int(results.get('rank_from', 1)),
+            'rank_to': int(results.get('rank_to', results.get('buy_universe_rank', 0))),
+            'marcap_min_eok': results.get('marcap_min_eok'),
+            'marcap_max_eok': results.get('marcap_max_eok'),
+            'buy_universe_rank': int(results.get('rank_to', results.get('buy_universe_rank', 0)))
         },
         'portfolio_history': {
             'dates': portfolio_dates,
@@ -1473,7 +1506,7 @@ def create_json_report(results, output_path=None, oos_start_date=None):
     return report_data
 
 
-def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, buy_universe_rank, transaction_fee_rate, start_date=None, end_date=None, use_cache=False, shutdown_logger_after=True, oos_start_date=None):
+def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, transaction_fee_rate, rank_from=1, rank_to=15, marcap_min_eok=1000, marcap_max_eok=None, start_date=None, end_date=None, use_cache=False, shutdown_logger_after=True, oos_start_date=None):
     """최종 백테스팅 실행 - 강화된 에러 처리
     
     Args:
@@ -1482,7 +1515,10 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         take_profit_pct: 익절 비율
         stop_loss_pct: 손절 비율
         top_n: 매수 종목 수
-        buy_universe_rank: 매수 대상 범위
+        rank_from: 매수 시작 순위
+        rank_to: 매수 끝 순위
+        marcap_min_eok: 시가총액 하한(억). 0 이하면 하한 없음
+        marcap_max_eok: 시가총액 상한(억). None/0이면 상한 없음
         transaction_fee_rate: 거래 수수료율
         start_date: 테스트 시작일 (YYYY-MM-DD 형식, None이면 기본값 사용)
         end_date: 테스트 종료일 (YYYY-MM-DD 형식, None이면 기본값 사용)
@@ -1505,6 +1541,10 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         log_info("💰 투자 설정")
         log_info(f"   └─ 초기 자본: {initial_capital:,}원")
         log_info(f"   └─ 매수 종목 수: {top_n}개")
+        log_info(f"   └─ 매수 순위: {rank_from}~{rank_to}위")
+        _min_label = f"{marcap_min_eok:g}억" if marcap_min_eok else "제한 없음"
+        _max_label = f"{marcap_max_eok:g}억" if marcap_max_eok else "제한 없음"
+        log_info(f"   └─ 시가총액: {_min_label} ~ {_max_label}")
         log_info(f"   └─ 최대 보유 기간: {max_hold_period}일")
         log_info(f"   └─ 익절 기준: +{take_profit_pct}%")
         log_info(f"   └─ 손절 기준: -{stop_loss_pct}%")
@@ -1803,8 +1843,11 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                 max_hold_period=max_hold_period,
                 take_profit_pct=take_profit_pct,
                 stop_loss_pct=stop_loss_pct,
-                buy_universe_rank=buy_universe_rank,
                 transaction_fee_rate=transaction_fee_rate,
+                rank_from=rank_from,
+                rank_to=rank_to,
+                marcap_min_eok=marcap_min_eok,
+                marcap_max_eok=marcap_max_eok,
                 save_cache=use_cache and not cache_used,
                 cache_start_date=backtest_start_date_with_warmup,
                 cache_end_date=end_date
@@ -1817,7 +1860,11 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             backtest_results['take_profit_pct'] = take_profit_pct
             backtest_results['stop_loss_pct'] = stop_loss_pct
             backtest_results['top_n'] = top_n
-            backtest_results['buy_universe_rank'] = buy_universe_rank
+            backtest_results['rank_from'] = rank_from
+            backtest_results['rank_to'] = rank_to
+            backtest_results['marcap_min_eok'] = _parse_marcap_eok(marcap_min_eok)
+            backtest_results['marcap_max_eok'] = _parse_marcap_eok(marcap_max_eok)
+            backtest_results['buy_universe_rank'] = rank_to
             backtest_results['securities_transaction_tax_rate'] = SECURITIES_TRANSACTION_TAX_RATE
             backtest_results['oos_start_date'] = oos_start_date
             # 캐시 정보 추가
@@ -1897,7 +1944,10 @@ if __name__ == '__main__':
     parser.add_argument('--take-profit', type=float, default=5.0, help='Take profit percentage')
     parser.add_argument('--stop-loss', type=float, default=3.0, help='Stop loss percentage')
     parser.add_argument('--top-n', type=int, default=5, help='Number of stocks to buy')
-    parser.add_argument('--buy-universe', type=int, default=20, help='Rank universe to consider for buying')
+    parser.add_argument('--rank-from', type=int, default=1, help='First score rank eligible to buy')
+    parser.add_argument('--rank-to', type=int, default=15, help='Last score rank eligible to buy')
+    parser.add_argument('--marcap-min', type=float, default=1000, help='Min market cap in 억. 0 means no floor')
+    parser.add_argument('--marcap-max', type=float, default=None, help='Max market cap in 억. Omit or 0 means no cap')
     parser.add_argument('--fee', type=float, default=0.015, help='Transaction fee rate (e.g., 0.015 for 0.015%%)')
     parser.add_argument('--start-date', type=str, default=None, help='Test start date (YYYY-MM-DD format, default: 1 year ago)')
     parser.add_argument('--end-date', type=str, default=None, help='Test end date (YYYY-MM-DD format, default: today)')
@@ -1907,15 +1957,20 @@ if __name__ == '__main__':
 
     if args.capital <= 0:
         print("Error: Capital must be a positive number.")
+    elif args.rank_from < 1 or args.rank_to < args.rank_from:
+        print("Error: rank range must be rank-from >= 1 and rank-to >= rank-from.")
     else:
         run_final_backtest(
             initial_capital=args.capital, 
             max_hold_period=args.max_hold, 
             take_profit_pct=args.take_profit, 
             stop_loss_pct=args.stop_loss, 
-            top_n=args.top_n, 
-            buy_universe_rank=args.buy_universe,
+            top_n=args.top_n,
             transaction_fee_rate=args.fee,
+            rank_from=args.rank_from,
+            rank_to=args.rank_to,
+            marcap_min_eok=args.marcap_min,
+            marcap_max_eok=args.marcap_max,
             start_date=args.start_date,
             end_date=args.end_date,
             use_cache=args.use_cache,

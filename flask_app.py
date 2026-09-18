@@ -419,6 +419,10 @@ def load_cached_analysis_result():
                 # 전날종가 데이터가 없는 경우 기존 로직 사용 (분석기준일 대비)
                 display_df['등락율(%)'] = display_df['등락율'].apply(format_change_rate)
 
+            # 저장값은 원. 화면 컬럼명 시가총액(억)에 맞춰 표시만 억으로 변환.
+            if '시가총액' in display_df.columns:
+                display_df['시가총액'] = pd.to_numeric(display_df['시가총액'], errors='coerce') / 100_000_000
+
             rename_map = { '현재가': '현재가(원)', '시가총액': '시가총액(억)',  'ml_pred_proba': '상승확률(%)', 'final_score': '최종점수(점)', '기준일가': '기준일가(원)'}
             display_df.rename(columns=rename_map, inplace=True)
             
@@ -1353,10 +1357,18 @@ def start_backtest():
         data = request.get_json()
         
         # 백테스팅 파라미터 검증
-        required_params = ['capital', 'max_hold', 'take_profit', 'stop_loss', 'top_n', 'buy_universe', 'transaction_fee']
+        required_params = ['capital', 'max_hold', 'take_profit', 'stop_loss', 'top_n', 'rank_from', 'rank_to', 'marcap_min', 'transaction_fee']
         for param in required_params:
             if param not in data:
                 return jsonify({'error': f'{param} 파라미터가 필요합니다.'}), 400
+
+        try:
+            rank_from = int(data['rank_from'])
+            rank_to = int(data['rank_to'])
+        except (TypeError, ValueError):
+            return jsonify({'error': '매수 순위는 숫자여야 합니다.'}), 400
+        if rank_from < 1 or rank_to < rank_from:
+            return jsonify({'error': '매수 끝 순위는 시작 순위 이상이어야 합니다.'}), 400
         
         # 날짜 파라미터 검증 (선택적이지만 제공되면 유효성 검증)
         from datetime import datetime as dt
@@ -1402,9 +1414,14 @@ def start_backtest():
                     '--take-profit', str(data['take_profit']),
                     '--stop-loss', str(data['stop_loss']),
                     '--top-n', str(data['top_n']),
-                    '--buy-universe', str(data['buy_universe']),
+                    '--rank-from', str(data['rank_from']),
+                    '--rank-to', str(data['rank_to']),
+                    '--marcap-min', str(data['marcap_min']),
                     '--fee', str(data['transaction_fee'])
                 ]
+                marcap_max = data.get('marcap_max')
+                if marcap_max not in (None, '', 0, '0', 0.0):
+                    command.extend(['--marcap-max', str(marcap_max)])
                 
                 # 날짜 파라미터 추가 (제공된 경우)
                 if start_date:
@@ -1801,11 +1818,14 @@ def optimize_weights():
         
         backtest_params = {
             'capital': data.get('capital', 10000000),
-            'max_hold': data.get('max_hold', 7),
-            'take_profit': data.get('take_profit', 8.0),
-            'stop_loss': data.get('stop_loss', 8.0),
-            'top_n': data.get('top_n', 5),
-            'buy_universe': data.get('buy_universe', 20),
+            'max_hold': data.get('max_hold', 9),
+            'take_profit': data.get('take_profit', 10.0),
+            'stop_loss': data.get('stop_loss', 30.0),
+            'top_n': data.get('top_n', 2),
+            'rank_from': data.get('rank_from', 1),
+            'rank_to': data.get('rank_to', data.get('buy_universe', 15)),
+            'marcap_min': data.get('marcap_min', 1000),
+            'marcap_max': data.get('marcap_max'),
             'transaction_fee': data.get('transaction_fee', 0.015),
             'start_date': data.get('start_date') or default_start_date,
             'end_date': data.get('end_date') or default_end_date,
@@ -1895,8 +1915,11 @@ def optimize_weights_sync(backtest_params):
                     take_profit_pct=backtest_params['take_profit'],
                     stop_loss_pct=backtest_params['stop_loss'],
                     top_n=backtest_params['top_n'],
-                    buy_universe_rank=backtest_params['buy_universe'],
                     transaction_fee_rate=backtest_params['transaction_fee'],
+                    rank_from=backtest_params['rank_from'],
+                    rank_to=backtest_params['rank_to'],
+                    marcap_min_eok=backtest_params['marcap_min'],
+                    marcap_max_eok=backtest_params['marcap_max'],
                     start_date=backtest_params.get('start_date'),
                     end_date=backtest_params.get('end_date'),
                     use_cache=True,

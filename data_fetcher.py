@@ -457,8 +457,75 @@ def _normalize_preferred_datetime(preferred_date=None):
     )
 
 
+def _count_valid_marcap_rows(df):
+    """Marcap 컬럼의 유효(non-null, 숫자) 행 수."""
+    if df is None or getattr(df, "empty", True) or "Marcap" not in df.columns:
+        return 0
+    return int(pd.to_numeric(df["Marcap"], errors="coerce").notna().sum())
+
+
+def _marcap_listing_cache_dir() -> Path:
+    """종목목록용 일자별 시총 스냅샷 로컬 캐시 디렉터리."""
+    cache_dir = Path(path_manager.data_dir) / "marcap_listing_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _save_local_marcap_listing(df, day) -> bool:
+    """시총 유효 스냅샷을 로컬에 저장. 유효행 없으면 저장하지 않음."""
+    if _count_valid_marcap_rows(df) == 0:
+        return False
+    try:
+        day = pd.to_datetime(day).to_pydatetime().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        cache_dir = _marcap_listing_cache_dir()
+        out_path = cache_dir / f"{day.strftime('%Y-%m-%d')}.parquet"
+        tmp_path = cache_dir / f"{day.strftime('%Y-%m-%d')}.parquet.tmp"
+        out = df.copy()
+        if "Code" in out.columns:
+            out["Code"] = out["Code"].astype(str).str.zfill(6)
+        if tmp_path.exists():
+            tmp_path.unlink()
+        out.to_parquet(tmp_path, index=False)
+        tmp_path.replace(out_path)
+        log_info(
+            f"로컬 시총 리스팅 캐시 저장: {out_path.name} "
+            f"(유효 Marcap {_count_valid_marcap_rows(out):,}행)"
+        )
+        return True
+    except Exception as e:
+        log_warning(f"로컬 시총 리스팅 캐시 저장 실패: {e}")
+        return False
+
+
+def _load_local_marcap_listing(preferred_date=None, lookback_days=60):
+    """로컬에 저장된 시총 리스팅 스냅샷을 preferred_date부터 거슬러가며 로드."""
+    start = _normalize_preferred_datetime(preferred_date)
+    cache_dir = _marcap_listing_cache_dir()
+
+    for i in range(lookback_days + 1):
+        day = start - timedelta(days=i)
+        path = cache_dir / f"{day.strftime('%Y-%m-%d')}.parquet"
+        if not path.exists():
+            continue
+        try:
+            df = pd.read_parquet(path)
+            if _count_valid_marcap_rows(df) > 0:
+                if "Code" in df.columns:
+                    df = df.copy()
+                    df["Code"] = df["Code"].astype(str).str.zfill(6)
+                return df, day
+        except Exception as e:
+            log_warning(f"로컬 시총 리스팅 캐시 로드 실패({path.name}): {e}")
+            continue
+    return None, None
+
+
 def _load_fdr_krx_marcap_cache_csv(preferred_date=None, lookback_days=15, log_failures=True):
     """FDR GitHub KRX-MARCAP CSV를 preferred_date부터 거슬러가며 로드.
+
+    Code만 있고 Marcap이 전부 비어 있는 soft-fail CSV는 건너뛴다.
 
     Returns:
         (DataFrame, 사용된 날짜 datetime) 또는 실패 시 (None, None)
@@ -466,6 +533,7 @@ def _load_fdr_krx_marcap_cache_csv(preferred_date=None, lookback_days=15, log_fa
     start = _normalize_preferred_datetime(preferred_date)
 
     last_error = None
+    skipped_empty_marcap = 0
     for i in range(lookback_days + 1):
         day = start - timedelta(days=i)
         url = f"{_FDR_KRX_MARCAP_CACHE_BASE}/{day.strftime('%Y-%m-%d')}.csv"
@@ -476,8 +544,13 @@ def _load_fdr_krx_marcap_cache_csv(preferred_date=None, lookback_days=15, log_fa
                 dtype={"Code": str, "Dept": str, "ChangeCode": str, "MarketId": str},
             )
             df = df.reset_index(drop=True)
-            if df is not None and not df.empty and "Code" in df.columns:
-                return df, day
+            if df is None or df.empty or "Code" not in df.columns:
+                continue
+            # 오늘자처럼 파일은 있으나 시총이 비어 있는 경우 → 다음 날로 계속
+            if _count_valid_marcap_rows(df) == 0:
+                skipped_empty_marcap += 1
+                continue
+            return df, day
         except Exception as e:
             last_error = e
             continue
@@ -485,7 +558,8 @@ def _load_fdr_krx_marcap_cache_csv(preferred_date=None, lookback_days=15, log_fa
     if log_failures:
         log_warning(
             f"FDR GitHub KRX-MARCAP CSV 폴백 실패 "
-            f"(시작일={start.strftime('%Y-%m-%d')}, lookback={lookback_days}): {last_error}"
+            f"(시작일={start.strftime('%Y-%m-%d')}, lookback={lookback_days}, "
+            f"시총공백스킵={skipped_empty_marcap}): {last_error}"
         )
     return None, None
 
@@ -566,7 +640,7 @@ def _load_marcap_dataset_snapshot(preferred_date=None, lookback_days=15):
             if day_df is None or day_df.empty:
                 continue
             out = day_df.drop(columns=["Date"], errors="ignore").reset_index(drop=True)
-            if "Code" in out.columns and "Marcap" in out.columns:
+            if "Code" in out.columns and _count_valid_marcap_rows(out) > 0:
                 return out, day
         except Exception as e:
             last_error = e
@@ -615,6 +689,11 @@ def _load_fdr_listing_csv_exact(day):
     df = df.reset_index(drop=True)
     if df is None or df.empty or "Code" not in df.columns or "Marcap" not in df.columns:
         raise RuntimeError(f"FDR listing CSV 무효: {day.strftime('%Y-%m-%d')}")
+    if _count_valid_marcap_rows(df) == 0:
+        raise RuntimeError(
+            f"FDR listing CSV 시총 공백: {day.strftime('%Y-%m-%d')} "
+            f"(행={len(df)}, Marcap 유효=0)"
+        )
     df = df.copy()
     df["Code"] = df["Code"].astype(str).str.zfill(6)
     return df
@@ -879,14 +958,10 @@ def fetch_krx_marcap_snapshot(date_yyyymmdd: str, lookback_days: int = 15):
         log_info(
             f"KRX-MARCAP 폴백({source}): 요청={date_yyyymmdd} → 사용={used_day.strftime('%Y-%m-%d')}"
         )
+    # 성공한 스냅샷은 로컬에 쌓아 다음 soft-fail에 대비
+    save_day = used_day if used_day is not None else preferred
+    _save_local_marcap_listing(df, save_day)
     return df
-
-
-def _count_valid_marcap_rows(df):
-    """Marcap 컬럼의 유효(non-null, 숫자) 행 수."""
-    if df is None or getattr(df, "empty", True) or "Marcap" not in df.columns:
-        return 0
-    return int(pd.to_numeric(df["Marcap"], errors="coerce").notna().sum())
 
 
 def _get_stock_list_from_marcap(analysis_date=None, min_marcap=10_000_000_000):
@@ -900,6 +975,7 @@ def _get_stock_list_from_marcap(analysis_date=None, min_marcap=10_000_000_000):
         df_marcap = None
         cache_fallback_date = None
         primary_error = None
+        used_source = None
 
         try:
             if analysis_date:
@@ -913,9 +989,12 @@ def _get_stock_list_from_marcap(analysis_date=None, min_marcap=10_000_000_000):
                 log_info("종목목록/시가총액 수집 소스: KRX (StockListing KRX-MARCAP, FDR에 NAVER bulk 경로 없음)")
                 log_info("FinanceDataReader를 통해 KOSPI 및 KOSDAQ 전 종목 시가총액 정보 수집 (KRX-MARCAP)...")
                 df_marcap = fdr.StockListing('KRX-MARCAP')
+            if _count_valid_marcap_rows(df_marcap) > 0:
+                used_source = "StockListing"
         except Exception as e:
             primary_error = e
-            log_warning(f"FDR StockListing(KRX-MARCAP) 실패, GitHub 일자 CSV 폴백 시도: {e}")
+            log_warning(f"FDR StockListing(KRX-MARCAP) 실패, 폴백 시도: {e}")
+            df_marcap = None
 
         # 빈 DF뿐 아니라 "행은 있으나 Marcap이 전부 비어 있는" soft-fail도 폴백
         listing_rows = 0 if df_marcap is None else len(df_marcap)
@@ -925,37 +1004,61 @@ def _get_stock_list_from_marcap(analysis_date=None, min_marcap=10_000_000_000):
             or (hasattr(df_marcap, "empty") and df_marcap.empty)
             or valid_marcap == 0
         )
+        preferred = analysis_date if analysis_date is not None else None
         if need_fallback:
             if listing_rows > 0 and valid_marcap == 0:
                 log_warning(
                     f"StockListing Marcap 유효행 0/{listing_rows} "
-                    f"(시세 공백 soft-fail) → GitHub CSV/parquet 폴백"
+                    f"(시세 공백 soft-fail) → GitHub CSV / 로컬캐시 / parquet 폴백"
                 )
-            preferred = analysis_date if analysis_date is not None else None
+
+            # 1) GitHub CSV (시총 유효한 날만; 찾은 날은 로컬에 저장)
             df_fb, cache_fallback_date = _load_fdr_krx_marcap_cache_csv(preferred_date=preferred)
             if _count_valid_marcap_rows(df_fb) > 0:
                 df_marcap = df_fb
+                used_source = "GitHub CSV"
+                _save_local_marcap_listing(df_fb, cache_fallback_date)
                 log_info(
                     f"종목목록/시총 스냅샷 폴백 사용: FDR GitHub CSV "
-                    f"({cache_fallback_date.strftime('%Y-%m-%d')}, "
-                    f"오늘자 없음/StockListing 실패·시총공백)"
+                    f"({cache_fallback_date.strftime('%Y-%m-%d')})"
                 )
             else:
-                # CSV도 시총이 없으면 기존 스냅샷 체인(CSV lookback → marcap parquet)
-                snap_day = preferred
-                if snap_day is None:
-                    snap_day = _get_krx_max_work_date() or datetime.now()
-                snap_day = pd.to_datetime(snap_day)
-                df_snap = fetch_krx_marcap_snapshot(snap_day.strftime('%Y%m%d'))
-                if _count_valid_marcap_rows(df_snap) == 0:
-                    raise primary_error or RuntimeError(
-                        "KRX-MARCAP 폴백 후에도 Marcap 유효행이 없습니다."
+                # 2) 로컬에 모아 둔 최근 정상 스냅샷
+                df_local, local_day = _load_local_marcap_listing(preferred_date=preferred)
+                if _count_valid_marcap_rows(df_local) > 0:
+                    df_marcap = df_local
+                    cache_fallback_date = local_day
+                    used_source = "local listing cache"
+                    log_info(
+                        f"종목목록/시총 스냅샷 폴백 사용: 로컬 캐시 "
+                        f"({local_day.strftime('%Y-%m-%d')})"
                     )
-                df_marcap = df_snap
-                log_info(
-                    f"종목목록/시총 스냅샷 폴백 사용: fetch_krx_marcap_snapshot "
-                    f"(요청={snap_day.strftime('%Y-%m-%d')})"
-                )
+                else:
+                    # 3) 기존 스냅샷 체인(CSV lookback → marcap parquet)
+                    snap_day = preferred
+                    if snap_day is None:
+                        snap_day = _get_krx_max_work_date() or datetime.now()
+                    snap_day = pd.to_datetime(snap_day)
+                    df_snap = fetch_krx_marcap_snapshot(snap_day.strftime('%Y%m%d'))
+                    if _count_valid_marcap_rows(df_snap) == 0:
+                        raise primary_error or RuntimeError(
+                            "KRX-MARCAP 폴백 후에도 Marcap 유효행이 없습니다."
+                        )
+                    df_marcap = df_snap
+                    cache_fallback_date = snap_day
+                    used_source = "fetch_krx_marcap_snapshot"
+                    _save_local_marcap_listing(df_snap, snap_day)
+                    log_info(
+                        f"종목목록/시총 스냅샷 폴백 사용: fetch_krx_marcap_snapshot "
+                        f"(요청={snap_day.strftime('%Y-%m-%d')})"
+                    )
+
+        # StockListing이 곧바로 성공한 경우에도 로컬에 쌓아 둔다
+        if used_source == "StockListing":
+            save_day = preferred
+            if save_day is None:
+                save_day = _get_krx_max_work_date() or datetime.now()
+            _save_local_marcap_listing(df_marcap, save_day)
 
         if 'Name' not in df_marcap.columns:
             df_marcap = df_marcap.copy()

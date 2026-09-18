@@ -712,6 +712,29 @@ $(document).ready(function() {
             return;
         }
         
+        const rankFrom = parseInt($('#modal_rank_from').val(), 10);
+        const rankTo = parseInt($('#modal_rank_to').val(), 10);
+        if (!rankFrom || !rankTo || rankFrom < 1 || rankTo < rankFrom) {
+            showToast('매수 끝 순위는 시작 순위 이상이어야 합니다.', 'warning');
+            return;
+        }
+        const marcapMinRaw = $('#modal_marcap_min').val();
+        const marcapMaxRaw = $('#modal_marcap_max').val();
+        const marcapMin = marcapMinRaw === '' ? 0 : parseFloat(marcapMinRaw);
+        const marcapMax = marcapMaxRaw === '' ? null : parseFloat(marcapMaxRaw);
+        if (Number.isNaN(marcapMin) || marcapMin < 0) {
+            showToast('시가총액 최소값은 0 이상이어야 합니다.', 'warning');
+            return;
+        }
+        if (marcapMax !== null && (Number.isNaN(marcapMax) || marcapMax < 0)) {
+            showToast('시가총액 최대값이 올바르지 않습니다.', 'warning');
+            return;
+        }
+        if (marcapMax !== null && marcapMax > 0 && marcapMin > 0 && marcapMax < marcapMin) {
+            showToast('시가총액 최대값은 최소값 이상이어야 합니다.', 'warning');
+            return;
+        }
+
         // 폼 데이터 수집
         const formData = {
             capital: parseInt($('#modal_capital').val()),
@@ -719,7 +742,10 @@ $(document).ready(function() {
             take_profit: parseFloat($('#modal_take_profit').val()),
             stop_loss: parseFloat($('#modal_stop_loss').val()),
             top_n: parseInt($('#modal_top_n').val()),
-            buy_universe: parseInt($('#modal_buy_universe').val()),
+            rank_from: rankFrom,
+            rank_to: rankTo,
+            marcap_min: marcapMin,
+            marcap_max: (marcapMax !== null && marcapMax > 0) ? marcapMax : null,
             transaction_fee: parseFloat($('#modal_transaction_fee').val()),
             start_date: startDate,
             end_date: endDate,
@@ -879,11 +905,14 @@ $(document).ready(function() {
         // 백테스팅 파라미터 수집 (디폴트 값)
         const backtestParams = {
             capital: parseInt($('#modal_capital').val()) || 10000000,
-            max_hold: parseInt($('#modal_max_hold').val()) || 7,
-            take_profit: parseFloat($('#modal_take_profit').val()) || 8.0,
-            stop_loss: parseFloat($('#modal_stop_loss').val()) || 8.0,
-            top_n: parseInt($('#modal_top_n').val()) || 5,
-            buy_universe: parseInt($('#modal_buy_universe').val()) || 20,
+            max_hold: parseInt($('#modal_max_hold').val()) || 9,
+            take_profit: parseFloat($('#modal_take_profit').val()) || 10.0,
+            stop_loss: parseFloat($('#modal_stop_loss').val()) || 30.0,
+            top_n: parseInt($('#modal_top_n').val()) || 2,
+            rank_from: parseInt($('#modal_rank_from').val(), 10) || 1,
+            rank_to: parseInt($('#modal_rank_to').val(), 10) || 15,
+            marcap_min: $('#modal_marcap_min').val() === '' ? 0 : (parseFloat($('#modal_marcap_min').val()) || 1000),
+            marcap_max: ($('#modal_marcap_max').val() === '' || parseFloat($('#modal_marcap_max').val()) <= 0) ? null : parseFloat($('#modal_marcap_max').val()),
             transaction_fee: parseFloat($('#modal_transaction_fee').val()) || 0.015,
             start_date: $('#modal_start_date').val(),
             end_date: $('#modal_end_date').val(),
@@ -1136,6 +1165,14 @@ $(document).ready(function() {
         const metadata = data.metadata || {};
         const metrics = data.performance_metrics || {};
         const params = data.strategy_parameters || {};
+        const rankFromLabel = params.rank_from != null ? params.rank_from : 1;
+        const rankToLabel = params.rank_to != null ? params.rank_to : params.buy_universe_rank;
+        const marcapMinLabel = (params.marcap_min_eok != null && Number(params.marcap_min_eok) > 0)
+            ? `${Number(params.marcap_min_eok).toLocaleString()}억`
+            : (params.rank_from != null || params.marcap_min_eok != null ? '제한 없음' : '-');
+        const marcapMaxLabel = (params.marcap_max_eok != null && Number(params.marcap_max_eok) > 0)
+            ? `${Number(params.marcap_max_eok).toLocaleString()}억`
+            : (params.rank_from != null || params.marcap_min_eok != null ? '제한 없음' : '-');
         const cacheInfo = metadata.cache_info || {};
         
         // 캐시 정보 표시
@@ -1232,7 +1269,8 @@ $(document).ready(function() {
                                 <div class="col-md-3 mb-2"><strong>익절 목표:</strong> ${params.take_profit_pct.toFixed(2)}%</div>
                                 <div class="col-md-3 mb-2"><strong>손절 라인:</strong> ${params.stop_loss_pct.toFixed(2)}%</div>
                                 <div class="col-md-3 mb-2"><strong>매수 종목 수:</strong> ${params.top_n}개</div>
-                                <div class="col-md-3 mb-2"><strong>매수 대상 범위:</strong> 상위 ${params.buy_universe_rank}위</div>
+                                <div class="col-md-3 mb-2"><strong>매수 대상:</strong> ${rankFromLabel}~${rankToLabel}위</div>
+                                <div class="col-md-3 mb-2"><strong>시가총액:</strong> ${marcapMinLabel} ~ ${marcapMaxLabel}</div>
                             </div>
                         </div>
                     </div>

@@ -457,7 +457,7 @@ def _init_feature_worker(marcap_data, financial_data, apply_daily_exclusion):
     set_global_feature_data(marcap_data, financial_data, apply_daily_exclusion=apply_daily_exclusion)
 
 
-def compute_exclude_rank_series(close: pd.Series, market_cap: Optional[pd.Series] = None, apply_daily_exclusion: bool = True) -> pd.Series:
+def compute_exclude_rank_series(close: pd.Series, market_cap: Optional[pd.Series] = None, apply_daily_exclusion: bool = True, min_market_cap_won: float = 100_000_000_000) -> pd.Series:
     """Exclude_Rank(cond1/2/3)를 시계열로 계산. close/market_cap은 날짜순이어야 함."""
     close = pd.to_numeric(close, errors='coerce')
     ma20_lvl = close.rolling(window=20).mean()
@@ -474,7 +474,7 @@ def compute_exclude_rank_series(close: pd.Series, market_cap: Optional[pd.Series
 
     if apply_daily_exclusion and market_cap is not None:
         mcap = pd.to_numeric(market_cap, errors='coerce')
-        cond3 = mcap < 100_000_000_000
+        cond3 = mcap < float(min_market_cap_won)
     else:
         cond3 = False
 
@@ -482,7 +482,7 @@ def compute_exclude_rank_series(close: pd.Series, market_cap: Optional[pd.Series
     return out
 
 
-def recompute_exclude_rank_panel(df: pd.DataFrame, apply_daily_exclusion: bool = True) -> pd.DataFrame:
+def recompute_exclude_rank_panel(df: pd.DataFrame, apply_daily_exclusion: bool = True, min_market_cap_won: float = 100_000_000_000) -> pd.DataFrame:
     """패널 전체에 Exclude_Rank를 종목별로 재계산 (ProcessPool 누락 보정)."""
     if df is None or df.empty or '종목코드' not in df.columns or '종가' not in df.columns:
         return df
@@ -494,7 +494,8 @@ def recompute_exclude_rank_panel(df: pd.DataFrame, apply_daily_exclusion: bool =
         g = g.copy()
         mcap = g['시가총액'] if '시가총액' in g.columns else None
         g['Exclude_Rank'] = compute_exclude_rank_series(
-            g['종가'], market_cap=mcap, apply_daily_exclusion=apply_daily_exclusion
+            g['종가'], market_cap=mcap, apply_daily_exclusion=apply_daily_exclusion,
+            min_market_cap_won=min_market_cap_won,
         ).values
         parts.append(g)
     if not parts:
@@ -907,39 +908,53 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exc
         # 52주 신고가 비율
         df['52주_신고가_비율'] = df['종가'] / df['종가'].rolling(250).max()
         
-        # target 변수 생성:
-        # - 향후 10거래일 동안 최저가가 현재가 대비 -5% 이하로 내려가지 않고 (>= 0.95)
-        # - 향후 10거래일 동안 최고가가 현재가 대비 +8% 이상 한 번이라도 상승하면 (>= 1.08)
-        # => 1, 아니면 0
-        min_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).min()
-        max_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=1).max()
+        # target 변수 생성 (v3 — docs/PLAN_label_v3_target_realign.md):
+        # - 향후 10거래일 종가 중 최고가가 현재가 대비 +10% 이상 한 번이라도 상승하면 1
+        # - 익절선(take_profit_pct=10%)과 정확히 일치시켜 "실제 익절 성공 = 정답"이 되도록 함
+        # - 기존의 min_ret >= -5% 하한 조건은 삭제
+        #   (실제 손절선은 -30%이므로 -5% 하락은 매도 사유가 아님.
+        #    이 조건이 실제 익절 거래의 21%를 오답으로 가르치고 있었음)
+        # - 하방 선호는 라벨이 아니라 아래 sample_weight로 반영한다.
+        # ※ min_periods=10: 향후 10거래일이 온전히 존재하는 행만 유효 라벨로 인정
+        min_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=10).min()
+        max_price_10d = df['종가'].shift(-10).rolling(window=10, min_periods=10).max()
         min_ret = min_price_10d / df['종가'] - 1.0
         max_ret = max_price_10d / df['종가'] - 1.0
-        # 조건: 최소값 >= 현재가격 * 0.95 AND 최대값 >= 현재가격 * 1.08
         # 미래 10거래일 부족(rolling/shift NaN) 행은 target=NaN → 학습 제외
-        # (sample_weight/sample_type과 정합 — docs/PLAN_sample_weight_stratified.md §3.1)
         valid_fwd = min_ret.notna() & max_ret.notna()
-        df['target'] = ((min_ret >= -0.05) & (max_ret >= 0.08)).astype(float)
+        df['target'] = (max_ret >= 0.10).astype(float)
         df.loc[~valid_fwd, 'target'] = np.nan
 
         # sample_type / sample_weight (학습용; 피처로 사용하지 않음)
-        # pos=1.0, weak=1.2, crash=1.7, flat=0.7  — docs/PLAN_sample_weight_stratified.md
+        # ※ sample_type 문자열은 반드시 "pos" / "weak" / "crash" / "flat" 4종만 사용할 것.
+        #    scripts/sample_weight_utils.py의 stratified_flat_indices()가 이 4개 이외의
+        #    문자열을 전부 flat으로 간주해 언더샘플링해 버린다. 새 이름 추가 금지.
         # ※ np.where(str, nan)은 NumPy DTypePromotionError → pandas 벡터 할당 사용
-        is_crash = valid_fwd & (min_ret < -0.05)
-        is_pos = valid_fwd & (min_ret >= -0.05) & (max_ret >= 0.08)
-        is_weak = valid_fwd & (min_ret >= -0.05) & (max_ret >= 0.02) & (max_ret < 0.08)
-        is_flat = valid_fwd & ~(is_crash | is_pos | is_weak)
+        #
+        # 분류 (상호배타, 위에서부터 우선):
+        #   pos   : 익절 성공 (max_ret >= +10%)                → 라벨 1
+        #   crash : 익절 실패 + 10일 중 -10% 이하로 하락        → 라벨 0, 확실히 학습시킬 실패
+        #   weak  : 익절 실패 + 그래도 +5% 이상은 올랐음        → 라벨 0, 경계 샘플
+        #   flat  : 나머지 (무의미한 횡보)                      → 라벨 0, 언더샘플링 대상
+        is_pos = valid_fwd & (max_ret >= 0.10)
+        is_crash = valid_fwd & ~is_pos & (min_ret <= -0.10)
+        is_weak = valid_fwd & ~is_pos & ~is_crash & (max_ret >= 0.05)
+        is_flat = valid_fwd & ~is_pos & ~is_crash & ~is_weak
 
         sample_type = pd.Series(pd.NA, index=df.index, dtype="string")
         sample_weight = pd.Series(np.nan, index=df.index, dtype="float32")
         sample_type.loc[is_flat] = "flat"
         sample_weight.loc[is_flat] = 0.7
-        sample_type.loc[is_crash] = "crash"
-        sample_weight.loc[is_crash] = 1.7
         sample_type.loc[is_weak] = "weak"
         sample_weight.loc[is_weak] = 1.2
+        sample_type.loc[is_crash] = "crash"
+        sample_weight.loc[is_crash] = 1.5
+        # pos는 "중간에 얼마나 빠졌다 왔는지"에 따라 가중을 차등한다.
+        # (익절 수익은 어차피 +10%로 동일하므로 라벨에서 거르지 않고 가중으로만 선호를 표현)
         sample_type.loc[is_pos] = "pos"
-        sample_weight.loc[is_pos] = 1.0
+        sample_weight.loc[is_pos] = 0.9                                   # 깊게 빠졌다 온 pos
+        sample_weight.loc[is_pos & (min_ret >= -0.05)] = 1.1              # 얕게 빠진 pos
+        sample_weight.loc[is_pos & (min_ret >= -0.02)] = 1.3              # 거의 안 빠진 pos
         df["sample_type"] = sample_type
         df["sample_weight"] = sample_weight
 
