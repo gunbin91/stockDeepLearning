@@ -481,6 +481,61 @@ def _load_raw_analysis_json():
     }
 
 
+def _parse_ymd_date(value):
+    """YYYY-MM-DD(또는 앞 10자)를 date로 파싱. 실패 시 None."""
+    try:
+        if value is None:
+            return None
+        return datetime.strptime(str(value)[:10], '%Y-%m-%d').date()
+    except Exception:
+        return None
+
+
+def _validate_actual_analysis_date(requested_date_str, actual_date_str, max_calendar_lag_days=14):
+    """
+    요청일 vs 실제 거래일(결과 date) 검증.
+    - 주말/공휴일/데이터 지연으로 실제일이 요청일보다 과거인 것은 정상.
+    - 완전일치 강제는 하지 않음 (mtime으로 이번 실행 결과인지 이미 확인).
+    Returns: (ok: bool, error_message: str|None, info: dict)
+    """
+    info = {
+        'requested_analysis_date': requested_date_str,
+        'actual_analysis_date': actual_date_str,
+        'date_adjusted': False,
+    }
+    req_d = _parse_ymd_date(requested_date_str)
+    act_d = _parse_ymd_date(actual_date_str)
+    if req_d is None or act_d is None:
+        # 파싱 실패 시 날짜 검사는 스킵 (mtime이 주 방어선)
+        return True, None, info
+
+    if act_d > req_d:
+        return False, (
+            f'분석 결과 날짜({act_d})가 요청일({req_d})보다 미래입니다.'
+        ), info
+
+    lag_days = (req_d - act_d).days
+    info['calendar_lag_days'] = lag_days
+    info['date_adjusted'] = lag_days > 0
+    if lag_days > int(max_calendar_lag_days):
+        return False, (
+            f'분석 결과 날짜({act_d})가 요청일({req_d})보다 '
+            f'{lag_days}일 과거입니다. (허용 {max_calendar_lag_days}일 이내)'
+        ), info
+
+    return True, None, info
+
+
+def _write_analysis_run_meta(meta_dict):
+    """이번 분석 실행 메타를 남겨 오염 추적/디버깅에 사용."""
+    try:
+        meta_path = os.path.join(str(path_manager.data_dir), 'analysis_run_meta.json')
+        with open(meta_path, 'w', encoding='utf-8') as f:
+            json.dump(meta_dict, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log_warning(f"[ANALYSIS] analysis_run_meta.json 저장 실패(무시): {e}")
+
+
 def _sanitize_json_value(obj):
     """
     JSON 응답 안전화:
@@ -521,6 +576,8 @@ def api_run_analysis():
     myKiwoom 호출 시 '요청 시점에' 실시간 분석을 수행하고 결과를 반환합니다.
     - 응답 포맷: myKiwoom/src/utils/deep_learning.py 가 기대하는 구조 유지
       { success: bool, data: {analysis_date,total_stocks,top_stocks,analysis_result}, message?: str }
+    - 이전 결과 오염 방지: 프로세스 성공 + 결과 파일 mtime이 이번 요청 이후
+    - 요청일≠실제 거래일(주말/공휴일 롤백)은 허용. 과도한 과거만 거부.
     """
     try:
         if get_analysis_running():
@@ -587,15 +644,16 @@ def api_run_analysis():
                 'message': '분석 결과 파일을 찾을 수 없습니다. (analysis_result.json)'
             }), 500
 
+        result_mtime = None
         try:
-            mtime = os.path.getmtime(result_path)
-            if mtime < start_ts:
+            result_mtime = os.path.getmtime(result_path)
+            if result_mtime < start_ts:
                 return jsonify({
                     'success': False,
                     'message': '분석 결과 파일이 이번 요청에서 생성된 것으로 확인되지 않습니다. (이전 결과일 수 있음)',
                     'error_details': {
                         'analysis_date': analysis_date,
-                        'result_mtime': mtime,
+                        'result_mtime': result_mtime,
                         'request_start_ts': start_ts
                     }
                 }), 500
@@ -609,27 +667,43 @@ def api_run_analysis():
                 'message': '분석 결과 파일을 찾을 수 없습니다. (analysis_result.json)'
             }), 500
 
-        # 날짜가 요청과 다른 경우도 차단 (이전 파일/다른 날짜 결과 방지)
-        if raw.get('analysis_date') and str(raw.get('analysis_date')) != str(analysis_date):
+        # 요청일 vs 실제 거래일: 완전일치 강제하지 않음 (주말→직전 거래일 정상)
+        actual_date = raw.get('analysis_date')
+        date_ok, date_err, date_info = _validate_actual_analysis_date(
+            analysis_date, actual_date, max_calendar_lag_days=14
+        )
+        if not date_ok:
             return jsonify({
                 'success': False,
-                'message': '분석 결과 날짜가 요청과 다릅니다. (이전 결과일 수 있음)',
-                'error_details': {
-                    'requested_analysis_date': analysis_date,
-                    'result_analysis_date': raw.get('analysis_date')
-                }
+                'message': date_err or '분석 결과 날짜 검증 실패',
+                'error_details': date_info
             }), 500
+        if date_info.get('date_adjusted'):
+            log_info(
+                f"[ANALYSIS] 기준일 조정 허용: 요청={analysis_date} → 실제={actual_date} "
+                f"(lag={date_info.get('calendar_lag_days')}일)"
+            )
 
         # NaN/Inf 등 비표준 JSON 값 제거 (브라우저 파싱 오류 방지)
         raw = _sanitize_json_value(raw)
 
         elapsed_ms = int((time.time() - start_ts) * 1000)
+        run_meta = {
+            'requested_analysis_date': analysis_date,
+            'actual_analysis_date': actual_date,
+            'date_adjusted': bool(date_info.get('date_adjusted')),
+            'calendar_lag_days': date_info.get('calendar_lag_days', 0),
+            'elapsed_ms': elapsed_ms,
+            'result_mtime': result_mtime,
+            'request_start_ts': start_ts,
+            'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+        _write_analysis_run_meta(run_meta)
+
         return jsonify({
             'success': True,
             'data': raw,
-            'meta': {
-                'elapsed_ms': elapsed_ms
-            }
+            'meta': run_meta
         })
 
     except Exception as e:
