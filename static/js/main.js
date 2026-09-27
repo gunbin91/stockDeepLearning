@@ -749,7 +749,9 @@ $(document).ready(function() {
             transaction_fee: parseFloat($('#modal_transaction_fee').val()),
             start_date: startDate,
             end_date: endDate,
-            use_cache: $('#use_cache_checkbox').is(':checked')
+            use_cache: $('#use_cache_checkbox').is(':checked'),
+            exclude_bb_gt_1_2: $('#exclude_bb_gt_12_checkbox').is(':checked'),
+            exclude_rf_lgbm_gap_gt_0_22: $('#exclude_rf_lgbm_gap_checkbox').is(':checked')
         };
         
         // 서버 상태 확인 후 진행
@@ -916,7 +918,9 @@ $(document).ready(function() {
             transaction_fee: parseFloat($('#modal_transaction_fee').val()) || 0.015,
             start_date: $('#modal_start_date').val(),
             end_date: $('#modal_end_date').val(),
-            use_cache: true  // 캐시 사용 강제
+            use_cache: true,  // 캐시 사용 강제
+            exclude_bb_gt_1_2: $('#exclude_bb_gt_12_checkbox').is(':checked'),
+            exclude_rf_lgbm_gap_gt_0_22: $('#exclude_rf_lgbm_gap_checkbox').is(':checked')
         };
         
         // 진행 모달 표시
@@ -1271,6 +1275,8 @@ $(document).ready(function() {
                                 <div class="col-md-3 mb-2"><strong>매수 종목 수:</strong> ${params.top_n}개</div>
                                 <div class="col-md-3 mb-2"><strong>매수 대상:</strong> ${rankFromLabel}~${rankToLabel}위</div>
                                 <div class="col-md-3 mb-2"><strong>시가총액:</strong> ${marcapMinLabel} ~ ${marcapMaxLabel}</div>
+                                <div class="col-md-3 mb-2"><strong>BB&gt;1.2 매수제외:</strong> ${params.exclude_bb_gt_1_2 === false ? 'OFF' : 'ON'}</div>
+                                <div class="col-md-3 mb-2"><strong>RF−LGBM갭&gt;0.22 제외:</strong> ${params.exclude_rf_lgbm_gap_gt_0_22 === false ? 'OFF' : 'ON'}</div>
                             </div>
                         </div>
                     </div>

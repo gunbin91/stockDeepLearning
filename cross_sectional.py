@@ -49,6 +49,7 @@ CROSS_SECTIONAL_FEATURE_COLS: tuple[str, ...] = (
 CROSS_SECTIONAL_SKIP_COLS: tuple[str, ...] = (
     "52주_신고가_비율",
     "Position_Range_60",
+    "BB_Position",  # %B (밴드 폭 정규화). 상단 초과(>1)/하단 이탈(<0) 유지, _cs 불필요
     "CLV",
     "RSI_Signal_Oscillator",
     "Trend_Pullback_Score",

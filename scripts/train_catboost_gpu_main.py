@@ -104,6 +104,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
         # 'KOSPI_disparity_20',  # Phase 2-2: 당일 전종목 동일값 → 랭킹 무기여, 제거
         'Trend_Pullback_Score',
         'Position_Range_60',
+        'BB_Position',  # Bollinger %B (1 초과=상단 돌파, 0 미만=하단 이탈)
         'MA20_Slope_cs',
         'MA120_Slope_cs',
         'MA240_Slope_cs',
@@ -602,13 +603,14 @@ def objective(trial, fold_data_cache, features):
         'devices': '0' if device == 'GPU' else None,
         'loss_function': 'Logloss',
         'eval_metric': 'Logloss' if device == 'GPU' else 'AUC',  # GPU에서는 Logloss 사용
-        'iterations': 3000,
+        'iterations': 10000,  # LGBM n_estimators=10000 과 동일 상한 (ES로 제어)
         'early_stopping_rounds': 50,
         'verbose': False,
         'random_seed': 42,
         'allow_writing_files': False,
         # 핵심 파라미터
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
+        # [정렬] LGBM과 동일 lr 대역 (기존 0.01~0.2 상한은 과함)
+        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),
         'depth': trial.suggest_int('depth', 5, 10),
         'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1e-1, 10.0, log=True),
         'border_count': trial.suggest_categorical('border_count', [128, 254]),
@@ -845,7 +847,7 @@ def train_final_model(fold_ranges, file_paths, features, best_params, best_score
         'devices': '0' if device == 'GPU' else None,
         'loss_function': 'Logloss',
         'eval_metric': 'Logloss' if device == 'GPU' else 'AUC',  # GPU에서는 Logloss 사용
-        'iterations': int(final_num_rounds) if final_num_rounds else 5000,
+        'iterations': int(final_num_rounds) if final_num_rounds else 10000,
         'early_stopping_rounds': 50,
         'verbose': True,
         'random_seed': 42,
@@ -1168,6 +1170,7 @@ def main():
         # 'KOSPI_disparity_20',  # Phase 2-2: 당일 전종목 동일값 → 랭킹 무기여, 제거
         'Trend_Pullback_Score',
         'Position_Range_60',
+        'BB_Position',  # Bollinger %B (1 초과=상단 돌파, 0 미만=하단 이탈)
         'MA20_Slope_cs',
         'MA120_Slope_cs',
         'MA240_Slope_cs',

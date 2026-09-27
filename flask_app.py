@@ -1432,6 +1432,18 @@ def start_backtest():
                 # 캐시 사용 파라미터 추가
                 if data.get('use_cache', False):
                     command.append('--use-cache')
+
+                # BB_Position > 1.2 매수 제외 (기본 ON)
+                if data.get('exclude_bb_gt_1_2', True):
+                    command.append('--exclude-bb-gt-12')
+                else:
+                    command.append('--no-exclude-bb-gt-12')
+
+                # RF-LGBM gap > 0.22 매수 제외 (기본 ON)
+                if data.get('exclude_rf_lgbm_gap_gt_0_22', True):
+                    command.append('--exclude-rf-lgbm-gap-gt-022')
+                else:
+                    command.append('--no-exclude-rf-lgbm-gap-gt-022')
                 
                 env = os.environ.copy()
                 env['PYTHONIOENCODING'] = 'utf-8'
@@ -1614,6 +1626,7 @@ def get_stock_features(ticker_code):
             # 추가된 피처
             'Trend_Pullback_Score',
             'Position_Range_60',
+            'BB_Position',  # Bollinger %B (1 초과=상단 돌파, 0 미만=하단 이탈)
             # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
             # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
             'MA20_Slope',   # 20일 이동평균선 기울기
@@ -1829,7 +1842,9 @@ def optimize_weights():
             'transaction_fee': data.get('transaction_fee', 0.015),
             'start_date': data.get('start_date') or default_start_date,
             'end_date': data.get('end_date') or default_end_date,
-            'use_cache': True  # 캐시 사용 강제
+            'use_cache': True,  # 캐시 사용 강제
+            'exclude_bb_gt_1_2': bool(data.get('exclude_bb_gt_1_2', True)),
+            'exclude_rf_lgbm_gap_gt_0_22': bool(data.get('exclude_rf_lgbm_gap_gt_0_22', True)),
         }
         
         # 날짜 유효성 검증
@@ -1923,7 +1938,9 @@ def optimize_weights_sync(backtest_params):
                     start_date=backtest_params.get('start_date'),
                     end_date=backtest_params.get('end_date'),
                     use_cache=True,
-                    shutdown_logger_after=False  # 최적화 중에는 logger 종료하지 않음
+                    shutdown_logger_after=False,  # 최적화 중에는 logger 종료하지 않음
+                    exclude_bb_gt_1_2=backtest_params.get('exclude_bb_gt_1_2', True),
+                    exclude_rf_lgbm_gap_gt_0_22=backtest_params.get('exclude_rf_lgbm_gap_gt_0_22', True),
                 )
                 
                 # 결과 수집
@@ -2030,6 +2047,7 @@ def calculate_feature_correlation():
             'KOSPI_disparity_20',
             'Trend_Pullback_Score',
             'Position_Range_60',
+            'BB_Position',  # Bollinger %B (1 초과=상단 돌파, 0 미만=하단 이탈)
             'MA20_Slope',
             'MA120_Slope',
             'MA240_Slope',

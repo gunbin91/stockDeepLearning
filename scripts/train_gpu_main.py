@@ -116,12 +116,6 @@ from sample_weight_utils import apply_stratified_flat_undersample, require_sampl
 
 
 
-# Optuna TPE Sampler의 seed 고정을 위한 설정
-
-optuna.samplers.TPESampler.init_rng = lambda self: np.random.RandomState()
-
-
-
 # --- 메모리 관리 유틸리티 ---
 
 
@@ -551,7 +545,8 @@ def prepare_data_and_save(data_path, start_date, end_date):
     # 추가된 피처: disparity_60
     # 제거된 피처: BBW_20_2, 거래량 변동성 계수, 변동성 기울기, 거래량 변동성 계수 기울기
     # 제거된 피처: 등락율, 주가_기울기(1W/1M/3M), disparity_5/10, 변동성(5M), KOSPI_변동성(3D/5M), KOSPI_disparity_5
-    # 제거된 피처: 변동성(3D/3M/1M/1W), KOSPI_변동성(3M/1W), KOSPI_disparity_120/20, BPS, 거래대금_MA20/MA5, BB_Position
+    # 제거된 피처: 변동성(3D/3M/1M/1W), KOSPI_변동성(3M/1W), KOSPI_disparity_120/20, BPS, 거래대금_MA20/MA5
+    # (BB_Position 은 2026-09 재도입: %B, clip 없음)
     # 제거된 피처: disparity_120, disparity_240
     # 변경된 피처: RSI_14 -> RSI_Signal_Oscillator
     # 추가된 피처: Relative_Strength_20 (KOSPI 수익률 상대강도), 시총_회전율(1W) (5일 거래대금 기준)
@@ -567,6 +562,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
         # 추가된 피처
         'Trend_Pullback_Score',  # 추세+눌림 점수
         'Position_Range_60',
+        'BB_Position',  # Bollinger %B (1 초과=상단 돌파, 0 미만=하단 이탈)
         # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
         # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
         'MA20_Slope_cs',  # 20일 이동평균선 기울기 횡단면
@@ -2071,7 +2067,7 @@ def train_final_ensemble_model(fold_data_cache, features, best_params, rng, opti
 def main():
     """메인 실행 함수"""
     parser = argparse.ArgumentParser(description="GPU 가속 모델 훈련 스크립트")
-    parser.add_argument('--n_iter', type=int, default=20, help='Optuna 탐색 횟수')
+    parser.add_argument('--n_iter', type=int, default=50, help='Optuna 탐색 횟수')
     parser.add_argument('--max_depth', type=int, nargs='+', default=[10, 15, 20, 25, 30], help='max_depth 후보 리스트 (과적합 방지를 위해 10-30 권장)')
     args = parser.parse_args()
 
@@ -2163,7 +2159,8 @@ def main():
     # 추가된 피처: disparity_60
     # 제거된 피처: BBW_20_2, 거래량 변동성 계수, 변동성 기울기, 거래량 변동성 계수 기울기
     # 제거된 피처: 등락율, 주가_기울기(1W/1M/3M), disparity_5/10, 변동성(5M), KOSPI_변동성(3D/5M), KOSPI_disparity_5
-    # 제거된 피처: 변동성(3D/3M/1M/1W), KOSPI_변동성(3M/1W), KOSPI_disparity_120/20, BPS, 거래대금_MA20/MA5, BB_Position
+    # 제거된 피처: 변동성(3D/3M/1M/1W), KOSPI_변동성(3M/1W), KOSPI_disparity_120/20, BPS, 거래대금_MA20/MA5
+    # (BB_Position 은 2026-09 재도입: %B, clip 없음)
     # 제거된 피처: disparity_120, disparity_240
     # 제거된 피처: 변동성(1W), 변동성(3M) (2024년 12월)
     features = [
@@ -2177,6 +2174,7 @@ def main():
         # 추가된 피처
         'Trend_Pullback_Score',
         'Position_Range_60',
+        'BB_Position',  # Bollinger %B (1 초과=상단 돌파, 0 미만=하단 이탈)
         # 'KOSPI_변동성(1M)',  # 2024년 12월 제거
         # 변동성(1W), 변동성(3M) 제거됨 (2024년 12월)
         'MA20_Slope_cs',  # 20일 이동평균선 기울기 횡단면
@@ -2228,8 +2226,8 @@ def main():
     study_name = "cuml_randomforest_optimization"
     # Pruning을 통해 나쁜 trial을 조기 종료하여 시간 절약
     pruner = optuna.pruners.MedianPruner(
-        n_startup_trials=5,  # 처음 5개 trial은 pruning하지 않음
-        n_warmup_steps=1,    # 첫 번째 fold만 완료하면 바로 pruning 판단 시작
+        n_startup_trials=10,  # 처음 10개 trial은 pruning하지 않음
+        n_warmup_steps=2,     # fold 2개 완료 전에는 pruning하지 않음
         interval_steps=1      # 매 fold마다 pruning 체크
     )
     study = optuna.create_study(

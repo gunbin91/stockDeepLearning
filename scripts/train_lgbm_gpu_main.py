@@ -103,6 +103,7 @@ def prepare_data_and_save(data_path, start_date, end_date):
         # 'KOSPI_disparity_20',  # Phase 2-2: 당일 전종목 동일값 → 랭킹 무기여, 제거
         'Trend_Pullback_Score',
         'Position_Range_60',
+        'BB_Position',  # Bollinger %B (1 초과=상단 돌파, 0 미만=하단 이탈)
         'MA20_Slope_cs',
         'MA120_Slope_cs',
         'MA240_Slope_cs',
@@ -1268,6 +1269,7 @@ def main():
         # 'KOSPI_disparity_20',  # Phase 2-2: 당일 전종목 동일값 → 랭킹 무기여, 제거
         'Trend_Pullback_Score',
         'Position_Range_60',
+        'BB_Position',  # Bollinger %B (1 초과=상단 돌파, 0 미만=하단 이탈)
         'MA20_Slope_cs',
         'MA120_Slope_cs',
         'MA240_Slope_cs',

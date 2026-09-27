@@ -1439,6 +1439,24 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             latest_data['Position_Range_60'] = max(0, min(1, latest_data['Position_Range_60']))
         else:
             latest_data['Position_Range_60'] = 0.5
+
+        # BB_Position (%B): (종가-하단)/(상단-하단). 1 초과=상단 돌파, 0 미만=하단 이탈. clip 금지.
+        try:
+            close_s = df_for_indicators['종가']
+            bb_mid = close_s.rolling(window=20).mean().iloc[-1]
+            bb_std = close_s.rolling(window=20).std().iloc[-1]
+            if pd.notna(bb_mid) and pd.notna(bb_std) and bb_std > 0:
+                bb_upper = bb_mid + 2.0 * bb_std
+                bb_lower = bb_mid - 2.0 * bb_std
+                bb_width = bb_upper - bb_lower
+                latest_data['BB_Position'] = float(
+                    (close_s.iloc[-1] - bb_lower) / bb_width
+                ) if bb_width > 0 else 0.5
+            else:
+                latest_data['BB_Position'] = np.nan
+        except Exception as e:
+            log_warning(f"BB_Position 계산 실패 ({ticker}): {e}")
+            latest_data['BB_Position'] = np.nan
         
         # ADX_14 (pandas_ta adx append 결과)
         if 'ADX_14' in df_for_indicators.columns:

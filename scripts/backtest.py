@@ -528,13 +528,15 @@ def _predict_with_loaded_catboost_model(df, model_info):
     
     return result_df
 
-def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, transaction_fee_rate, rank_from=1, rank_to=15, marcap_min_eok=1000, marcap_max_eok=None, save_cache=False, cache_start_date=None, cache_end_date=None):
+def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period, take_profit_pct, stop_loss_pct, transaction_fee_rate, rank_from=1, rank_to=15, marcap_min_eok=1000, marcap_max_eok=None, save_cache=False, cache_start_date=None, cache_end_date=None, exclude_bb_gt_1_2=True, exclude_rf_lgbm_gap_gt_0_22=True):
     """상세 백테스팅 실행 - 강화된 에러 처리
     
     Args:
         save_cache: 캐시 저장 여부
         cache_start_date: 캐시 저장 시 시작일
         cache_end_date: 캐시 저장 시 종료일
+        exclude_bb_gt_1_2: True면 BB_Position > 1.2 종목은 매수 후보에서 제외(다음 순위 리필)
+        exclude_rf_lgbm_gap_gt_0_22: True면 (RF−LGBM) > 0.22 이면 매수 제외(다음 순위 리필)
     """
     try:
         log_info("백테스팅 시작", context={
@@ -543,6 +545,8 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
             "max_hold_period": max_hold_period,
             "rank_from": rank_from,
             "rank_to": rank_to,
+            "exclude_bb_gt_1_2": bool(exclude_bb_gt_1_2),
+            "exclude_rf_lgbm_gap_gt_0_22": bool(exclude_rf_lgbm_gap_gt_0_22),
             "data_rows": len(data)
         })
 
@@ -947,11 +951,31 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
                         print(f"🔍 {date} 데이터: 점수종목 {len(scored)}개, 매수후보풀 {len(overall_top_universe)}개")
 
                 # 3) 보유 제외 후 top_n 매수
-                buy_candidates = overall_top_universe[
+                # 매수 제외 조건: BB>1.2 / RF−LGBM갭>0.22 → 스킵 후 다음 순위 리필
+                _pool = overall_top_universe[
                     ~overall_top_universe.index.get_level_values('종목코드').isin(portfolio.keys())
-                ].nlargest(top_n, 'final_score')
+                ].sort_values('final_score', ascending=False)
+                _need_filter = bool(exclude_bb_gt_1_2 or exclude_rf_lgbm_gap_gt_0_22)
+                if _need_filter:
+                    _picked_rows = []
+                    for _tk, _row in _pool.iterrows():
+                        if len(_picked_rows) >= top_n:
+                            break
+                        if exclude_bb_gt_1_2 and 'BB_Position' in _row.index:
+                            _bb = _row['BB_Position']
+                            if pd.notna(_bb) and float(_bb) > 1.2:
+                                continue
+                        if exclude_rf_lgbm_gap_gt_0_22 and 'ml_pred_proba' in _row.index and 'lgbm_pred_proba' in _row.index:
+                            _ml = _row['ml_pred_proba']
+                            _lg = _row['lgbm_pred_proba']
+                            if pd.notna(_ml) and pd.notna(_lg) and (float(_ml) - float(_lg)) > 0.22:
+                                continue
+                        _picked_rows.append((_tk, _row))
+                    buy_iter = _picked_rows
+                else:
+                    buy_iter = list(_pool.nlargest(top_n, 'final_score').iterrows())
 
-                for ticker, row in buy_candidates.iterrows():
+                for ticker, row in buy_iter:
                     if cash >= investment_per_stock and investment_per_stock > 0:
                         buy_price = row['종가']
                         
@@ -1203,7 +1227,9 @@ def run_detailed_backtest(data, weights, initial_capital, top_n, max_hold_period
         
     return {"portfolio_history": portfolio_ts, "total_return": total_return, "annual_return": annual_return,
             "sharpe_ratio": sharpe_ratio, "mdd": mdd, "trade_log": trade_log_df, "win_rate": win_rate,
-            "initial_capital": initial_capital, "final_asset": final_asset, "daily_rankings": daily_rankings}
+            "initial_capital": initial_capital, "final_asset": final_asset, "daily_rankings": daily_rankings,
+            "exclude_bb_gt_1_2": bool(exclude_bb_gt_1_2),
+            "exclude_rf_lgbm_gap_gt_0_22": bool(exclude_rf_lgbm_gap_gt_0_22)}
 
 
 def _resolve_oos_start_date(oos_start_date=None):
@@ -1451,7 +1477,9 @@ def create_json_report(results, output_path=None, oos_start_date=None):
             'rank_to': int(results.get('rank_to', results.get('buy_universe_rank', 0))),
             'marcap_min_eok': results.get('marcap_min_eok'),
             'marcap_max_eok': results.get('marcap_max_eok'),
-            'buy_universe_rank': int(results.get('rank_to', results.get('buy_universe_rank', 0)))
+            'buy_universe_rank': int(results.get('rank_to', results.get('buy_universe_rank', 0))),
+            'exclude_bb_gt_1_2': bool(results.get('exclude_bb_gt_1_2', True)),
+            'exclude_rf_lgbm_gap_gt_0_22': bool(results.get('exclude_rf_lgbm_gap_gt_0_22', True)),
         },
         'portfolio_history': {
             'dates': portfolio_dates,
@@ -1506,7 +1534,7 @@ def create_json_report(results, output_path=None, oos_start_date=None):
     return report_data
 
 
-def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, transaction_fee_rate, rank_from=1, rank_to=15, marcap_min_eok=1000, marcap_max_eok=None, start_date=None, end_date=None, use_cache=False, shutdown_logger_after=True, oos_start_date=None):
+def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_loss_pct, top_n, transaction_fee_rate, rank_from=1, rank_to=15, marcap_min_eok=1000, marcap_max_eok=None, start_date=None, end_date=None, use_cache=False, shutdown_logger_after=True, oos_start_date=None, exclude_bb_gt_1_2=True, exclude_rf_lgbm_gap_gt_0_22=True):
     """최종 백테스팅 실행 - 강화된 에러 처리
     
     Args:
@@ -1525,6 +1553,8 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         use_cache: 캐시 사용 여부 (True면 캐시 파일 사용/생성, False면 실시간 분석)
         shutdown_logger_after: 백테스팅 완료 후 logger 종료 여부 (기본값: True, 최적화 시 False로 설정)
         oos_start_date: OOS 시작일 (None이면 metadata train_end_date 폴백)
+        exclude_bb_gt_1_2: True면 BB_Position > 1.2 매수 제외 (기본 True)
+        exclude_rf_lgbm_gap_gt_0_22: True면 (RF−LGBM) > 0.22 매수 제외 (기본 True)
     """
     start_time = time.time()
     
@@ -1549,6 +1579,8 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
         log_info(f"   └─ 익절 기준: +{take_profit_pct}%")
         log_info(f"   └─ 손절 기준: -{stop_loss_pct}%")
         log_info(f"   └─ 거래 수수료: {transaction_fee_rate}%")
+        log_info(f"   └─ 매수제외 BB>1.2: {'ON' if exclude_bb_gt_1_2 else 'OFF'}")
+        log_info(f"   └─ 매수제외 RF−LGBM갭>0.22: {'ON' if exclude_rf_lgbm_gap_gt_0_22 else 'OFF'}")
         log_info(f"   └─ 테스트 기간: {start_date} ~ {end_date}")
         log_info(f"   └─ 캐시 사용: {'예' if use_cache else '아니오'}")
         
@@ -1850,7 +1882,9 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
                 marcap_max_eok=marcap_max_eok,
                 save_cache=use_cache and not cache_used,
                 cache_start_date=backtest_start_date_with_warmup,
-                cache_end_date=end_date
+                cache_end_date=end_date,
+                exclude_bb_gt_1_2=exclude_bb_gt_1_2,
+                exclude_rf_lgbm_gap_gt_0_22=exclude_rf_lgbm_gap_gt_0_22,
             )
             
             # 결과에 메타데이터 추가
@@ -1865,6 +1899,8 @@ def run_final_backtest(initial_capital, max_hold_period, take_profit_pct, stop_l
             backtest_results['marcap_min_eok'] = _parse_marcap_eok(marcap_min_eok)
             backtest_results['marcap_max_eok'] = _parse_marcap_eok(marcap_max_eok)
             backtest_results['buy_universe_rank'] = rank_to
+            backtest_results['exclude_bb_gt_1_2'] = bool(exclude_bb_gt_1_2)
+            backtest_results['exclude_rf_lgbm_gap_gt_0_22'] = bool(exclude_rf_lgbm_gap_gt_0_22)
             backtest_results['securities_transaction_tax_rate'] = SECURITIES_TRANSACTION_TAX_RATE
             backtest_results['oos_start_date'] = oos_start_date
             # 캐시 정보 추가
@@ -1953,6 +1989,15 @@ if __name__ == '__main__':
     parser.add_argument('--end-date', type=str, default=None, help='Test end date (YYYY-MM-DD format, default: today)')
     parser.add_argument('--use-cache', action='store_true', help='Use cache for backtesting (load/save cache file)')
     parser.add_argument('--oos-start', type=str, default=None, help='OOS start date YYYY-MM-DD (default: model metadata train_end_date)')
+    parser.add_argument('--exclude-bb-gt-12', dest='exclude_bb_gt_1_2', action='store_true',
+                        help='Exclude buys with BB_Position > 1.2 (default: on)')
+    parser.add_argument('--no-exclude-bb-gt-12', dest='exclude_bb_gt_1_2', action='store_false',
+                        help='Do not exclude BB_Position > 1.2')
+    parser.add_argument('--exclude-rf-lgbm-gap-gt-022', dest='exclude_rf_lgbm_gap_gt_0_22', action='store_true',
+                        help='Exclude buys when RF-LGBM gap > 0.22 (default: on)')
+    parser.add_argument('--no-exclude-rf-lgbm-gap-gt-022', dest='exclude_rf_lgbm_gap_gt_0_22', action='store_false',
+                        help='Do not exclude RF-LGBM gap > 0.22')
+    parser.set_defaults(exclude_bb_gt_1_2=True, exclude_rf_lgbm_gap_gt_0_22=True)
     args = parser.parse_args()
 
     if args.capital <= 0:
@@ -1975,5 +2020,7 @@ if __name__ == '__main__':
             end_date=args.end_date,
             use_cache=args.use_cache,
             oos_start_date=args.oos_start,
+            exclude_bb_gt_1_2=args.exclude_bb_gt_1_2,
+            exclude_rf_lgbm_gap_gt_0_22=args.exclude_rf_lgbm_gap_gt_0_22,
         )
 

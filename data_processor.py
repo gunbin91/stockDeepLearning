@@ -804,6 +804,22 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exc
             log_warning(f"Position_Range_60 계산 실패 ({ticker}): {e}")
             df['Position_Range_60'] = np.nan
 
+        # BB_Position (%B): (종가-하단)/(상단-하단). 1 초과=상단 돌파, 0 미만=하단 이탈. clip 금지.
+        try:
+            bb_mid = df['종가'].rolling(window=20).mean()
+            bb_std = df['종가'].rolling(window=20).std()
+            bb_upper = bb_mid + 2.0 * bb_std
+            bb_lower = bb_mid - 2.0 * bb_std
+            bb_width = bb_upper - bb_lower
+            df['BB_Position'] = np.where(
+                bb_width > 0,
+                (df['종가'] - bb_lower) / bb_width,
+                0.5,
+            )
+        except Exception as e:
+            log_warning(f"BB_Position 계산 실패 ({ticker}): {e}")
+            df['BB_Position'] = np.nan
+
         # Max_Drawdown_20 계산 (최근 20일 최대 낙폭, %)
         # roll_max = 고가.rolling(20).max()
         # daily_dd = (저가 / roll_max) - 1

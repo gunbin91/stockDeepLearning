@@ -177,6 +177,26 @@
                     </div>
                     
                     <div class="mb-3">
+                        <label class="form-label">매수 제외 조건</label>
+                        <div class="border rounded p-3 bg-light">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="exclude_bb_gt_12_checkbox" checked>
+                                <label class="form-check-label" for="exclude_bb_gt_12_checkbox">
+                                    BB_Position &gt; 1.2 제외
+                                </label>
+                                <div class="form-text">볼린저 상단 대비 과확장(상단 위 20%p 초과) 종목은 매수하지 않고 다음 순위로 리필합니다.</div>
+                            </div>
+                            <div class="form-check mt-2">
+                                <input class="form-check-input" type="checkbox" id="exclude_rf_lgbm_gap_checkbox" checked>
+                                <label class="form-check-label" for="exclude_rf_lgbm_gap_checkbox">
+                                    RF−LGBM 갭 &gt; 0.22 제외
+                                </label>
+                                <div class="form-text mb-0">RF 확률이 LGBM보다 0.22 이상 높으면(RF만 과열로 밀어 올리는 자리) 매수하지 않고 다음 순위로 리필합니다.</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
                         <div class="form-check">
                             <input class="form-check-input" type="checkbox" id="use_cache_checkbox" checked>
                             <label class="form-check-label" for="use_cache_checkbox">
