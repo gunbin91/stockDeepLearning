@@ -395,6 +395,17 @@ def run_analysis(analysis_date_str):
             final_df_with_names['현재가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('현재가'))
             final_df_with_names['기준일가'] = final_df_with_names['종목코드'].map(lambda x: price_map.get(x, {}).get('기준일가'))
 
+            # 실전 매수제외(BB>1.2)용: 최종 결과에 BB_Position 보장
+            if 'BB_Position' in feature_df.columns:
+                try:
+                    bb_map = feature_df.set_index('종목코드')['BB_Position'].to_dict()
+                    final_df_with_names['BB_Position'] = final_df_with_names['종목코드'].map(bb_map)
+                    log_info("   ✅ BB_Position 병합 완료 (실전 매수제외용)")
+                except Exception as e:
+                    log_warning(f"   ⚠️ BB_Position 병합 실패: {e}")
+            else:
+                log_warning("   ⚠️ feature_df에 BB_Position이 없습니다. (실전 BB>1.2 제외 불가)")
+
             # 최종 데이터프레임에 분석 기준일 컬럼 추가
             final_df_with_names['date'] = actual_analysis_date
 
