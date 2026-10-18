@@ -18,7 +18,6 @@ import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
 from pykrx import stock
-import pandas_ta as ta
 import concurrent.futures
 from tqdm import tqdm
 import os
@@ -118,8 +117,27 @@ def _patch_requests_for_fdr():
     requests.get = patched_get
     requests.post = patched_post
 
-# 모듈 로드 시 즉시 로그인 수행 (아이디: gunbin52, 비밀번호: !rjsqls1357)
-login_krx("gunbin52", "!rjsqls1357")
+# =================================================================
+# FDR 성공 소스 캐시 (폴백 제거용)
+# 최초 1회 성공한 소스(NAVER/KRX)를 저장해 두고 이후 종목들은 바로 그 소스만 사용
+_SUCCESSFUL_FDR_SOURCE = None  # (source_name, symbol_prefix) 튜플
+
+# =================================================================
+# 지연 초기화: KRX 로그인 (프로세스당 1회만 실행)
+_KRX_LOGIN_DONE = False
+
+def _ensure_krx_login():
+    """KRX 로그인 보장 (지연 초기화, 프로세스당 1회)"""
+    global _KRX_LOGIN_DONE
+    if _KRX_LOGIN_DONE:
+        return True
+    try:
+        ok = login_krx("gunbin52", "!rjsqls1357")
+        _KRX_LOGIN_DONE = ok
+        return ok
+    except Exception as e:
+        log_warning(f"KRX 로그인 지연 초기화 실패: {e}")
+        return False
 
 # =================================================================
 # 재무데이터(pykrx) 수집 사용 여부
@@ -169,9 +187,53 @@ def _normalize_fdr_index(df):
     return df
 
 
+# FDR 요청 타임아웃 (초) - 네트워크 지연 시 무한 대기 방지
+_FDR_REQUEST_TIMEOUT = 5
+_FDR_MAX_RETRIES = 2  # 연결 에러 시 2회 재시도
+
+def _fetch_fdr_direct(symbol, start_date, end_date):
+    """FDR 직접 호출"""
+    return fdr.DataReader(symbol, start_date, end_date)
+
+
+def _fetch_fdr_with_timeout(symbol, start_date, end_date, timeout=_FDR_REQUEST_TIMEOUT):
+    """타임아웃 래퍼"""
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_fetch_fdr_direct, symbol, start_date, end_date)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise TimeoutError(f"FDR 요청 타임아웃 ({timeout}초): {symbol}")
+        except Exception as e:
+            raise e
+
+
+def _fetch_fdr_with_retry(symbol, start_date, end_date, max_retries=_FDR_MAX_RETRIES):
+    """연결 에러 시 재시도 (지수 백오프)"""
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            return _fetch_fdr_with_timeout(symbol, start_date, end_date)
+        except (TimeoutError, ConnectionError, OSError) as e:
+            last_error = e
+            if attempt < max_retries:
+                wait_time = 0.5 * (2 ** attempt)  # 0.5s, 1s, 2s 지수 백오프
+                time.sleep(wait_time)
+                continue
+            raise
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                time.sleep(0.3)
+                continue
+            raise
+    raise last_error
+
+
 def fetch_fdr_ohlcv_with_fallback(category, attempts, start_date, end_date, verbose=True):
     """
-    FDR OHLCV 수집 (소스별 폴백).
+    FDR OHLCV 수집 (소스별 폴백 + 타임아웃 + 재시도).
 
     Args:
         verbose: True면 시도/성공/실패 로그 출력. 주가 배치 수집은 False 권장.
@@ -187,13 +249,17 @@ def fetch_fdr_ohlcv_with_fallback(category, attempts, start_date, end_date, verb
         if verbose:
             _log_fetch_attempt(category, source, symbol)
         try:
-            df = fdr.DataReader(symbol, start_date_str, end_date_str)
+            df = _fetch_fdr_with_retry(symbol, start_date_str, end_date_str)
             if df is not None and not df.empty:
                 if verbose:
                     log_info(f"[{category}] 수집 성공: {source} (symbol={symbol}, rows={len(df)})")
                 return df, source
             if verbose:
                 log_warning(f"[{category}] 수집 결과 없음: {source} (symbol={symbol})")
+        except TimeoutError as e:
+            last_error = e
+            if verbose:
+                log_warning(f"[{category}] 수집 타임아웃: {source} (symbol={symbol}) - {e}")
         except Exception as e:
             last_error = e
             if verbose:
@@ -208,18 +274,44 @@ def fetch_fdr_ohlcv_with_fallback(category, attempts, start_date, end_date, verb
 
 
 def fetch_stock_ohlcv_with_fallback(ticker, start_date, end_date, category=None, verbose=False):
-    """한국 주식 OHLCV 수집 (NAVER → KRX → NAVER 폴백).
+    """한국 주식 OHLCV 수집 (캐시된 소스 우선 → 폴백).
 
     배치 수집 시 종목별 로그 폭주를 막기 위해 기본 verbose=False.
     """
+    global _SUCCESSFUL_FDR_SOURCE
     category = category or f"주가/{ticker}"
-    return fetch_fdr_ohlcv_with_fallback(
-        category,
-        _build_stock_price_attempts(ticker),
-        start_date,
-        end_date,
-        verbose=verbose,
-    )
+
+    # 캐시된 성공 소스가 있으면 가장 먼저 시도 (타임아웃/재시도 적용)
+    if _SUCCESSFUL_FDR_SOURCE is not None:
+        source_name, symbol_prefix = _SUCCESSFUL_FDR_SOURCE
+        if verbose:
+            _log_fetch_attempt(category, source_name + "(cached)", symbol_prefix + ticker)
+        try:
+            df = _fetch_fdr_with_retry(symbol_prefix + ticker, start_date, end_date)
+            if df is not None and not df.empty:
+                if verbose:
+                    log_info(f"[{category}] 수집 성공: {source_name}(cached) (symbol={symbol_prefix + ticker}, rows={len(df)})")
+                return df, source_name
+        except TimeoutError as e:
+            if verbose:
+                log_warning(f"[{category}] 캐시 소스 타임아웃, 폴백 진행: {source_name} - {e}")
+        except Exception as e:
+            if verbose:
+                log_warning(f"[{category}] 캐시 소스 실패, 폴백 진행: {source_name} - {e}")
+
+    # 캐시 없거나 실패 시 기존 폴백 로직 수행
+    attempts = _build_stock_price_attempts(ticker)
+    df, source = fetch_fdr_ohlcv_with_fallback(category, attempts, start_date, end_date, verbose=verbose)
+
+    # 성공 시 캐시 업데이트
+    if df is not None and source:
+        # symbol_prefix 추출 (NAVER:, KRX: 등)
+        for s_name, sym in attempts:
+            if s_name == source:
+                _SUCCESSFUL_FDR_SOURCE = (source, sym.replace(ticker, ''))
+                break
+
+    return df, source
 
 
 def probe_stock_ohlcv_source(ticker, end_date=None):
@@ -235,7 +327,7 @@ def probe_stock_ohlcv_source(ticker, end_date=None):
         ticker, probe_start, probe_end, category=f'주가소스판별/{ticker}', verbose=False
     )
     if source:
-        log_info(f"주가 수집 소스: {source} (첫 종목 {ticker}으로 확인, 순서: NAVER → KRX → NAVER)")
+        log_info(f"주가 수집 소스: {source} (첫 종목 {ticker}으로 확인, 이후 종목은 이 소스 우선 사용)")
     else:
         log_warning(f"주가 수집 소스 판별 실패 (첫 종목 {ticker})")
     return source
@@ -304,6 +396,74 @@ def calculate_normalized_linear_regression_slope_latest(series, window=5):
     normalized_slope = (abs_slope / current_value) * 100
     
     return normalized_slope
+
+
+# =================================================================
+# 벡터화된 기술적 지표 계산 함수들 (pandas_ta 대체, ProcessPoolExecutor 호환)
+# =================================================================
+
+def _calc_atr_vectorized(high, low, close, length=14):
+    """ATR (Average True Range) 벡터화 계산 - Wilder's Smoothing (EMA) 방식"""
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # Wilder's smoothing: alpha = 1/length
+    atr = tr.ewm(alpha=1.0/length, adjust=False, min_periods=length).mean()
+    return atr
+
+
+def _calc_rsi_vectorized(close, length=14):
+    """RSI 벡터화 계산 - Wilder's Smoothing 방식"""
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    
+    # Wilder's smoothing (EMA with alpha=1/length)
+    avg_gain = gain.ewm(alpha=1.0/length, adjust=False, min_periods=length).mean()
+    avg_loss = loss.ewm(alpha=1.0/length, adjust=False, min_periods=length).mean()
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+
+def _calc_adx_vectorized(high, low, close, length=14):
+    """ADX (Average Directional Index) 벡터화 계산"""
+    prev_high = high.shift(1)
+    prev_low = low.shift(1)
+    prev_close = close.shift(1)
+    
+    # True Range
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1.0/length, adjust=False, min_periods=length).mean()
+    
+    # Directional Movement
+    up_move = high - prev_high
+    down_move = prev_low - low
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    plus_dm = pd.Series(plus_dm, index=high.index)
+    minus_dm = pd.Series(minus_dm, index=high.index)
+    
+    # Smoothed DM
+    plus_di = 100 * plus_dm.ewm(alpha=1.0/length, adjust=False, min_periods=length).mean() / (atr + 1e-10)
+    minus_di = 100 * minus_dm.ewm(alpha=1.0/length, adjust=False, min_periods=length).mean() / (atr + 1e-10)
+    
+    # DX
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+    
+    # ADX (smoothed DX)
+    adx = dx.ewm(alpha=1.0/length, adjust=False, min_periods=length).mean()
+    
+    return adx, plus_di, minus_di
+
 
 def get_actual_trading_date(selected_analysis_date):
     """
@@ -1279,30 +1439,35 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
         except Exception:
             latest_data['시가총액'] = np.nan
         
-        # ATR 계산 (5일, 20일, 60일)
-        atr_5 = df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=5)
-        atr_20 = df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=20)
-        atr_60 = df_for_indicators.ta.atr(high='고가', low='저가', close='종가', length=60)
+        # ATR 계산 (5일, 20일, 60일) - 벡터화된 구현 사용
+        atr_5 = _calc_atr_vectorized(df_for_indicators['고가'], df_for_indicators['저가'], df_for_indicators['종가'], length=5)
+        atr_20 = _calc_atr_vectorized(df_for_indicators['고가'], df_for_indicators['저가'], df_for_indicators['종가'], length=20)
+        atr_60 = _calc_atr_vectorized(df_for_indicators['고가'], df_for_indicators['저가'], df_for_indicators['종가'], length=60)
         
         # ATRr_5 계산 (기준 - 1W): "최근 1주일 변동성 수준"
-        if atr_5 is not None:
+        if atr_5 is not None and len(atr_5) > 0:
             latest_data['ATRr_5'] = (atr_5.iloc[-1] / df_for_indicators['종가'].iloc[-1]) * 100
         else:
             latest_data['ATRr_5'] = np.nan
         
         # ATRr_20 계산 (기준 - 1M): "이 종목의 기초 체급은?"
-        if atr_20 is not None:
+        if atr_20 is not None and len(atr_20) > 0:
             latest_data['ATRr_20'] = (atr_20.iloc[-1] / df_for_indicators['종가'].iloc[-1]) * 100
         else:
             latest_data['ATRr_20'] = np.nan
         
         # ATRr_60 계산 (기준 - 3M): "중기 추세적 변동성"
-        if atr_60 is not None:
+        if atr_60 is not None and len(atr_60) > 0:
             latest_data['ATRr_60'] = (atr_60.iloc[-1] / df_for_indicators['종가'].iloc[-1]) * 100
         else:
             latest_data['ATRr_60'] = np.nan
         
-        df_for_indicators.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
+        # ADX 계산 - 벡터화된 구현 사용
+        adx_14, _, _ = _calc_adx_vectorized(df_for_indicators['고가'], df_for_indicators['저가'], df_for_indicators['종가'], length=14)
+        if adx_14 is not None and len(adx_14) > 0:
+            latest_data['ADX_14'] = adx_14.iloc[-1]
+        else:
+            latest_data['ADX_14'] = np.nan
         
         # =================================================================
         # [단일 핵심 피처] CLV (Close Location Value, 종가 위치 지수)
@@ -1325,8 +1490,8 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
             log_warning(f"CLV 계산 실패 ({ticker}): {e}")
             latest_data['CLV'] = np.nan
         
-        # RSI_14 계산
-        rsi_14 = df_for_indicators.ta.rsi(close='종가', length=14)
+        # RSI_14 계산 - 벡터화된 구현 사용
+        rsi_14 = _calc_rsi_vectorized(df_for_indicators['종가'], length=14)
         
         # RSI_Signal_Oscillator 계산: RSI_14 - RSI_14.rolling(9).mean()
         # MACD 원리를 RSI에 적용한 것으로, 양수면 RSI가 평균을 뚫고 올라가는 중(골든크로스)
@@ -1627,186 +1792,504 @@ def fetch_and_process_ticker_data(stock_info, start_date_for_fetch, end_date_for
     except Exception as e:
         return None, None
 
-def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
+
+# =================================================================
+# 2단계: 순수 계산 함수 (ProcessPoolExecutor 용, 네트워크 호출 없음)
+# =================================================================
+
+def _calculate_indicators_for_ticker(args):
     """
-    전체 데이터 수집 메인 함수
-    
-    주식 분석에 필요한 모든 데이터를 수집하고 처리합니다:
-    1. 재무 데이터 수집 (PER, PBR, ROE 등)
-    2. 주가 데이터 수집 및 기술적 지표 계산
-    3. 거시경제 데이터 수집 (KOSPI, 환율, VIX 등)
-    4. 데이터 정제 및 병합
+    단일 종목 지표 계산 (순수 CPU, 네트워크 호출 없음).
+    ProcessPoolExecutor에서 호출되도록 설계됨.
     
     Args:
-        stock_list: 분석할 종목 목록
-        selected_analysis_date: 분석 기준일
-        use_cache: 캐시 사용 여부
+        args: (ticker, name, shares, df_price_dict, selected_analysis_date_ts)
         
     Returns:
-        tuple: (처리된 데이터프레임, 실제 분석일)
+        (latest_data_dict, actual_analysis_date) 또는 (None, None)
+    """
+    ticker, name, shares, price_data, selected_analysis_date_ts = args
+    
+    try:
+        # 가격 데이터 복원 (dict -> DataFrame)
+        df_price_full = pd.DataFrame(price_data)
+        if df_price_full.empty or len(df_price_full) < 311:
+            return None, None
+        
+        df_price_full['date'] = pd.to_datetime(df_price_full['date'])
+        df_price_full.set_index('date', inplace=True)
+        df_price_full = df_price_full.sort_index()
+        
+        # 컬럼명 정규화
+        df_price_full.rename(columns={'Open':'시가', 'Close':'종가', 'High':'고가', 'Low':'저가', 'Volume':'거래량'}, inplace=True)
+        
+        df_temp = df_price_full[df_price_full.index <= selected_analysis_date_ts]
+        if df_temp.empty:
+            return None, None
+        actual_analysis_date = df_temp.index.max()
+        reference_date_price = float(df_temp.loc[actual_analysis_date]['종가'])
+        latest_current_price = float(df_price_full.iloc[-1]['종가'])
+        
+        df_for_indicators = df_price_full[df_price_full.index <= actual_analysis_date].copy()
+        
+        latest_data = {}
+        df_for_indicators['거래대금'] = df_for_indicators['종가'] * df_for_indicators['거래량']
+        
+        # RVOL
+        try:
+            vol_20_mean = df_for_indicators['거래량'].rolling(window=20).mean().iloc[-1]
+            curr_vol = df_for_indicators['거래량'].iloc[-1]
+            latest_data['RVOL'] = curr_vol / vol_20_mean if (pd.notna(vol_20_mean) and vol_20_mean > 0 and pd.notna(curr_vol)) else np.nan
+        except:
+            latest_data['RVOL'] = np.nan
+        
+        # 시총 회전율
+        try:
+            mkt_cap = reference_date_price * shares
+            if mkt_cap > 0:
+                amt_5_mean = df_for_indicators['거래대금'].rolling(window=5).mean().iloc[-1]
+                latest_data['시총 회전율(1W)'] = (amt_5_mean / mkt_cap) * 100 if pd.notna(amt_5_mean) else np.nan
+                amt_60_mean = df_for_indicators['거래대금'].rolling(window=60).mean().iloc[-1]
+                latest_data['시총 회전율(3M)'] = (amt_60_mean / mkt_cap) * 100 if pd.notna(amt_60_mean) else np.nan
+            else:
+                latest_data['시총 회전율(1W)'] = np.nan
+                latest_data['시총 회전율(3M)'] = np.nan
+        except:
+            latest_data['시총 회전율(1W)'] = np.nan
+            latest_data['시총 회전율(3M)'] = np.nan
+        
+        latest_data['log_mktcap'] = np.log(mkt_cap) if mkt_cap > 0 else np.nan
+        latest_data['시가총액'] = float(mkt_cap) if mkt_cap > 0 else np.nan
+        
+        # ATR (벡터화)
+        atr_5 = _calc_atr_vectorized(df_for_indicators['고가'], df_for_indicators['저가'], df_for_indicators['종가'], length=5)
+        atr_20 = _calc_atr_vectorized(df_for_indicators['고가'], df_for_indicators['저가'], df_for_indicators['종가'], length=20)
+        atr_60 = _calc_atr_vectorized(df_for_indicators['고가'], df_for_indicators['저가'], df_for_indicators['종가'], length=60)
+        
+        last_close = df_for_indicators['종가'].iloc[-1]
+        latest_data['ATRr_5'] = (atr_5.iloc[-1] / last_close) * 100 if len(atr_5) and pd.notna(atr_5.iloc[-1]) else np.nan
+        latest_data['ATRr_20'] = (atr_20.iloc[-1] / last_close) * 100 if len(atr_20) and pd.notna(atr_20.iloc[-1]) else np.nan
+        latest_data['ATRr_60'] = (atr_60.iloc[-1] / last_close) * 100 if len(atr_60) and pd.notna(atr_60.iloc[-1]) else np.nan
+        
+        # ADX
+        adx_14, _, _ = _calc_adx_vectorized(df_for_indicators['고가'], df_for_indicators['저가'], df_for_indicators['종가'], length=14)
+        latest_data['ADX_14'] = adx_14.iloc[-1] if len(adx_14) and pd.notna(adx_14.iloc[-1]) else np.nan
+        
+        # CLV
+        try:
+            h, l, c = df_for_indicators['고가'].iloc[-1], df_for_indicators['저가'].iloc[-1], last_close
+            latest_data['CLV'] = float(np.clip((2*c - h - l) / (h - l + 1e-8), -1.0, 1.0))
+        except:
+            latest_data['CLV'] = np.nan
+        
+        # RSI
+        rsi_14 = _calc_rsi_vectorized(df_for_indicators['종가'], length=14)
+        if len(rsi_14) >= 9:
+            rsi_ma9 = rsi_14.rolling(9).mean().iloc[-1]
+            latest_data['RSI_Signal_Oscillator'] = rsi_14.iloc[-1] - rsi_ma9 if pd.notna(rsi_14.iloc[-1]) and pd.notna(rsi_ma9) else np.nan
+        else:
+            latest_data['RSI_Signal_Oscillator'] = np.nan
+        
+        # 이격도
+        for p in [120, 240]:
+            ma = df_for_indicators['종가'].rolling(p).mean()
+            latest_data[f'disparity_{p}'] = (last_close / ma.iloc[-1] * 100) if len(ma) and pd.notna(ma.iloc[-1]) else np.nan
+        
+        # MA Slope
+        for period, key in [(120, 'MA120_Slope'), (20, 'MA20_Slope'), (240, 'MA240_Slope')]:
+            ma = df_for_indicators['종가'].rolling(period).mean()
+            latest_data[key] = calculate_normalized_linear_regression_slope_latest(ma, window=5) if len(ma) >= 5 else np.nan
+        
+        # Exclude_Rank
+        try:
+            ma20 = df_for_indicators['종가'].rolling(20).mean()
+            ma60 = df_for_indicators['종가'].rolling(60).mean()
+            ma120 = df_for_indicators['종가'].rolling(120).mean()
+            ma240 = df_for_indicators['종가'].rolling(240).mean()
+            
+            cond1 = cond2 = cond3 = False
+            if all(len(m) for m in [ma20, ma60, ma120, ma240]):
+                m20, m60, m120, m240 = ma20.iloc[-1], ma60.iloc[-1], ma120.iloc[-1], ma240.iloc[-1]
+                if all(pd.notna(x) for x in [m20, m60, m120, m240, last_close]):
+                    cond1 = (m20 < m120) and (m20 < m240) and (last_close < m60)
+                
+                if len(ma20) >= 15:
+                    diff = ma20.diff().dropna()
+                    cond2 = len(diff) >= 14 and (diff.iloc[-14:] < 0).all() and (last_close < m20)
+                
+                cond3 = latest_data['시가총액'] < 100_000_000_000 if pd.notna(latest_data['시가총액']) else False
+            
+            latest_data['Exclude_Rank'] = bool(cond1 or cond2 or cond3)
+        except:
+            latest_data['Exclude_Rank'] = False
+        
+        # 52주 신고가 비율
+        latest_data['52주_신고가_비율'] = (last_close / df_for_indicators['종가'].rolling(250).max().iloc[-1]) if len(df_for_indicators) >= 250 else np.nan
+        
+        # Position_Range_60
+        try:
+            h60 = df_for_indicators['고가'].rolling(60).max().iloc[-1]
+            l60 = df_for_indicators['저가'].rolling(60).min().iloc[-1]
+            latest_data['Position_Range_60'] = max(0, min(1, (last_close - l60) / (h60 - l60))) if pd.notna(h60) and pd.notna(l60) and h60 != l60 else 0.5
+        except:
+            latest_data['Position_Range_60'] = 0.5
+        
+        # BB_Position
+        try:
+            bb_mid = df_for_indicators['종가'].rolling(20).mean().iloc[-1]
+            bb_std = df_for_indicators['종가'].rolling(20).std().iloc[-1]
+            if pd.notna(bb_mid) and pd.notna(bb_std) and bb_std > 0:
+                bb_up = bb_mid + 2*bb_std
+                bb_low = bb_mid - 2*bb_std
+                latest_data['BB_Position'] = (last_close - bb_low) / (bb_up - bb_low) if bb_up != bb_low else 0.5
+            else:
+                latest_data['BB_Position'] = np.nan
+        except:
+            latest_data['BB_Position'] = np.nan
+        
+        # HV 변동성
+        try:
+            log_ret = np.log(df_for_indicators['종가'] / df_for_indicators['종가'].shift(1))
+            latest_data['HV_Volatility_5'] = log_ret.rolling(5).std().iloc[-1] if len(log_ret) >= 5 else np.nan
+            latest_data['HV_Volatility_20'] = log_ret.rolling(20).std().iloc[-1] if len(log_ret) >= 20 else np.nan
+            latest_data['HV_Volatility_60'] = log_ret.rolling(60).std().iloc[-1] if len(log_ret) >= 60 else np.nan
+        except:
+            latest_data['HV_Volatility_5'] = latest_data['HV_Volatility_20'] = latest_data['HV_Volatility_60'] = np.nan
+        
+        # Phase C asymmetric features
+        try:
+            ret = df_for_indicators['종가'].pct_change()
+            vol = df_for_indicators['거래대금']
+            down = ret.where(ret < 0)
+            up = ret.where(ret > 0)
+            downside = down.rolling(20, min_periods=10).std()
+            up_vol = up.rolling(20, min_periods=10).std()
+            latest_data['Downside_Vol_20'] = downside.iloc[-1] if len(downside) else np.nan
+            latest_data['Upside_Downside_Vol_Ratio_20'] = (up_vol.iloc[-1] / (downside.iloc[-1] + 1e-8)) if len(up_vol) and len(downside) and pd.notna(downside.iloc[-1]) else np.nan
+            latest_data['Return_Skew_60'] = ret.rolling(60, min_periods=30).skew().iloc[-1] if len(ret) >= 60 else np.nan
+            latest_data['Down_Day_Ratio_20'] = (ret < 0).rolling(20, min_periods=10).mean().iloc[-1] if len(ret) >= 20 else np.nan
+            down_vol_sum = vol.where(ret < 0, 0).rolling(20, min_periods=10).sum()
+            all_vol_sum = vol.rolling(20, min_periods=10).sum()
+            latest_data['Down_Volume_Ratio_20'] = (down_vol_sum.iloc[-1] / (all_vol_sum.iloc[-1] + 1e-8)) if len(down_vol_sum) and len(all_vol_sum) else np.nan
+            gap = df_for_indicators['시가'] / df_for_indicators['종가'].shift(1) - 1
+            latest_data['Gap_Mean_20'] = gap.rolling(20, min_periods=10).mean().iloc[-1] if len(gap) >= 20 else np.nan
+            intraday = (df_for_indicators['종가'] - df_for_indicators['시가']) / (df_for_indicators['고가'] - df_for_indicators['저가'] + 1e-8)
+            latest_data['Intraday_Strength_20'] = intraday.rolling(20, min_periods=10).mean().iloc[-1] if len(intraday) >= 20 else np.nan
+            amihud = (ret.abs() / (vol + 1e-8)).rolling(20, min_periods=10).mean()
+            latest_data['Amihud_Illiq_20'] = np.log1p(amihud).iloc[-1] if len(amihud) >= 20 else np.nan
+        except:
+            for k in ['Downside_Vol_20', 'Upside_Downside_Vol_Ratio_20', 'Return_Skew_60', 'Down_Day_Ratio_20', 'Down_Volume_Ratio_20', 'Gap_Mean_20', 'Intraday_Strength_20', 'Amihud_Illiq_20']:
+                latest_data[k] = np.nan
+        
+        # disparity_20
+        ma20 = df_for_indicators['종가'].rolling(20).mean()
+        latest_data['disparity_20'] = (last_close / ma20.iloc[-1] * 100) if len(ma20) and pd.notna(ma20.iloc[-1]) else np.nan
+        
+        # VWAP Disparity 5
+        try:
+            if len(df_for_indicators) >= 5:
+                tp = (df_for_indicators['고가'] + df_for_indicators['저가'] + df_for_indicators['종가']) / 3
+                money = tp * df_for_indicators['거래량']
+                vol_sum = df_for_indicators['거래량'].rolling(5).sum().iloc[-1]
+                money_sum = money.rolling(5).sum().iloc[-1]
+                # 거래량 0 방지 (경고 제거)
+                if pd.notna(vol_sum) and vol_sum > 0 and pd.notna(money_sum):
+                    vwap5 = money_sum / vol_sum
+                    latest_data['VWAP_Disparity_5'] = (last_close / vwap5 - 1) * 100 if vwap5 > 0 else np.nan
+                else:
+                    latest_data['VWAP_Disparity_5'] = np.nan
+            else:
+                latest_data['VWAP_Disparity_5'] = np.nan
+        except:
+            latest_data['VWAP_Disparity_5'] = np.nan
+        
+        # Max_Drawdown_20
+        try:
+            roll_max = df_for_indicators['고가'].rolling(20).max()
+            dd = (df_for_indicators['저가'] / roll_max - 1).rolling(20).min()
+            latest_data['Max_Drawdown_20'] = dd.iloc[-1] * 100 if len(dd) and pd.notna(dd.iloc[-1]) else np.nan
+        except:
+            latest_data['Max_Drawdown_20'] = np.nan
+        
+        # 등락율(5D)
+        latest_data['등락율(5D)'] = df_for_indicators['종가'].pct_change(5).iloc[-1] * 100 if len(df_for_indicators) >= 6 else np.nan
+        
+        # Trend_Pullback_Score
+        try:
+            ma20_slope = calculate_normalized_linear_regression_slope_latest(ma20, window=5)
+            mean_20 = df_for_indicators['종가'].rolling(20).mean()
+            std_20 = df_for_indicators['종가'].rolling(20).std().replace(0, np.nan)
+            z_score = (df_for_indicators['종가'] - mean_20) / std_20
+            z_score = z_score.fillna(0)
+            z_latest = z_score.iloc[-1]
+            
+            if pd.notna(ma20_slope) and pd.notna(z_latest):
+                base = abs(z_latest) * ma20_slope
+                if ma20_slope > 0 and z_latest < 0:
+                    latest_data['Trend_Pullback_Score'] = base * 1.0
+                elif ma20_slope > 0:
+                    latest_data['Trend_Pullback_Score'] = base * 0.3
+                else:
+                    latest_data['Trend_Pullback_Score'] = base * 0.1
+            else:
+                latest_data['Trend_Pullback_Score'] = np.nan
+        except:
+            latest_data['Trend_Pullback_Score'] = np.nan
+        
+        latest_data['종목명'] = name
+        latest_data['현재가'] = latest_current_price
+        latest_data['기준일가'] = reference_date_price
+        latest_data['전날종가'] = float(df_price_full.iloc[-2]['종가']) if len(df_price_full) >= 2 else latest_current_price
+        latest_data['종목코드'] = ticker
+        
+        return latest_data, actual_analysis_date
+    except Exception as e:
+        return None, None
+
+
+def _fetch_all_price_data(stock_records, start_date, end_date, max_workers=8):
+    """
+    1단계: 전 종목 주가 데이터 병렬 수집 (ThreadPoolExecutor, I/O 바운드)
+    - 타임아웃 8초 + 재시도 1회로 블로킹 방지
+    - 전체 배치 타임아웃: 300초 (5분)
+    - 멈춘 워커 즉시 강제 해제
+    """
+    # KRX 로그인 보장 (메인 프로세스에서 1회)
+    _ensure_krx_login()
+    
+    # 소스 프로브 (첫 종목만)
+    if stock_records:
+        # 프로브로 성공 소스 결정 (캐시에 저장됨: _SUCCESSFUL_FDR_SOURCE)
+        probe_stock_ohlcv_source(stock_records[0]['종목코드'], end_date=end_date)
+    
+    fetch_start = (pd.to_datetime(start_date) - timedelta(days=60)).strftime('%Y-%m-%d')
+    
+    # 성공한 소스명에서 직접 prefix 구성 (NAVER: 또는 KRX:)
+    source_name = _SUCCESSFUL_FDR_SOURCE[0] if _SUCCESSFUL_FDR_SOURCE else 'NAVER'
+    source_prefix = 'NAVER:' if source_name == 'NAVER' else 'KRX:'
+    log_info(f"주가 수집 소스 고정: {source_prefix} (폴백 생략)")
+    
+    price_data_map = {}
+    failed_tickers = []
+    
+    # ThreadPoolExecutor로 fetching (I/O 바운드, 세션 재사용)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        batch_start_time = time.time()
+        BATCH_TIMEOUT = 1800  # 30분 전체 타임아웃 (2500종목 여유있게)
+        
+        # 최소 필요 데이터 일수: 핵심 지표(20, 60, 120, 240일 MA) + 버퍼
+        MIN_DATA_DAYS = 250  # 240일 MA + 여유
+        
+        def _fetch_one_direct(stock_info):
+            """캐시된 소스로 직접 요청 (폴백 없음, 타임아웃 8초)"""
+            ticker = stock_info['종목코드']
+            try:
+                symbol = f"{source_prefix}{ticker}"
+                df = _fetch_fdr_with_retry(symbol, fetch_start, end_date)
+                if df is not None and not df.empty and len(df) >= MIN_DATA_DAYS:
+                    df_reset = df.reset_index()
+                    df_reset.columns = ['date'] + [c for c in df_reset.columns[1:]]
+                    df_reset['date'] = df_reset['date'].dt.strftime('%Y-%m-%d')
+                    return ticker, df_reset.to_dict('records')
+                elif df is not None and not df.empty:
+                    # 데이터는 있지만 부족한 경우 - 디버그 레벨로만 로깅 (신규상장 등 정상 케이스)
+                    log_info(f"데이터 부족 스킵 ({ticker}): {len(df)}일 (최소 {MIN_DATA_DAYS}일 필요)")
+                else:
+                    log_warning(f"데이터 없음 ({ticker})")
+            except Exception as e:
+                log_warning(f"수집 에러 ({ticker}): {type(e).__name__}: {e}")
+            return ticker, None
+        
+        # 세마포어로 동시 요청 수 제한 (API 과부하 방지)
+        import threading
+        request_semaphore = threading.Semaphore(4)  # 동시 4개만 허용
+        
+        def _fetch_one_direct_limited(stock_info):
+            with request_semaphore:
+                time.sleep(0.05)  # 요청 간 50ms 간격
+                return _fetch_one_direct(stock_info)
+        
+        futures = {executor.submit(_fetch_one_direct_limited, r): r for r in stock_records}
+        completed = 0
+        total = len(stock_records)
+        pending = set(futures.keys())
+        
+        while pending:
+            if time.time() - batch_start_time > BATCH_TIMEOUT:
+                log_warning(f"배치 타임아웃({BATCH_TIMEOUT}초) - 남은 {len(pending)}개 종목 강제 취소")
+                for fut in pending:
+                    fut.cancel()
+                    failed_tickers.append(futures[fut]['종목코드'])
+                break
+            
+            done, pending = concurrent.futures.wait(pending, timeout=1.0, 
+                                                     return_when=concurrent.futures.FIRST_COMPLETED)
+            
+            for fut in done:
+                try:
+                    ticker, data = fut.result()
+                    if data:
+                        price_data_map[ticker] = data
+                    else:
+                        failed_tickers.append(ticker)
+                except Exception as e:
+                    ticker = futures[fut].get('종목코드', 'Unknown')
+                    failed_tickers.append(ticker)
+                    log_warning(f"종목 처리 예외 ({ticker}): {e}")
+                completed += 1
+                
+                if completed % 10 == 0 or completed == total:
+                    log_progress(f"주가 수집 진행", completed, total)
+        
+        for fut in pending:
+            if not fut.done():
+                fut.cancel()
+                failed_tickers.append(futures[fut]['종목코드'])
+    
+    if failed_tickers:
+        log_warning(f"수집 실패 종목 ({len(failed_tickers)}개): {failed_tickers[:20]}{'...' if len(failed_tickers) > 20 else ''}")
+    
+    log_info(f"✅ 주가 데이터 수집 완료: {len(price_data_map)}/{total}개 종목 (실패: {len(failed_tickers)}개)")
+    return price_data_map
+
+
+def fetch_all_data(stock_list, selected_analysis_date, use_cache=True):
+    """
+    전체 데이터 수집 메인 함수 (2단계 파이프라인)
+    
+    1단계: ThreadPoolExecutor로 주가 데이터 수집 (I/O 바운드)
+    2단계: ProcessPoolExecutor로 지표 계산 (CPU 바운드)
     """
     today = datetime.now()
     end_date_for_fetch = today.strftime('%Y-%m-%d')
     start_date_for_fetch = (today - timedelta(days=450)).strftime('%Y-%m-%d')
 
     latest_fs_df = get_fs_data_from_pit(stock_list, selected_analysis_date, use_cache)
-    # 재무데이터는 현재 피처/학습 파이프라인에서 사용하지 않으므로
-    # 빈 DF라도 분석을 중단하지 않음
 
     if selected_analysis_date.date() < today.date():
         log_info(f"과거 분석(기준일={selected_analysis_date.strftime('%Y-%m-%d')}): 기준일의 시가총액 데이터를 수집합니다.")
         try:
-            # 통일된 함수 사용
             df_marcap_past = fetch_stock_list_for_date(selected_analysis_date)
-            
             stock_list = pd.merge(
                 stock_list[['종목코드', '종목명']],
                 df_marcap_past[['종목코드', '상장주식수']],
-                on='종목코드',
-                how='inner'
+                on='종목코드', how='inner'
             )
             log_info(f"기준일({selected_analysis_date.strftime('%Y-%m-%d')})에 존재했던 {len(stock_list)}개 종목으로 필터링되었습니다.")
         except Exception as e:
-            log_warning(f"기준일({selected_analysis_date.strftime('%Y-%m-%d')})의 시가총액 데이터를 가져오는 데 실패했습니다: {e}")
+            log_warning(f"기준일 시가총액 데이터 수집 실패: {e}")
             log_info("최신 상장주식수 정보를 사용하여 분석을 계속합니다.")
             
-    # 공통 함수를 사용하여 실제 거래일 확인
     actual_trading_date = get_actual_trading_date(selected_analysis_date)
-    today = datetime.now().date()
-    is_today_analysis = actual_trading_date == today
+    selected_analysis_date_ts = pd.Timestamp(selected_analysis_date)
     
-    # 실시간 거시경제 데이터 수집 (캐시 사용 안함)
+    # 거시경제 데이터 수집
     log_info("🔄 실시간 거시경제 데이터를 수집합니다")
     macro_df = _fetch_macro_data(start_date_for_fetch, end_date_for_fetch)
     if macro_df.empty:
-        log_warning("거시 경제 데이터 수집에 실패했지만 분석을 계속합니다.")
-        # 거시경제 데이터 없이도 분석 계속
-    all_feature_data, all_actual_dates = [], []
-    stock_records = stock_list.to_dict('records')
+        log_warning("거시 경제 데이터 수집 실패, 분석 계속")
     
-    # 배치 단위로 처리하여 메모리 효율성 향상
-    batch_size = 100
-    total_batches = (len(stock_records) + batch_size - 1) // batch_size
+    stock_records = stock_list.to_dict('records')
     total_stocks = len(stock_records)
     
-    log_info(f"주식 분석 시작: {total_stocks:,}개 종목을 {total_batches}개 그룹으로 처리 (예상 5-10분)")
-    if stock_records:
-        probe_stock_ohlcv_source(stock_records[0]['종목코드'], end_date=end_date_for_fetch)
+    # 워커 수 설정
+    import os
+    io_workers = 6  # NAVER API 연결 제한 고려해 6개로 제한
+    cpu_workers = min(8, os.cpu_count() or 4)
     
-    for i in range(0, len(stock_records), batch_size):
-        batch = stock_records[i:i + batch_size]
+    log_info(f"📊 1단계: 주가 데이터 수집 시작 ({total_stocks:,}개 종목, I/O 워커 {io_workers}개)")
+    
+    # 1단계: 주가 데이터 수집 (메인 프로세스, ThreadPool)
+    price_data_map = _fetch_all_price_data(stock_records, start_date_for_fetch, end_date_for_fetch, max_workers=io_workers)
+    
+    if not price_data_map:
+        log_error("수집된 주가 데이터가 없습니다.")
+        return pd.DataFrame(), None
+    
+    # 2단계: 지표 계산 (ProcessPoolExecutor, CPU 바운드)
+    log_info(f"🧮 2단계: 기술적 지표 계산 시작 (CPU 워커 {cpu_workers}개)")
+    
+    # 계산에 필요한 인자만 준비 (피클링 최소화)
+    calc_args = []
+    for r in stock_records:
+        ticker = r['종목코드']
+        if ticker in price_data_map:
+            calc_args.append((
+                ticker,
+                r['종목명'],
+                r['상장주식수'],
+                price_data_map[ticker],  # dict list (직렬화 효율적)
+                selected_analysis_date_ts
+            ))
+    
+    all_feature_data = []
+    all_actual_dates = []
+    batch_size = 100
+    total_batches = (len(calc_args) + batch_size - 1) // batch_size
+    
+    for i in range(0, len(calc_args), batch_size):
+        batch = calc_args[i:i + batch_size]
         current_batch = i // batch_size + 1
-        batch_start = i + 1
-        batch_end = min(i + batch_size, total_stocks)
         
-        # 첫 번째 그룹에서만 상세 설명 표시
         if current_batch == 1:
-            log_info("가격, 거래량, 기술적 지표 계산 중...")
+            log_info("기술적 지표 계산 중...")
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:  # 워커 수 감소
-            future_to_stock = {executor.submit(fetch_and_process_ticker_data, r, start_date_for_fetch, end_date_for_fetch, selected_analysis_date, latest_fs_df): r for r in batch}
+        with concurrent.futures.ProcessPoolExecutor(max_workers=cpu_workers) as executor:
+            futures = {executor.submit(_calculate_indicators_for_ticker, arg): arg for arg in batch}
+            completed = 0
             
-            # 전체 진행률을 포함한 진행률 표시
-            total_processed = (current_batch - 1) * batch_size
-            total_remaining = total_stocks - total_processed
-            
-            # 통합된 진행률 표시
-            completed_count = 0
-            total_count = len(batch)
-            
-            # 배치 시작 로그
-            log_info(f"그룹 {current_batch}/{total_batches} 처리 시작 ({total_count}개 종목)")
-            
-            for future in concurrent.futures.as_completed(future_to_stock):
-                try:
-                    result, analysis_date = future.result()
-                    if result and analysis_date: 
-                        all_feature_data.append(result)
-                        all_actual_dates.append(analysis_date)
-                    
-                    completed_count += 1
-                    progress_percent = (completed_count / total_count) * 100
-                    
-                    # 매번 진행률 업데이트 (같은 줄에서) - PROGRESS 접두사 유지
-                    if completed_count % 10 == 0 or completed_count == total_count:
-                        log_progress(f"그룹 {current_batch}/{total_batches} 처리 중", 
-                                   completed_count, total_count,
-                                   context={'batch': current_batch, 'total_batches': total_batches})
-                    
-                except Exception as e: 
-                    completed_count += 1
-                    log_warning(f"종목 처리 중 오류 발생: {e}", 
-                               context={'batch': current_batch, 'stock': future_to_stock.get(future, {}).get('종목명', 'Unknown')})
-                    continue
-            
-            # 배치 완료 로그
-            log_info(f"그룹 {current_batch}/{total_batches} 처리 완료 ({completed_count}/{total_count}개 종목)")
+            for fut in concurrent.futures.as_completed(futures):
+                result, analysis_date = fut.result()
+                if result and analysis_date:
+                    all_feature_data.append(result)
+                    all_actual_dates.append(analysis_date)
+                completed += 1
+                if completed % 20 == 0 or completed == len(batch):
+                    log_progress(f"지표 계산 배치 {current_batch}/{total_batches}", completed, len(batch))
         
-        # 배치 간 메모리 정리
+        log_info(f"   ✅ 배치 {current_batch}/{total_batches} 완료 ({len([x for x in all_feature_data if x])}개 누적)")
         gc.collect()
-        time.sleep(0.1)  # API 부하 방지
-        
-        success_count = len(all_feature_data)
-        progress_percent = (current_batch / total_batches) * 100
-        log_info(f"   ✅ 그룹 {current_batch}/{total_batches} 완료! ({progress_percent:.1f}% 진행, {success_count:,}개 종목 수집)")
     
-    log_info(f"🎉 종목 데이터 수집 완료! 총 {len(all_feature_data):,}개 종목")
-    log_info("🔄 데이터 정제 및 거시경제 지표 병합 중...")
+    log_info(f"🎉 전체 종목 지표 계산 완료: {len(all_feature_data):,}개 종목")
     
-    if not all_feature_data: return pd.DataFrame(), None
+    if not all_feature_data:
+        return pd.DataFrame(), None
+    
+    # 후처리 (기존 로직 유지)
     final_df = pd.DataFrame(all_feature_data)
-
     final_df['date'] = pd.to_datetime(all_actual_dates)
     final_df = final_df.sort_values('date')
     macro_df = macro_df.sort_index()
     
-    # 인덱스를 datetime으로 확실히 변환하고 dtype 통일 (나노초로 통일)
     if not isinstance(macro_df.index, pd.DatetimeIndex):
         macro_df.index = pd.to_datetime(macro_df.index)
     
-    # 날짜 dtype 통일 (나노초로 통일하여 merge_asof 호환성 보장)
     final_df['date'] = pd.to_datetime(final_df['date']).astype('datetime64[ns]')
     macro_df.index = pd.to_datetime(macro_df.index).astype('datetime64[ns]')
     
-    log_info("   🔗 거시경제 지표(KOSPI, USD/KRW, VIX)를 종목 데이터와 병합 중...")
-    
-    # merge_asof 대신 더 안전한 방법 사용
     try:
         final_df = pd.merge_asof(final_df, macro_df, left_on='date', right_index=True, direction='backward')
     except Exception as e:
-        log_warning(f"   ⚠️ merge_asof 실패, 일반 merge로 시도: {e}")
-        # 일반 merge로 대체 (날짜 dtype 통일 보장)
-        macro_df_reset = macro_df.reset_index()
-        macro_df_reset.rename(columns={'index': 'date'}, inplace=True)
-        # 날짜 dtype 통일
+        log_warning(f"merge_asof 실패, 일반 merge 사용: {e}")
+        macro_df_reset = macro_df.reset_index().rename(columns={'index': 'date'})
         macro_df_reset['date'] = pd.to_datetime(macro_df_reset['date']).astype('datetime64[ns]')
         final_df['date'] = pd.to_datetime(final_df['date']).astype('datetime64[ns]')
         final_df = pd.merge(final_df, macro_df_reset, on='date', how='left')
     
-    # Relative_Strength_20 피처는 제거됨
-    # 임시 컬럼 정리
-    if '종목_수익률_20일_임시' in final_df.columns:
-        final_df.drop(columns=['종목_수익률_20일_임시'], inplace=True, errors='ignore')
-    
-    log_info("   🧹 무한대 값 및 결측값 정제 중...")
     final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     final_df.dropna(subset=['종목코드', '종목명', '현재가'], inplace=True)
-
-    # [Phase 2-1] 일자별 횡단면 백분위 랭크 (_cs) — 학습 경로와 동일 변환
+    
+    # 횡단면 정규화
     before_cols = set(final_df.columns)
     add_cross_sectional_ranks(final_df, CROSS_SECTIONAL_FEATURE_COLS)
     added_cs = sorted(set(final_df.columns) - before_cols)
     if added_cs:
         log_info(f"   ✅ 횡단면 정규화(_cs) 추가: {len(added_cs)}개 컬럼")
-    else:
-        log_warning("   ⚠️ 횡단면 정규화(_cs) 대상 컬럼이 없어 건너뜀")
     
     if final_df.empty:
-        log_error("피처 생성 후 유효한 데이터가 없습니다.")
+        log_error("피처 생성 후 유효 데이터 없음")
         return pd.DataFrame(), None
-        
-    actual_analysis_date_final = pd.to_datetime(final_df['date'].mode()[0])
     
-    log_info("✅ 모든 피처 데이터 생성 완료!")
-    log_info(f"   📊 최종 데이터: {len(final_df):,}개 종목, {len(final_df.columns)}개 피처")
+    actual_analysis_date_final = pd.to_datetime(final_df['date'].mode()[0])
+    log_info(f"✅ 모든 피처 데이터 생성 완료: {len(final_df):,}개 종목, {len(final_df.columns)}개 피처")
     return final_df, actual_analysis_date_final

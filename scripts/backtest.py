@@ -116,6 +116,7 @@ import FinanceDataReader as fdr
 import ensemble
 import data_processor
 import ml_model
+from data_fetcher import get_actual_trading_date
 from logger import (log_info, log_error, log_critical, log_warning, shutdown_logger,
                    start_analysis_report, log_data_collection_status, log_processing_status, 
                    log_final_results, log_performance_info, log_saved_files, complete_analysis_report,
@@ -125,7 +126,7 @@ from path_manager import path_manager
 # --- 설정 변수 (통일된 경로 사용) ---
 # 기본값 설정 (파라미터로 제공되지 않을 경우 사용)
 DEFAULT_TEST_START_DATE = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
-DEFAULT_TEST_END_DATE = datetime.now().strftime('%Y-%m-%d')
+DEFAULT_TEST_END_DATE = get_actual_trading_date(datetime.now()).strftime('%Y-%m-%d')
 WEIGHTS_FILE = str(path_manager.get_weights_path())
 # cuML 모델 경로 (우선 사용)
 CUML_MODEL_FILE = str(path_manager.data_dir / 'cuml_ensemble_model.joblib')
