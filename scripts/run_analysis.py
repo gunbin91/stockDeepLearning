@@ -13,6 +13,11 @@
 - 결과 저장 및 보고서 생성
 """
 
+# eventlet 몽키 패치 (최상단에 위치해야 함)
+# 웹소켓 통신을 위한 비동기 처리 라이브러리
+import eventlet
+eventlet.monkey_patch()
+
 import pandas as pd
 from datetime import datetime
 import argparse

@@ -19,9 +19,14 @@ import numpy as np
 from typing import Optional
 import FinanceDataReader as fdr
 import data_fetcher  # KRX 세션 패치 적용
+from data_fetcher import (
+    _calc_atr_vectorized,
+    _calc_rsi_vectorized,
+    _calc_adx_vectorized,
+    calculate_normalized_linear_regression_slope_latest as calculate_normalized_linear_regression_slope_latest,
+)
 from pykrx import stock
 from datetime import datetime, timedelta
-import pandas_ta as ta
 import concurrent.futures
 from tqdm import tqdm
 import os
@@ -503,40 +508,34 @@ def recompute_exclude_rank_panel(df: pd.DataFrame, apply_daily_exclusion: bool =
     return pd.concat(parts, ignore_index=True)
 
 
-def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exclusion=None):
+def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exclusion=None,
+                              marcap_data=None, financial_data=None):
     """
     단일 종목 피처 계산 함수 (CPU 작업)
     
     ProcessPoolExecutor로 병렬 처리되는 CPU 작업만 수행합니다.
-    전역 변수(_global_marcap_data, _global_financial_data)를 사용하여
-    fork 방식에서 Copy-on-Write로 효율적으로 데이터에 접근합니다.
+    인자로 전달받은 데이터만 사용하며 전역 변수에 의존하지 않습니다.
     
     Args:
         ticker: 종목코드
         df_price: 다운로드된 주가 데이터 (시가, 종가, 고가, 저가, 거래량)
         stock_name: 종목명 (선택사항)
-        apply_daily_exclusion: None일 경우 전역 변수 사용, True일 경우 당일 제외 조건(1000억 미만 등) 적용, False일 경우 학습 모드로 cond3 제외
+        apply_daily_exclusion: True일 경우 당일 제외 조건(1000억 미만 등) 적용, False일 경우 학습 모드로 cond3 제외
+        marcap_data: 시가총액 데이터 (DataFrame, Code, date, Marcap, Stocks 컬럼 포함)
+        financial_data: 재무 데이터 (DataFrame, Code, date, PER, PBR, ROE, EPS, BPS 컬럼 포함)
         
     Returns:
         pandas.DataFrame: 처리된 종목 데이터
     """
-    global _global_apply_daily_exclusion
-    
-    # apply_daily_exclusion이 None이면 전역 변수 사용
-    if apply_daily_exclusion is None:
-        apply_daily_exclusion = _global_apply_daily_exclusion
-    global _global_marcap_data, _global_financial_data
-    
     try:
         df = df_price.copy()
         
-        # 전역 변수 검증
-        if _global_marcap_data is None:
-            log_error(f"종목 {ticker} 피처 계산 중 오류: 전역 시가총액 데이터가 설정되지 않았습니다.")
+        # 시가총액 데이터 병합
+        if marcap_data is None:
+            log_error(f"종목 {ticker} 피처 계산 중 오류: 시가총액 데이터가 전달되지 않았습니다.")
             return None
-        
-        # 시가총액 데이터 병합 (전역 변수 사용) + 결측 시 Stocks×종가 보완
-        df_marcap_ticker = _global_marcap_data[_global_marcap_data['Code'] == ticker].copy()
+            
+        df_marcap_ticker = marcap_data[marcap_data['Code'] == ticker].copy()
         if df_marcap_ticker.empty: 
             log_warning(f"⚠️ {ticker} 종목의 시가총액 데이터가 없습니다.")
             return None
@@ -577,14 +576,9 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exc
 
         df.rename(columns={'Marcap': '시가총액'}, inplace=True)
         
-        # 시가총액 데이터 메모리 해제
-        del df_marcap_ticker
-        gc.collect()
-        
-        # 재무데이터는 현재 모델 피처에서 사용하지 않음 (DISABLE_PYKRX_FINANCIAL_FETCH=True)
-        # 재활성화 시에만 병합하고, 미사용 시 빈 컬럼을 만들지 않음
-        if _global_financial_data is not None and not _global_financial_data.empty:
-            df_financial_ticker = _global_financial_data[_global_financial_data['Code'] == ticker].copy()
+        # 재무데이터 병합 (전달된 경우만)
+        if financial_data is not None and not financial_data.empty:
+            df_financial_ticker = financial_data[financial_data['Code'] == ticker].copy()
             if not df_financial_ticker.empty:
                 df_financial_ticker.sort_values(by='date', inplace=True)
                 df_financial_ticker['date'] = pd.to_datetime(df_financial_ticker['date']).astype('datetime64[ns]')
@@ -598,29 +592,27 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exc
                     df = df.reset_index()
                     df = pd.merge(df, df_financial_ticker[['date', 'PER', 'PBR', 'ROE', 'EPS', 'BPS']], on='date', how='left')
                     df = df.set_index('date')
-                del df_financial_ticker
-                gc.collect()
         
-        # ATR 계산 (5일, 20일, 60일)
+        # ATR 계산 (5일, 20일, 60일) - 벡터화된 구현 사용
         try:
-            atr_5 = df.ta.atr(high='고가', low='저가', close='종가', length=5)
-            atr_20 = df.ta.atr(high='고가', low='저가', close='종가', length=20)
-            atr_60 = df.ta.atr(high='고가', low='저가', close='종가', length=60)
+            atr_5 = _calc_atr_vectorized(df['고가'], df['저가'], df['종가'], length=5)
+            atr_20 = _calc_atr_vectorized(df['고가'], df['저가'], df['종가'], length=20)
+            atr_60 = _calc_atr_vectorized(df['고가'], df['저가'], df['종가'], length=60)
             
             # ATRr_5 계산 (기준 - 1W): "최근 1주일 변동성 수준"
-            if atr_5 is not None:
+            if atr_5 is not None and len(atr_5) > 0:
                 df['ATRr_5'] = (atr_5 / df['종가']) * 100
             else:
                 df['ATRr_5'] = np.nan
             
             # ATRr_20 계산 (기준 - 1M)
-            if atr_20 is not None:
+            if atr_20 is not None and len(atr_20) > 0:
                 df['ATRr_20'] = (atr_20 / df['종가']) * 100
             else:
                 df['ATRr_20'] = np.nan
             
             # ATRr_60 계산 (기준 - 3M)
-            if atr_60 is not None:
+            if atr_60 is not None and len(atr_60) > 0:
                 df['ATRr_60'] = (atr_60 / df['종가']) * 100
             else:
                 df['ATRr_60'] = np.nan
@@ -630,8 +622,13 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exc
             df['ATRr_20'] = np.nan
             df['ATRr_60'] = np.nan
         
+        # ADX 계산 - 벡터화된 구현 사용
         try:
-            df.ta.adx(high='고가', low='저가', close='종가', length=14, append=True)
+            adx_14, _, _ = _calc_adx_vectorized(df['고가'], df['저가'], df['종가'], length=14)
+            if adx_14 is not None and len(adx_14) > 0:
+                df['ADX_14'] = adx_14
+            else:
+                df['ADX_14'] = np.nan
         except Exception as e:
             log_warning(f"ADX 계산 실패 ({ticker}): {e}")
             df['ADX_14'] = np.nan
@@ -652,9 +649,9 @@ def calculate_ticker_features(ticker, df_price, stock_name=None, apply_daily_exc
             log_warning(f"CLV 계산 실패 ({ticker}): {e}")
             df['CLV'] = np.nan
         
-        # RSI_14 계산
+        # RSI_14 계산 - 벡터화된 구현 사용
         try:
-            rsi_14 = df.ta.rsi(close='종가', length=14)
+            rsi_14 = _calc_rsi_vectorized(df['종가'], length=14)
             
             # RSI_Signal_Oscillator 계산: RSI_14 - RSI_14.rolling(9).mean()
             # MACD 원리를 RSI에 적용한 것으로, 양수면 RSI가 평균을 뚫고 올라가는 중(골든크로스)
@@ -1155,9 +1152,6 @@ def _fetch_and_prepare_data(
     )
     if apply_daily_exclusion is not None and skip_factor_scores and effective_apply_daily_exclusion:
         log_info("   ℹ️ skip_factor_scores=True 이지만 apply_daily_exclusion=True → 시총 1000억 미만 랭킹 제외(cond3) 적용")
-    set_global_feature_data(
-        df_marcap_long, df_financial_long, apply_daily_exclusion=effective_apply_daily_exclusion
-    )
     
     # =================================================================
     # 2단계: ProcessPoolExecutor로 피처 계산 (CPU 작업)
@@ -1169,15 +1163,12 @@ def _fetch_and_prepare_data(
         # 논리 프로세서 수의 2/3 사용 (최소 2개)
         cpu_workers = max(2, int((os.cpu_count() or 8) * 2 / 3))
         
-        # ProcessPoolExecutor: Windows spawn에서도 전역 시총/Exclude 설정이 전달되도록 initializer 사용
-        with concurrent.futures.ProcessPoolExecutor(
-            max_workers=cpu_workers,
-            initializer=_init_feature_worker,
-            initargs=(df_marcap_long, df_financial_long, effective_apply_daily_exclusion),
-        ) as executor:
-            # 전역 변수를 사용하므로 df_marcap_long, df_financial_long 인자 제거
-            # 종목명 정보도 함께 전달
-            stock_name_map = {row['종목코드']: row.get('종목명', None) for row in stock_records}
+        # 종목명 정보 준비
+        stock_name_map = {row['종목코드']: row.get('종목명', None) for row in stock_records}
+        
+        # ProcessPoolExecutor: initargs 제거, 데이터를 직접 인자로 전달
+        with concurrent.futures.ProcessPoolExecutor(max_workers=cpu_workers) as executor:
+            # 종목별 필요한 데이터만 슬라이스하여 전달 (pickle 크기 최소화)
             future_to_ticker = {
                 executor.submit(
                     calculate_ticker_features,
@@ -1185,6 +1176,8 @@ def _fetch_and_prepare_data(
                     df_price,
                     stock_name_map.get(ticker),
                     effective_apply_daily_exclusion,
+                    df_marcap_long[df_marcap_long['Code'] == ticker],  # 종목별 슬라이스만 전달
+                    df_financial_long[df_financial_long['Code'] == ticker] if not df_financial_long.empty else None,
                 ): ticker
                 for ticker, df_price in downloaded_data.items()
             }
@@ -1193,7 +1186,7 @@ def _fetch_and_prepare_data(
             
             for future in concurrent.futures.as_completed(future_to_ticker):
                 try:
-                    result_df = future.result(timeout=300)  # 5분 타임아웃
+                    result_df = future.result(timeout=60)  # 5분 → 1분 타임아웃
                     if result_df is not None and isinstance(result_df, pd.DataFrame):
                         # 데이터 무결성 검증
                         if not result_df.empty and '종목코드' in result_df.columns:
@@ -1208,7 +1201,7 @@ def _fetch_and_prepare_data(
                 except concurrent.futures.TimeoutError:
                     failed_count += 1
                     ticker = future_to_ticker.get(future, 'Unknown')
-                    log_error(f"⏱️ 종목 {ticker} 피처 계산 타임아웃 (5분 초과)")
+                    log_error(f"⏱️ 종목 {ticker} 피처 계산 타임아웃 (1분 초과)")
                 except Exception as e:
                     failed_count += 1
                     ticker = future_to_ticker.get(future, 'Unknown')
@@ -1218,12 +1211,9 @@ def _fetch_and_prepare_data(
                 # 진행률 로그 메시지 (PROGRESS 접두사 자동 추가됨) - 매번 출력하되 같은 줄에서 덮어쓰기
                 log_progress("피처 계산", completed_count, total_calc_count)
                 # 주기적 메모리 정리 (10개마다)
-                if completed_count % 10 == 0:
+                if completed_count % 5 == 0:
                     gc.collect()
     finally:
-        # 전역 변수 초기화 (메모리 해제)
-        clear_global_feature_data()
-        
         # 다운로드된 데이터 메모리 해제
         del downloaded_data
         gc.collect()
